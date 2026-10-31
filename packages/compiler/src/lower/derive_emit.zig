@@ -916,8 +916,10 @@ fn emitMarkCall(b: *L.Builder, callee: Link.SymName, cell: Ir.ValueId) error{Out
 /// Lower an ERASED trace unit `descriptor$trace$<ty>(self: rawptr) -> ()`: called by the
 /// collector (and by a container walk) with `self` = the byte address of a `ty`-typed cell,
 /// it marks the managed heap object(s) that cell references. Three shapes:
-///  * `str` — the cell holds a heap buffer pointer at offset 0 → `gc_mark_leaf` it (a leaf:
-///    the buffer holds no further managed pointers, so the bit alone keeps it, no scan).
+///  * `str`/`cstr` — the cell holds a buffer pointer at offset 0 → `gc_mark_leaf` it (a leaf:
+///    the buffer holds no further managed pointers, so the bit alone keeps it, no scan). A
+///    `cstr` may point into C memory or into the middle of a buffer; the conservative mark
+///    ignores the first and resolves the second to its cell.
 ///  * a managed box (`Ref`/`gc_array`) — the cell holds a pointee/header pointer at offset 0
 ///    → `gc_mark` it (conservative: the pointee may itself hold managed pointers, so it is
 ///    pushed and scanned; a leaf pointee like `Ref[int]`'s int cell scans to a no-op).
@@ -955,7 +957,7 @@ fn lowerErasedTrace(
     const p_addr = try b.emit(.{ .slot_addr = p_ptr }, int_ty);
     const self_base = try b.emit(.{ .load = .{ .addr = p_addr, .ty = rawptr_ty } }, rawptr_ty);
 
-    if (ty.kind == .str) {
+    if (ty.kind == .str or ty.kind == .cstr) {
         const buf = try b.emit(.{ .load = .{ .addr = self_base, .ty = int_ty } }, int_ty);
         try emitMarkCall(&b, L.gc_mark_leaf_sym, buf);
     } else if (L.isRefTy(&b, ty)) {

@@ -45,6 +45,36 @@ pub fn to_cstr(s: str) -> rawptr {
     return text.window(buf, 0, n + 1)
 }
 
+# The cstr of std/ffi: the same NUL-terminated gc copy as `to_cstr`, which the collector
+# keeps alive while toy code holds the cstr, as it would a rawptr. The cell is allocated
+# before the copy, so the copy is never held across an allocation.
+pub fn cstr_of(s: str) -> cstr {
+    cell := gc_alloc(8)
+    unsafe { store(cell, to_cstr(s)) }
+    c: cstr = unsafe { load(cell) }
+    return c
+}
+
+# A cstr is not a rawptr to toy code, so its address is read back through a cell.
+fn cstr_addr(c: cstr) -> rawptr {
+    cell := gc_alloc(8)
+    unsafe { store(cell, c) }
+    p: rawptr = unsafe { load(cell) }
+    return p
+}
+
+pub fn cstr_is_null(c: cstr) -> bool {
+    cell := gc_alloc(8)
+    unsafe { store(cell, c) }
+    p: int = unsafe { load(cell) }
+    return p == 0
+}
+
+pub fn cstr_to_str(c: cstr) -> str {
+    if cstr_is_null(c) { panic("to_str of a null cstr") }
+    return from_cstr(cstr_addr(c))
+}
+
 # The calling thread's errno, as the last failed libSystem call left it.
 pub fn errno() -> int {
     return load_i32(unsafe { __error() })

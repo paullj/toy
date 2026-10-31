@@ -41,8 +41,8 @@ fn isRefType(t: *const Typecheck, ty: Type) bool {
 /// single field is `int`, so the by-value graph is a finite acyclic DAG. `memo` (keyed on the
 /// nominal id + the enum flag) collapses the DAG's shared subtrees.
 ///
-/// `count_str` decides whether a `str` component (a managed leaf whose heap buffer is reached
-/// only by tracing the enclosing cell) makes the aggregate trace-requiring. The descriptor's
+/// `count_str` decides whether a `str` or `cstr` component (a managed leaf whose heap buffer is
+/// reached only by tracing the enclosing cell) makes the aggregate trace-requiring. The descriptor's
 /// erased trace unit — the one the collector actually dispatches through a container element
 /// walk — must see `str` as managed (it word-scans the cell, so the buffer pointer is
 /// marked). The vestigial natural-derive `Trace` fixpoint (emitted but never called under
@@ -67,7 +67,7 @@ fn needsTrace(t: *Typecheck, ty: Type, count_str: bool, memo: *std.AutoHashMapUn
     try collectComponentTypes(t, ty, &comps);
     var result = false;
     for (comps.items) |ft| {
-        if (count_str and ft.kind == .str) {
+        if (count_str and (ft.kind == .str or ft.kind == .cstr)) {
             result = true;
             break;
         }
@@ -523,7 +523,8 @@ fn scalarRank(ty: Type) u8 {
         .unit => 3,
         .float => 4,
         .rawptr => 5,
-        else => 6,
+        .cstr => 6,
+        else => 7,
     };
 }
 
@@ -587,7 +588,7 @@ pub fn synthesizeDescriptors(t: *Typecheck) !void {
         // is minted): a heap `str` buffer, a `Ref`/`gc_array` box pointer, or a by-value
         // aggregate transitively holding one (`needsTrace`). A scalar / managed-free aggregate
         // needs none — its cells are leaves the leaf-marked backing already keeps.
-        if (ty.kind == .str or isRefType(t, ty) or try needsTrace(t, ty, true, &tmemo)) {
+        if (ty.kind == .str or ty.kind == .cstr or isRefType(t, ty) or try needsTrace(t, ty, true, &tmemo)) {
             try t.erased_units.append(gpa, .{ .ty = ty, .kind = .trace, .name = try Mangle.erased(gpa, .trace, ty) });
         }
     }

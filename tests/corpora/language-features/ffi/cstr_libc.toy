@@ -1,0 +1,52 @@
+# expect: exit 0
+# expect: stdout "11\nworld\ntrue\n42\nworld\nada\n"
+# A cstr is a C string: `to_cstr` copies a str into a NUL-terminated GC buffer and
+# `to_str` copies C bytes back into a new str. strchr returns a pointer into that buffer,
+# which a cstr keeps alive through collections like any root; a miss is null. A cstr held
+# only by the heap, in a Vec or a struct field, is traced there too.
+import std/io
+import std/ffi
+import std/gc
+import std/vec
+
+struct Name {
+    id: int,
+    c: cstr,
+}
+
+extern {
+    fn strlen(s: cstr) -> int
+    fn strchr(s: cstr, c: int32) -> cstr
+    fn atoi(s: cstr) -> int32
+}
+
+fn churn() {
+    i := 0
+    while i < 3000 {
+        junk: Vec[str] = []
+        junk.push("x".concat(i.to_string()))
+        i += 1
+    }
+    gc.collect()
+}
+
+fn main() -> int {
+    c := "hello world".to_cstr()
+    io.println(unsafe { strlen(c) }.to_string())
+    w := unsafe { strchr(c, 119) }
+    churn()
+    io.println(w.to_str())
+    io.println(unsafe { strchr(c, 122) }.is_null().to_string())
+    io.println(unsafe { atoi("42".to_cstr()) }.to_string())
+    held: Vec[cstr] = []
+    held.push("world".to_cstr())
+    churn()
+    io.println(held.get(0).or(c).to_str())
+    names: Vec[Name] = []
+    names.push(Name { id: 1, c: "ada".to_cstr() })
+    churn()
+    n := names.get(0).or(Name { id: 0, c: c })
+    io.println(n.c.to_str())
+    if gc.collections() < 3 { return 1 }
+    return 0
+}

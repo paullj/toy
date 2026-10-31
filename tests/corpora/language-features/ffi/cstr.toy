@@ -1,0 +1,33 @@
+# expect: exit 0
+# expect: stdout "hello from C\ntrue\nround trip\nHI THERE!\n"
+# libdir: "@harness"
+# A cstr in a library's signatures: a static string C returns, a null return, a toy
+# string that makes a round trip through C after a collection, and a malloc'd result the
+# program frees itself, since toy never frees what C returns.
+import std/io
+import std/ffi
+import std/gc
+
+extern "toyffi" {
+    fn toyffi_greeting() -> cstr
+    fn toyffi_nothing() -> cstr
+    fn toyffi_echo(s: cstr) -> cstr
+    fn toyffi_shout(s: cstr) -> cstr
+}
+
+extern fn free(p: cstr)
+
+fn main() -> int {
+    io.println(unsafe { toyffi_greeting() }.to_str())
+    io.println(unsafe { toyffi_nothing() }.is_null().to_string())
+    c := "round ".concat("trip").to_cstr()
+    gc.collect()
+    back := unsafe { toyffi_echo(c) }
+    gc.collect()
+    io.println(back.to_str())
+    loud := unsafe { toyffi_shout("hi there".to_cstr()) }
+    s := loud.to_str()
+    unsafe { free(loud) }
+    io.println(s)
+    return 0
+}

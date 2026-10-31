@@ -2928,7 +2928,7 @@ pub const max_instantiation_depth: u32 = 64;
 /// excludes `type_var` and poison.
 fn isConcreteValue(ty: Type) bool {
     return switch (ty.kind) {
-        .int, .bool, .float, .str, .@"struct", .@"enum", .app, .unit, .func => true,
+        .int, .bool, .float, .str, .rawptr, .cstr, .@"struct", .@"enum", .app, .unit, .func => true,
         else => false,
     };
 }
@@ -4967,8 +4967,8 @@ pub fn implRejected(t: *const Typecheck, mod: u32, recv_node: Ast.Index) bool {
 
 /// Decode a bodyless `extern fn` signature into the global fn table (kind `.import`).
 /// Every param type and the return type are gated to the C-ABI types the backend
-/// can marshal — `int` (any width), `rawptr`, `bool`, `float` (f64/C `double`), or `str`
-/// (a `{ptr,len}` reg-pair spreading to two C args); a `void` return, spelled by omitting
+/// can marshal — `int` (any width), `rawptr`, `cstr`, `bool`, `float` (f64/C `double`), or,
+/// in `core/`, `str` (a `{ptr,len}` reg-pair spreading to two C args); a `void` return, spelled by omitting
 /// `-> R`, and a `never` return are also fine.
 /// A type outside that set is T0037 and poisoned to `.invalid`. No generics, no self,
 /// no method registration.
@@ -4979,9 +4979,9 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
     const mc = t.graph.mods[mod];
     const core = StdNames.isCoreModule(mc.bundled, mc.path);
     const bad_type_msg = if (core)
-        "extern function parameter/return type must be int, float, str, rawptr, or bool"
+        "extern function parameter/return type must be int, float, str, rawptr, cstr, or bool"
     else
-        "extern function parameter/return type must be int, float, rawptr, or bool";
+        "extern function parameter/return type must be int, float, rawptr, cstr, or bool";
     const params = try t.gpa.alloc(Type, proto.params.len);
     for (proto.params, 0..) |param_idx, i| {
         const param = t.tree.nodes[param_idx.int()];
@@ -4989,7 +4989,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
         // Core's `str` spread is a private convention of its own wrappers; a C function a
         // program declares expects a NUL-terminated pointer, which a `str` is not.
         if (pty.kind == .str and !core) {
-            try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "an extern function cannot take a 'str', which is not NUL-terminated; pass a 'rawptr'", .{});
+            try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "an extern function cannot take a 'str', which is not NUL-terminated; take a 'cstr' and pass 's.to_cstr()' (std/ffi)", .{});
             params[i] = .invalid;
         } else if (externTypeOk(pty)) {
             params[i] = pty;
@@ -5002,7 +5002,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
     // A `void` extern omits `-> R` (ret == unit); an EXPLICIT return must be a C-ABI
     // scalar, or `never` for a C fn that does not return (`exit`, `abort`).
     if (proto.ret_type != Ast.none and ret.kind == .str and !core) {
-        try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "an extern function cannot return a 'str'; return a 'rawptr'", .{});
+        try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "an extern function cannot return a 'str'; return a 'cstr' and copy it with 'c.to_str()' (std/ffi)", .{});
         ret = .invalid;
     } else if (proto.ret_type != Ast.none and ret.kind != .never and !externTypeOk(ret)) {
         try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "{s}", .{bad_type_msg});
@@ -5012,7 +5012,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
 }
 
 /// The C-ABI type set an `extern` param/return may use: any integer width, `bool`,
-/// an opaque `rawptr`, a `float`, or a `str`. A `str` is a `{ptr,len}` reg-pair the
+/// an opaque `rawptr`, a `cstr` (one pointer, a C `const char*`), a `float`, or a `str`. A `str` is a `{ptr,len}` reg-pair the
 /// backend already marshals to two consecutive integer registers, so an extern `str`
 /// param spreads to a C `(const char* buf, size_t len)` pair — the only way to hand a
 /// toy string to a raw C call in plain toy source (no address-of-local exists to
@@ -5020,7 +5020,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
 /// sequence, matching C `double`. Poison (`.invalid`) is accepted so a prior error
 /// does not cascade into a second T0037.
 fn externTypeOk(ty: Type) bool {
-    return ty.isInteger() or ty.kind == .bool or ty.isRawPtr() or ty.kind == .str or ty.kind == .float or ty.kind == .invalid;
+    return ty.isInteger() or ty.kind == .bool or ty.isRawPtr() or ty.kind == .cstr or ty.kind == .str or ty.kind == .float or ty.kind == .invalid;
 }
 
 /// Append a placeholder `(str) -> ret` sig for a bodyless builtin (`panic`/the intrinsics).
@@ -6858,6 +6858,17 @@ test "a std/option method without the import is T0018 naming std/option" {
     try testing.expect(std.mem.indexOf(u8, c.result.diags[1].message, "'map_error' on type 'Result[int, str]'") != null);
     try testing.expect(std.mem.indexOf(u8, c.result.diags[1].message, hint) != null);
     try testing.expect(std.mem.indexOf(u8, c.result.diags[2].message, hint) == null);
+}
+
+test "a std/ffi method without the import is T0018 naming std/ffi" {
+    const gpa = testing.allocator;
+    var c = try checkSource("extern fn getenv(p: cstr) -> cstr\nfn main() -> int {\n c := \"x\".to_cstr()\n _s := unsafe { getenv(c) }.to_str()\n return 0\n}\n");
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 2), c.result.diags.len);
+    for (c.result.diags) |d| {
+        try testing.expectEqual(codes.Code.T0018, d.code);
+        try testing.expect(std.mem.indexOf(u8, d.message, "add 'import std/ffi'") != null);
+    }
 }
 
 test "std/str methods do not shadow the builtin str methods" {
@@ -10561,6 +10572,19 @@ test "a str in a program's extern signature is one T0037, and the extern stays c
     var c = try checkSourceAs("extern fn write(fd: int, s: str) -> int\nfn main() -> int {\n return unsafe { write(1, \"x\") }\n}\n", .core);
     defer c.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+}
+
+test "a str in an extern signature names cstr as the fix" {
+    const gpa = testing.allocator;
+    var c = try checkSource("extern fn puts(s: str) -> int32\nextern fn getenv(p: cstr) -> str\nfn main() -> int {\n return 0\n}\n");
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 2), c.result.diags.len);
+    for (c.result.diags) |d| try testing.expect(std.mem.indexOf(u8, d.message, "'cstr'") != null);
+}
+
+test "a cstr is a C-ABI extern param and return, distinct from rawptr" {
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount("extern fn strchr(s: cstr, c: int32) -> cstr\nextern fn strlen(s: cstr) -> int\nfn main() -> int {\n p := unsafe { strchr(strchr(\"x\".to_cstr(), 120), 0) }\n return unsafe { strlen(p) }\n}\nimpl str {\n fn to_cstr(self) -> cstr { return unsafe { strchr_fake() } }\n}\nextern fn strchr_fake() -> cstr\n"));
+    try expectOnlyDiag("extern fn strlen(s: cstr) -> int\nextern fn malloc(n: int) -> rawptr\nfn main() -> int {\n return unsafe { strlen(malloc(1)) }\n}\n", .T0040);
 }
 
 test "a user fn named panic keeps its declared type" {

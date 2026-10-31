@@ -109,10 +109,12 @@ pub const ref_methods = [_][]const u8{ "new", "get", "set", "display" };
 pub const option_methods = [_][]const u8{ "map", "then", "or_else" };
 pub const result_methods = [_][]const u8{ "map", "then", "map_error", "or_else" };
 pub const str_methods = [_][]const u8{ "contains", "starts_with", "ends_with", "trim", "split", "join", "replace", "chars", "parse_int" };
+pub const str_ffi_methods = [_][]const u8{"to_cstr"};
+pub const cstr_methods = [_][]const u8{ "to_str", "is_null" };
 
 /// A prelude type some of whose methods live in a std module the program imports: `Ref`,
-/// `Option`, `Result` and `str`.
-pub const MethodFamily = enum { ref, option, result, str };
+/// `Option`, `Result`, `str` and `cstr`.
+pub const MethodFamily = enum { ref, option, result, str, cstr };
 
 /// The methods `std/<module>` declares on a family's type. A call of one of them that finds
 /// no such method means the module is not in the program, so the checker names it.
@@ -123,6 +125,8 @@ pub const std_methods = [_]StdMethods{
     .{ .family = .option, .module = "option", .methods = &option_methods },
     .{ .family = .result, .module = "option", .methods = &result_methods },
     .{ .family = .str, .module = "str", .methods = &str_methods },
+    .{ .family = .str, .module = "ffi", .methods = &str_ffi_methods },
+    .{ .family = .cstr, .module = "ffi", .methods = &cstr_methods },
 };
 
 /// The std module that declares `member` on `family`'s type, or null.
@@ -161,6 +165,7 @@ const import_hints = std.StaticStringMap(ImportHint).initComptime(.{
     .{ "fs", ImportHint{ .module = "fs" } },
     .{ "float", ImportHint{ .module = "float" } },
     .{ "rand", ImportHint{ .module = "rand" } },
+    .{ "ffi", ImportHint{ .module = "ffi" } },
     .{ "vec", ImportHint{ .module = "vec" } },
     .{ "map", ImportHint{ .module = "map" } },
     .{ "set", ImportHint{ .module = "set" } },
