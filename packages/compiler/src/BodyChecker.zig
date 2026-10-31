@@ -1319,7 +1319,9 @@ pub const BodyChecker = struct {
         const n = bc.tree.nodes[(node_idx).int()];
         const ty: Type = switch (n.tag) {
             .literal_number => try bc.typeNumericLiteral(n.main_token, bc.literalExpected(n.main_token)),
-            .literal_float => Type.float,
+            // A float literal has no precision of its own until a place gives it one, as an
+            // integer literal has no width: `x: f32 = 0.1` rounds it to single precision.
+            .literal_float => if (bc.body.expected) |e| (if (e.ty.isF32()) Type.float32 else Type.float) else Type.float,
             .literal_bool => Type.bool,
             .literal_string => Type.str,
             .literal_char => try bc.typeCharLiteral(n.main_token),
@@ -1390,11 +1392,11 @@ pub const BodyChecker = struct {
                 // A constant operand pair (`c: int8 = 1 + 2`, a sibling's `b + (1 + 2)`)
                 // has no typed operand to take a width from, so both take the expected
                 // width; else both stay platform `int` and the narrow bind is rejected.
-                if (saved) |e| if (e.ty.isInteger() and bc.isConstInt(node_idx)) {
+                if (saved) |e| if ((e.ty.isInteger() and bc.isConstInt(node_idx)) or (e.ty.isF32() and bc.isConstFloat(node_idx))) {
                     const lt = try bc.typeOfExpected(n.lhs, e.ty);
                     const rt = try bc.typeOfExpected(n.rhs, e.ty);
                     if (lt.kind == .invalid or rt.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
-                    try bc.checkConstRange(node_idx, e.ty);
+                    if (e.ty.isInteger()) try bc.checkConstRange(node_idx, e.ty);
                     break :blk try bc.binaryResult(node_idx, .{ .node = node_idx }, op_tok.tag, op_tok.text(bc.source), lt, rt);
                 };
                 // Type each operand with NO expected type, then let a constant operand
@@ -4488,7 +4490,7 @@ pub const BodyChecker = struct {
                     bc.setCallee(n, Callee.builtinMethod(if (std.mem.eql(u8, member, "into")) .conv_into else .conv_try_into));
                     _ = try bc.checkCall(node_idx, args, .{ .params = &.{}, .name = member });
                     const ret: Type = switch (cm.kind) {
-                        .widen, .char_to_int, .byte_to_char, .int_to_float => cm.target,
+                        .widen, .char_to_int, .byte_to_char, .int_to_float, .float_to_float => cm.target,
                         .narrow, .int_to_char, .char_to_byte, .float_to_int => Type.app(try bc.internApp(
                             bc.model.prelude.?.result_enum.?,
                             &.{ cm.target, Type.enumT(bc.model.prelude.?.conv_err_enum.?) },
@@ -5156,8 +5158,24 @@ pub const BodyChecker = struct {
     /// The type of binary operand `operand` (typed `t` with no expected type): a constant
     /// integer operand beside an operand of integer type `sibling` takes that width.
     fn adoptConstWidth(bc: *BodyChecker, operand: Ast.Index, t: Type, sibling: Type) error{OutOfMemory}!Type {
+        if (sibling.isF32() and bc.isConstFloat(operand)) return bc.typeOfExpected(operand, sibling);
         if (!bc.isConstInt(operand) or !sibling.isInteger()) return t;
         return bc.typeOfExpected(operand, sibling);
+    }
+
+    /// Whether `node` is a float constant built from literals and the dotted operators,
+    /// which takes `f32` beside an `f32` sibling as an integer constant takes a width.
+    fn isConstFloat(bc: *const BodyChecker, node: Ast.Index) bool {
+        if (node == Ast.none) return false;
+        const n = bc.tree.nodes[node.int()];
+        return switch (n.tag) {
+            .literal_float => true,
+            .binary => switch (bc.tokens[n.main_token].tag) {
+                .plus_dot, .minus_dot, .star_dot, .slash_dot => bc.isConstFloat(n.lhs) and bc.isConstFloat(n.rhs),
+                else => false,
+            },
+            else => false,
+        };
     }
 
     /// Whether `node` is an integer constant built from literals alone, which, like a bare

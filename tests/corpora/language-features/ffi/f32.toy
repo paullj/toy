@@ -1,0 +1,19 @@
+# expect: exit 0
+# expect: stdout "6.0\n0.10000000149011612\n1041.0\n"
+# libdir: "@harness"
+# An f32 crosses the C boundary in an s register, and past v7 on the stack packed at
+# 4 bytes, as Apple's arm64 ABI puts a C float.
+import std/io
+
+extern "toyffi" {
+    fn toyffi_scalef(x: f32, k: f32) -> f32
+    fn toyffi_widenf(x: f32) -> float
+    fn toyffi_sumf10(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32, i: f32, j: f32) -> f32
+}
+
+fn main() -> int {
+    io.println(unsafe { toyffi_scalef(1.5, 4.0) })
+    io.println(unsafe { toyffi_widenf(0.1) })
+    io.println(unsafe { toyffi_sumf10(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.5, 10.0) })
+    return 0
+}

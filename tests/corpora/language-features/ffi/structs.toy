@@ -1,0 +1,58 @@
+# expect: exit 0
+# expect: stdout "small 7 -2 300\n302007\npair 9 4 true\nbig 6 5 7 5 0\nvec2f 4.0 6.5\nvec4d 2.0 4.0 6.0 8.0 dot 30.0\nmixed 50 100 127 0.25\nrect 12.0 30.0\nspill 68.5\n"
+# libdir: "@harness"
+# An extern struct has C layout at the boundary and is an ordinary value in toy code.
+# By value it follows Apple's arm64 ABI: up to 16 bytes in x registers, a homogeneous
+# aggregate of up to four floats or doubles in v registers (nested structs flattened),
+# and anything larger through a pointer to a copy (x8 for a result).
+import std/io
+
+extern struct Small { a: int32, b: int8, c: int16 }
+extern struct Pair { x: int, y: int32, z: bool }
+extern struct Big { a: int, b: int, c: int, d: int8 }
+extern struct Vec2f { x: f32, y: f32 }
+extern struct Vec4d { x: float, y: float, z: float, w: float }
+extern struct Mixed { r: uint8, g: uint8, b: uint8, alpha: f32 }
+extern struct Rect { min: Vec2f, max: Vec2f }
+
+extern "toyffi" {
+    fn toyffi_small_make(a: int32, b: int8, c: int16) -> Small
+    fn toyffi_small_sum(s: Small) -> int
+    fn toyffi_pair_flip(p: Pair) -> Pair
+    fn toyffi_big_make(a: int) -> Big
+    fn toyffi_big_sum(b: Big) -> int
+    fn toyffi_vec2f_add(a: Vec2f, b: Vec2f) -> Vec2f
+    fn toyffi_vec4d_scale(v: Vec4d, k: float) -> Vec4d
+    fn toyffi_vec4d_dot(a: Vec4d, b: Vec4d) -> float
+    fn toyffi_mixed_dim(m: Mixed, k: f32) -> Mixed
+    fn toyffi_rect_area(r: Rect) -> f32
+    fn toyffi_rect_grow(r: Rect, d: f32) -> Rect
+    fn toyffi_spill(a: int, b: int, c: int, d: int, e: int, f: int, g: int, p: Pair, v: Vec4d, w: Vec4d, q: Vec2f) -> float
+}
+
+fn main() -> int {
+    s := unsafe { toyffi_small_make(7, -2, 300) }
+    io.println("small ".concat(s.a.to_string()).concat(" ").concat(s.b.to_string()).concat(" ").concat(s.c.to_string()))
+    t := Small { a: 7, b: 2, c: 3 }
+    io.println(unsafe { toyffi_small_sum(t) }.to_string())
+    p := unsafe { toyffi_pair_flip(Pair { x: 4, y: 9, z: false }) }
+    io.println("pair ".concat(p.x.to_string()).concat(" ").concat(p.y.to_string()).concat(" ").concat(p.z.to_string()))
+    b := unsafe { toyffi_big_make(-5) }
+    sum := unsafe { toyffi_big_sum(Big { a: 1, b: 2, c: 3, d: 0 }) }
+    keep := Big { a: 5, b: 0, c: 0, d: 0 }
+    unsafe { toyffi_big_sum(keep) }
+    io.println("big ".concat(sum.to_string()).concat(" ").concat(keep.a.to_string()).concat(" ").concat((b.a + b.b + b.c + 37).to_string()).concat(" ").concat(b.d.to_string()).concat(" ").concat((b.a + 5).to_string()))
+    v := unsafe { toyffi_vec2f_add(Vec2f { x: 1.5, y: 2.5 }, Vec2f { x: 2.5, y: 4.0 }) }
+    io.println("vec2f ".concat(v.x.to_string()).concat(" ").concat(v.y.to_string()))
+    w := unsafe { toyffi_vec4d_scale(Vec4d { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }, 2.0) }
+    dot := unsafe { toyffi_vec4d_dot(Vec4d { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }, Vec4d { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }) }
+    io.println("vec4d ".concat(w.x.to_string()).concat(" ").concat(w.y.to_string()).concat(" ").concat(w.z.to_string()).concat(" ").concat(w.w.to_string()).concat(" dot ").concat(dot.to_string()))
+    m := unsafe { toyffi_mixed_dim(Mixed { r: 100, g: 200, b: 255, alpha: 0.5 }, 0.5) }
+    io.println("mixed ".concat(m.r.to_string()).concat(" ").concat(m.g.to_string()).concat(" ").concat(m.b.to_string()).concat(" ").concat(m.alpha.to_string()))
+    r := Rect { min: Vec2f { x: 1.0, y: 1.0 }, max: Vec2f { x: 4.0, y: 5.0 } }
+    g := unsafe { toyffi_rect_grow(r, 1.0) }
+    io.println("rect ".concat(unsafe { toyffi_rect_area(r) }.to_string()).concat(" ").concat(unsafe { toyffi_rect_area(g) }.to_string()))
+    q := unsafe { toyffi_spill(1, 2, 3, 4, 5, 6, 7, Pair { x: 10, y: 20, z: true }, Vec4d { x: 0.5, y: 0.0, z: 0.0, w: 0.0 }, w, Vec2f { x: 2.0, y: 0.5 }) }
+    io.println("spill ".concat(q.to_string()))
+    return 0
+}

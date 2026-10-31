@@ -602,10 +602,95 @@ pub fn fcvtzs(xd: u32, dn: u32) u32 {
     return 0x9E780000 | (dn << 5) | xd;
 }
 
+/// The single-precision twin of a double-precision FP data-processing or compare word
+/// (`fadd`..`fcmp`): the `ftype` field at bits 22-23 is 01 for double, 00 for single.
+pub fn fpSingle(word: u32) u32 {
+    return word & ~@as(u32, 0x00400000);
+}
+
+/// SCVTF Sd, Xn — signed 64-bit int → f32.
+pub fn scvtfS(sd: u32, xn: u32) u32 {
+    return 0x9E220000 | (xn << 5) | sd;
+}
+
+/// FCVTZS Xd, Sn — f32 → signed 64-bit int, truncating toward zero.
+pub fn fcvtzsS(xd: u32, sn: u32) u32 {
+    return 0x9E380000 | (sn << 5) | xd;
+}
+
+/// FCVT Dd, Sn — f32 → f64, exact.
+pub fn fcvtDS(dd: u32, sn: u32) u32 {
+    return 0x1E22C000 | (sn << 5) | dd;
+}
+
+/// FCVT Sd, Dn — f64 → f32, rounding to nearest.
+pub fn fcvtSD(sd: u32, dn: u32) u32 {
+    return 0x1E624000 | (dn << 5) | sd;
+}
+
+/// FMOV Wd, Sn — the f32 bits into a GPR, zero-extending to 64 bits.
+pub fn fmovWS(wd: u32, sn: u32) u32 {
+    return 0x1E260000 | (sn << 5) | wd;
+}
+
+/// ldr st, [rn, #byteOff] — 32-bit FP load, offset scaled by 4.
+pub fn ldrSRegUoff(st: u32, rn: u32, byteOff: u32) u32 {
+    std.debug.assert(byteOff % 4 == 0 and byteOff / 4 <= 0xFFF);
+    return 0xBD400000 | ((byteOff / 4) << 10) | (rn << 5) | st;
+}
+
+/// str st, [rn, #byteOff] — 32-bit FP store, offset scaled by 4.
+pub fn strSRegUoff(st: u32, rn: u32, byteOff: u32) u32 {
+    std.debug.assert(byteOff % 4 == 0 and byteOff / 4 <= 0xFFF);
+    return 0xBD000000 | ((byteOff / 4) << 10) | (rn << 5) | st;
+}
+
+/// ldrsb xt, [rn, #byteOff] — sign-extended byte load, unscaled offset.
+pub fn ldrsbX(rt: u32, rn: u32, byteOff: u12) u32 {
+    return 0x39800000 | (@as(u32, byteOff) << 10) | (rn << 5) | rt;
+}
+
+/// ldrh wt, [rn, #byteOff] — zero-extended halfword load, offset scaled by 2.
+pub fn ldrh(rt: u32, rn: u32, byteOff: u32) u32 {
+    std.debug.assert(byteOff % 2 == 0 and byteOff / 2 <= 0xFFF);
+    return 0x79400000 | ((byteOff / 2) << 10) | (rn << 5) | rt;
+}
+
+/// ldrsh xt, [rn, #byteOff] — sign-extended halfword load, offset scaled by 2.
+pub fn ldrshX(rt: u32, rn: u32, byteOff: u32) u32 {
+    std.debug.assert(byteOff % 2 == 0 and byteOff / 2 <= 0xFFF);
+    return 0x79800000 | ((byteOff / 2) << 10) | (rn << 5) | rt;
+}
+
+/// ldrsw xt, [rn, #byteOff] — sign-extended word load, offset scaled by 4.
+pub fn ldrswX(rt: u32, rn: u32, byteOff: u32) u32 {
+    std.debug.assert(byteOff % 4 == 0 and byteOff / 4 <= 0xFFF);
+    return 0xB9800000 | ((byteOff / 4) << 10) | (rn << 5) | rt;
+}
+
 // Tests — each expected word is the objdump hex for the matching mnemonic,
 // assembled on this host with `as -arch arm64` (see the file doc comment).
 
 const testing = std.testing;
+
+test "single-precision and narrow-access encoders" {
+    try testing.expectEqual(@as(u32, 0x1E312A10), fpSingle(fadd(16, 16, 17))); // fadd s16,s16,s17
+    try testing.expectEqual(@as(u32, 0x1E313A10), fpSingle(fsub(16, 16, 17)));
+    try testing.expectEqual(@as(u32, 0x1E310A10), fpSingle(fmul(16, 16, 17)));
+    try testing.expectEqual(@as(u32, 0x1E311A10), fpSingle(fdiv(16, 16, 17)));
+    try testing.expectEqual(@as(u32, 0x1E312200), fpSingle(fcmp(16, 17))); // fcmp s16,s17
+    try testing.expectEqual(@as(u32, 0x9E220130), scvtfS(16, 9)); // scvtf s16,x9
+    try testing.expectEqual(@as(u32, 0x9E380209), fcvtzsS(9, 16)); // fcvtzs x9,s16
+    try testing.expectEqual(@as(u32, 0x1E22C210), fcvtDS(16, 16)); // fcvt d16,s16
+    try testing.expectEqual(@as(u32, 0x1E624210), fcvtSD(16, 16)); // fcvt s16,d16
+    try testing.expectEqual(@as(u32, 0x1E26020B), fmovWS(11, 16)); // fmov w11,s16
+    try testing.expectEqual(@as(u32, 0xBD400BF0), ldrSRegUoff(16, SP, 8)); // ldr s16,[sp,#8]
+    try testing.expectEqual(@as(u32, 0xBD000BF0), strSRegUoff(16, SP, 8)); // str s16,[sp,#8]
+    try testing.expectEqual(@as(u32, 0x39800529), ldrsbX(9, 9, 1)); // ldrsb x9,[x9,#1]
+    try testing.expectEqual(@as(u32, 0x79400529), ldrh(9, 9, 2)); // ldrh w9,[x9,#2]
+    try testing.expectEqual(@as(u32, 0x79800529), ldrshX(9, 9, 2)); // ldrsh x9,[x9,#2]
+    try testing.expectEqual(@as(u32, 0xB9800529), ldrswX(9, 9, 4)); // ldrsw x9,[x9,#4]
+}
 
 test "fp encoders" {
     // Each expected word is the objdump hex for the matching mnemonic assembled on

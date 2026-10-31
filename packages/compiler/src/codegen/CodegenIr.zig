@@ -177,9 +177,15 @@ const Gen = struct {
     fn loadFpValue(g: *Gen, d: u32, vid: Ir.ValueId) error{OutOfMemory}!void {
         try g.spMem(.ldr_fp, d, g.valueOff(vid));
     }
-    /// Store D-register `d` into a float SSA value's cell.
+    /// Store D-register `d` into a float SSA value's cell. An f32 cell holds its bits
+    /// zero-extended, so a 64-bit copy of it (a field store, a C result whose upper half
+    /// the callee left unspecified) stays canonical.
     fn storeFpValue(g: *Gen, d: u32, vid: Ir.ValueId) error{OutOfMemory}!void {
         if (vid == Ir.none_value) return;
+        if (g.func.values[vid].type.isF32()) {
+            try g.emit(Aarch64.fmovWS(S2, d));
+            return g.spMem(.str, S2, g.valueOff(vid));
+        }
         try g.spMem(.str_fp, d, g.valueOff(vid));
     }
 
@@ -470,6 +476,8 @@ fn marshalParams(g: *Gen) error{OutOfMemory}!void {
                 // slot's 8-byte cell.
                 try g.spMem(.str_fp, v, off);
             },
+            // Only a C callee's arguments are laid out this way, and toy defines none.
+            .fpr_run => unreachable,
             .gpr_ptr => |r| {
                 // An indirect (>16B) aggregate: r holds a pointer to the caller's
                 // copy. Copy the bytes into the slot.
@@ -560,13 +568,14 @@ const FloatArithKind = enum { fadd, fsub, fmul, fdiv };
 fn genFloatArith(g: *Gen, result: Ir.ValueId, b: Ir.Bin, comptime kind: FloatArithKind) error{OutOfMemory}!void {
     try g.loadFpValue(D0, b.lhs);
     try g.loadFpValue(D1, b.rhs);
-    try g.emit(switch (kind) {
+    const word = switch (kind) {
         .fadd => Aarch64.fadd(D0, D0, D1),
         .fsub => Aarch64.fsub(D0, D0, D1),
         .fmul => Aarch64.fmul(D0, D0, D1),
         .fdiv => Aarch64.fdiv(D0, D0, D1),
-    });
-    // No normalizeWidth: f64 is never narrowed.
+    };
+    try g.emit(if (g.func.values[result].type.isF32()) Aarch64.fpSingle(word) else word);
+    // No normalizeWidth: an f32 op writes an s register, which zeroes the upper bits.
     try g.storeFpValue(D0, result);
 }
 
@@ -662,8 +671,10 @@ fn genInstr(g: *Gen, ins: Ir.Instr) error{OutOfMemory}!void {
             try storeNormalized(g, ins.result, S0);
         },
         .fconst => |f| {
-            try g.emitImm64(S0, @bitCast(f)); // f64 bit-pattern into a GPR
-            try g.storeValue(S0, ins.result); // value cell holds the raw bits
+            // The raw bit pattern into a GPR (an f32's zero-extended), then its cell.
+            const bits: i64 = if (g.func.values[ins.result].type.isF32()) @as(u32, @bitCast(@as(f32, @floatCast(f)))) else @bitCast(f);
+            try g.emitImm64(S0, bits);
+            try g.storeValue(S0, ins.result);
         },
         .fadd => |b| try genFloatArith(g, ins.result, b, .fadd),
         .fsub => |b| try genFloatArith(g, ins.result, b, .fsub),
@@ -672,19 +683,24 @@ fn genInstr(g: *Gen, ins: Ir.Instr) error{OutOfMemory}!void {
         .fcmp => |c| {
             try g.loadFpValue(D0, c.lhs);
             try g.loadFpValue(D1, c.rhs);
-            try g.emit(Aarch64.fcmp(D0, D1));
+            try g.emit(if (g.func.values[c.lhs].type.isF32()) Aarch64.fpSingle(Aarch64.fcmp(D0, D1)) else Aarch64.fcmp(D0, D1));
             try g.emit(Aarch64.cset(S0, fcondToAarch64(c.cc))); // bool → GPR cell
             try g.storeValue(S0, ins.result);
         },
         .scvtf => |v| {
             try g.loadValue(S0, v); // source int in a GPR (width-canonicalized)
-            try g.emit(Aarch64.scvtf(D0, S0));
+            try g.emit(if (g.func.values[ins.result].type.isF32()) Aarch64.scvtfS(D0, S0) else Aarch64.scvtf(D0, S0));
             try g.storeFpValue(D0, ins.result);
         },
         .fcvtzs => |v| {
-            try g.loadFpValue(D0, v); // source f64 in a D reg
-            try g.emit(Aarch64.fcvtzs(S0, D0));
+            try g.loadFpValue(D0, v); // source float in a V reg
+            try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtzsS(S0, D0) else Aarch64.fcvtzs(S0, D0));
             try g.storeValue(S0, ins.result); // plat-width int result; no normalize needed
+        },
+        .fcvt => |v| {
+            try g.loadFpValue(D0, v);
+            try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtDS(D0, D0) else Aarch64.fcvtSD(D0, D0));
+            try g.storeFpValue(D0, ins.result);
         },
     }
 }
@@ -820,11 +836,11 @@ fn genFnAddr(g: *Gen, result: Ir.ValueId, f: Ir.SymName) error{OutOfMemory}!void
 /// drift on AAPCS64 marshalling — the single-authority the Abi header warns about.
 const PlanResult = struct { plan: Abi.CallPlan, ret_ty: Type };
 
-fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Type, ret_slot: Ir.SlotId, result: Ir.ValueId) error{OutOfMemory}!PlanResult {
+fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Type, by_ptr: u64, ret_slot: Ir.SlotId, result: Ir.ValueId) error{OutOfMemory}!PlanResult {
     var arg_types: std.ArrayList(Type) = .empty;
     defer arg_types.deinit(g.gpa);
     try arg_types.ensureTotalCapacity(g.gpa, args.len);
-    for (0..args.len) |i| arg_types.appendAssumeCapacity(g.func.argType(args, params, i));
+    for (0..args.len) |i| arg_types.appendAssumeCapacity(g.func.argType(args, params, by_ptr, i));
     // Recover the RETURN type: an aggregate result lands in `ret_slot` (its type);
     // a scalar result is the call instr's own value type; a unit call has neither.
     const ret_ty: Type = if (ret_slot != Ir.none_slot)
@@ -838,9 +854,57 @@ fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Ty
     return .{ .plan = plan, .ret_ty = ret_ty };
 }
 
-fn marshalArgs(g: *Gen, args: []const Ir.Operand, plan: Abi.CallPlan) error{OutOfMemory}!void {
+/// Where an extern call reads argument `i` instead of its operand: the bytes of its C
+/// image (a by-value extern struct), or the image's address (a `mut` one).
+const ArgSrc = union(enum) { operand, image: u32, image_addr: u32 };
+
+fn marshalArgs(g: *Gen, args: []const Ir.Operand, plan: Abi.CallPlan, srcs: []const ArgSrc) error{OutOfMemory}!void {
     for (plan.locs, 0..) |loc, i| {
         const arg = args[i];
+        const src: ArgSrc = if (srcs.len == 0) .operand else srcs[i];
+        switch (src) {
+            .operand => {},
+            .image => |img| {
+                switch (loc) {
+                    .gpr => |r| for (0..r.count) |k| try g.spMem(.ldr, r.first + @as(u32, @intCast(k)), img + @as(u32, @intCast(k)) * 8),
+                    .fpr_run => |r| {
+                        try g.spAddr(FA, img);
+                        const elem: u32 = if (r.single) 4 else 8;
+                        for (0..r.count) |k| {
+                            const v = r.first + @as(u32, @intCast(k));
+                            const off = @as(u32, @intCast(k)) * elem;
+                            try g.emit(if (r.single) Aarch64.ldrSRegUoff(v, FA, off) else Aarch64.ldrFpRegUoff(v, FA, off));
+                        }
+                    },
+                    // The image is already the copy a C callee may write.
+                    .gpr_ptr => |r| try g.spAddr(r, img),
+                    .stack => |st| {
+                        var k: u32 = 0;
+                        while (k < st.bytes) : (k += 8) {
+                            try g.spMem(.ldr, S0, img + k);
+                            try g.spMem(.str, S0, st.nsaa_off + k);
+                        }
+                    },
+                    .stack_ptr => |nsaa_off| {
+                        try g.spAddr(S0, img);
+                        try g.spMem(.str, S0, nsaa_off);
+                    },
+                    .fpr, .zero => unreachable,
+                }
+                continue;
+            },
+            .image_addr => |img| {
+                switch (loc) {
+                    .gpr => |r| try g.spAddr(r.first, img),
+                    .stack => |st| {
+                        try g.spAddr(S0, img);
+                        try g.spMem(.str, S0, st.nsaa_off);
+                    },
+                    else => unreachable,
+                }
+                continue;
+            },
+        }
         switch (loc) {
             .gpr => |r| {
                 // A scalar value → one GPR; a reg-pair aggregate → `count`
@@ -919,8 +983,106 @@ fn marshalArgs(g: *Gen, args: []const Ir.Operand, plan: Abi.CallPlan) error{OutO
             },
             // A zero-sized arg (`()`): no register/stack move; its operand is `.none`.
             .zero => {},
+            // An extern struct, which always reads from its image.
+            .fpr_run => unreachable,
         }
     }
+}
+
+/// A 64-bit load or store of `rt` at `[base, #off]` for any offset, through S1 when the
+/// scaled immediate cannot reach it. `base` is SP or a register other than S1.
+fn memAt(g: *Gen, op: Gen.MemOp, rt: u32, base: u32, off: u32) error{OutOfMemory}!void {
+    var b = base;
+    var o = off;
+    if (off % 8 != 0 or off / 8 > Aarch64.max_scaled) {
+        try g.regAddr(S1, base, off);
+        b = S1;
+        o = 0;
+    }
+    try g.emit(switch (op) {
+        .ldr => Aarch64.ldrRegUoff(rt, b, o),
+        .str => Aarch64.strRegUoff(rt, b, o),
+        .ldr_fp => Aarch64.ldrFpRegUoff(rt, b, o),
+        .str_fp => Aarch64.strFpRegUoff(rt, b, o),
+    });
+}
+
+/// Store the low `bytes` of `rt` at `[base, #off]` (a C field or argument slot).
+fn storeCAt(g: *Gen, rt: u32, base: u32, off: u32, bytes: u32) error{OutOfMemory}!void {
+    if (bytes == 8) return memAt(g, .str, rt, base, off);
+    var b = base;
+    var o = off;
+    if (off / bytes > 0xFFF) {
+        try g.regAddr(S1, base, off);
+        b = S1;
+        o = 0;
+    }
+    try g.emit(switch (bytes) {
+        1 => Aarch64.strb(rt, b, @intCast(o)),
+        2 => Aarch64.strh(rt, b, o),
+        4 => Aarch64.strW(rt, b, o),
+        else => unreachable,
+    });
+}
+
+/// Load the C field of type `ty` at `[base, #off]` into `rt` as toy keeps it: a narrow
+/// signed int sign-extended, an unsigned one, a bool or an f32's bits zero-extended.
+fn loadCAt(g: *Gen, rt: u32, base: u32, off: u32, ty: Type) error{OutOfMemory}!void {
+    const bytes = Abi.cScalarSize(ty);
+    if (bytes == 8) return memAt(g, .ldr, rt, base, off);
+    var b = base;
+    var o = off;
+    if (off / bytes > 0xFFF) {
+        try g.regAddr(S1, base, off);
+        b = S1;
+        o = 0;
+    }
+    const signed = ty.isSigned();
+    try g.emit(switch (bytes) {
+        1 => if (signed) Aarch64.ldrsbX(rt, b, @intCast(o)) else Aarch64.ldrbRegUoff(rt, b, @intCast(o)),
+        2 => if (signed) Aarch64.ldrshX(rt, b, o) else Aarch64.ldrh(rt, b, o),
+        4 => if (signed) Aarch64.ldrswX(rt, b, o) else Aarch64.ldrwRegUoff(rt, b, o),
+        else => unreachable,
+    });
+}
+
+/// Copy the extern struct `ty` from its toy layout at `[src, #src_off]` into its C layout
+/// at `[dst, #dst_off]`, field by field.
+fn packC(g: *Gen, ty: Type, src: u32, src_off: u32, dst: u32, dst_off: u32) error{OutOfMemory}!void {
+    const l = g.layouts[ty.struct_id];
+    for (l.field_types, l.offsets, 0..) |f, toff, i| {
+        const coff = dst_off + Abi.cFieldOffset(ty, i, g.layouts);
+        if (Abi.isCStruct(f, g.layouts)) {
+            try packC(g, f, src, src_off + toff, dst, coff);
+            continue;
+        }
+        try memAt(g, .ldr, S0, src, src_off + toff);
+        try storeCAt(g, S0, dst, coff, Abi.cScalarSize(f));
+    }
+}
+
+/// The inverse of `packC`: the C layout at `[src, #src_off]` into the toy layout at
+/// `[dst, #dst_off]`.
+fn unpackC(g: *Gen, ty: Type, src: u32, src_off: u32, dst: u32, dst_off: u32) error{OutOfMemory}!void {
+    const l = g.layouts[ty.struct_id];
+    for (l.field_types, l.offsets, 0..) |f, toff, i| {
+        const coff = src_off + Abi.cFieldOffset(ty, i, g.layouts);
+        if (Abi.isCStruct(f, g.layouts)) {
+            try unpackC(g, f, src, coff, dst, dst_off + toff);
+            continue;
+        }
+        try loadCAt(g, S0, src, coff, f);
+        try memAt(g, .str, S0, dst, dst_off + toff);
+    }
+}
+
+/// The frame offset of the bytes of a by-value aggregate operand.
+fn operandOff(g: *const Gen, op: Ir.Operand) u32 {
+    return switch (op) {
+        .slot => |s| g.slotOff(s),
+        .value => |v| g.valueOff(v),
+        .none => unreachable,
+    };
 }
 
 fn placeResult(g: *Gen, result: Ir.ValueId, ret_slot: Ir.SlotId, ret_ty: Type) error{OutOfMemory}!void {
@@ -949,16 +1111,37 @@ fn placeResult(g: *Gen, result: Ir.ValueId, ret_slot: Ir.SlotId, ret_ty: Type) e
 
 fn genCall(g: *Gen, result: Ir.ValueId, c: Ir.Call) error{OutOfMemory}!void {
     const conv: Abi.Conv = if (c.callee.kind == .import) .c else .toy;
-    var pr = try planFor(g, conv, c.args, c.params, c.ret_slot, result);
+    var pr = try planFor(g, conv, c.args, c.params, c.by_ptr, c.ret_slot, result);
     defer pr.plan.deinit(g.gpa);
 
-    try marshalArgs(g, c.args, pr.plan);
+    // An extern struct crosses in C layout: each argument is packed into its image in the
+    // C scratch region first (in `FrameLayout.cScratchBytes` order), since packing uses
+    // scratch registers that the argument registers must not be loaded before.
+    const srcs = try g.gpa.alloc(ArgSrc, if (conv == .c) c.args.len else 0);
+    defer g.gpa.free(srcs);
+    var img = g.fl.c_scratch_off;
+    for (srcs, 0..) |*src, i| {
+        src.* = .operand;
+        const ty = FrameLayout.cImageType(c, i, g.layouts) orelse continue;
+        if (Ir.Function.isByPtrArg(c.by_ptr, i)) {
+            try g.loadValue(FB, c.args[i].value);
+            try packC(g, ty, FB, 0, Aarch64.SP, img);
+            src.* = .{ .image_addr = img };
+        } else {
+            try packC(g, ty, Aarch64.SP, operandOff(g, c.args[i]), Aarch64.SP, img);
+            src.* = .{ .image = img };
+        }
+        img += FrameLayout.roundUp16(Abi.cLayout(ty, g.layouts).size);
+    }
+    const c_ret: ?Type = if (conv == .c and c.ret_slot != Ir.none_slot and Abi.isCStruct(pr.ret_ty, g.layouts)) pr.ret_ty else null;
+
+    try marshalArgs(g, c.args, pr.plan, srcs);
 
     // sret: point x8 at the result slot AFTER args (so an `add x8,sp` is not
-    // disturbed by arg marshalling reading sp).
+    // disturbed by arg marshalling reading sp); a C struct result at its image.
     if (pr.plan.sret_in_x8) {
         std.debug.assert(c.ret_slot != Ir.none_slot);
-        try g.spAddr(8, g.slotOff(c.ret_slot));
+        try g.spAddr(8, if (c_ret != null) img else g.slotOff(c.ret_slot));
     }
 
     // An `extern` callee (`.import`) is a bare dyld symbol reached through its own
@@ -985,14 +1168,36 @@ fn genCall(g: *Gen, result: Ir.ValueId, c: Ir.Call) error{OutOfMemory}!void {
         try g.emit(Aarch64.bl(0));
     }
 
-    try placeResult(g, result, c.ret_slot, pr.ret_ty);
+    if (c_ret) |rt| {
+        // The result's C bytes into its image, then every image back into toy layout:
+        // the result into its slot and each `mut` argument into the variable it points at.
+        switch (Abi.cRet(rt, g.layouts)) {
+            .hfa => |h| {
+                try g.spAddr(FA, img);
+                for (0..h.count) |k| {
+                    const v: u32 = @intCast(k);
+                    try g.emit(if (h.single) Aarch64.strSRegUoff(v, FA, v * 4) else Aarch64.strFpRegUoff(v, FA, v * 8));
+                }
+            },
+            .regs => |n| for (0..n) |k| try g.spMem(.str, @intCast(k), img + @as(u32, @intCast(k)) * 8),
+            .sret => {},
+        }
+        try unpackC(g, rt, Aarch64.SP, img, Aarch64.SP, g.slotOff(c.ret_slot));
+    } else try placeResult(g, result, c.ret_slot, pr.ret_ty);
+    for (srcs, 0..) |src, i| switch (src) {
+        .image_addr => |at| {
+            try g.loadValue(FB, c.args[i].value);
+            try unpackC(g, c.params[i], Aarch64.SP, at, FB, 0);
+        },
+        else => {},
+    };
 }
 
 fn genCallIndirect(g: *Gen, result: Ir.ValueId, c: Ir.CallIndirect) error{OutOfMemory}!void {
-    var pr = try planFor(g, .toy, c.args, &.{}, c.ret_slot, result);
+    var pr = try planFor(g, .toy, c.args, &.{}, 0, c.ret_slot, result);
     defer pr.plan.deinit(g.gpa);
 
-    try marshalArgs(g, c.args, pr.plan);
+    try marshalArgs(g, c.args, pr.plan, &.{});
 
     if (pr.plan.sret_in_x8) {
         std.debug.assert(c.ret_slot != Ir.none_slot);

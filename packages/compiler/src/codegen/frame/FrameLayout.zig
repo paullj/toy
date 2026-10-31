@@ -80,6 +80,9 @@ frame: u32,
 out_base: u32,
 /// sp-relative offset of the saved incoming x8 (sret buffer ptr), or `NO_SRET`.
 sret_save_off: u32,
+/// sp-relative byte offset of the region an extern call builds its C images in (see
+/// `cScratchBytes`); meaningful only when some call has one.
+c_scratch_off: u32 = 0,
 /// sp-relative byte offset of each `Ir.Slot`, indexed by `SlotId`. Owned.
 slot_off: []u32,
 /// sp-relative byte offset of each `Ir.ValueDef`, indexed by `ValueId`. Owned.
@@ -105,7 +108,7 @@ fn roundUp8(n: u32) u32 {
     return (n + 7) / 8 * 8;
 }
 
-fn roundUp16(n: u32) u32 {
+pub fn roundUp16(n: u32) u32 {
     return (n + 15) / 16 * 16;
 }
 
@@ -164,7 +167,7 @@ pub fn compute(
                     .call => |c| {
                         arg_types.clearRetainingCapacity();
                         try arg_types.ensureTotalCapacity(gpa, c.args.len);
-                        for (0..c.args.len) |i| arg_types.appendAssumeCapacity(func.argType(c.args, c.params, i));
+                        for (0..c.args.len) |i| arg_types.appendAssumeCapacity(func.argType(c.args, c.params, c.by_ptr, i));
                         // The callee's return type drives sret (x8), which does
                         // NOT consume NSAA — but planCall needs a ret type. Use
                         // the call's own ret_slot type if present, else unit
@@ -221,6 +224,17 @@ pub fn compute(
         sret_save_off = try place(&running, out_base, 8);
     }
 
+    // (4b) the C image region, sized for the extern call that needs the most.
+    var c_scratch_off: u32 = 0;
+    {
+        var most: u32 = 0;
+        for (func.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
+            .call => |c| most = @max(most, cScratchBytes(func, c, layouts)),
+            else => {},
+        };
+        if (most > 0) c_scratch_off = try place(&running, out_base, most);
+    }
+
     // (5) frame = 16-aligned total. Assert the layout invariants.
     const frame: u32 = roundUp16(out_base + running);
     std.debug.assert(frame % 16 == 0);
@@ -260,9 +274,30 @@ pub fn compute(
         .frame = frame,
         .out_base = out_base,
         .sret_save_off = sret_save_off,
+        .c_scratch_off = c_scratch_off,
         .slot_off = slot_off,
         .value_off = value_off,
     };
+}
+
+/// The C image an extern call passes argument `i` through: its extern struct type, or null
+/// for any other argument.
+pub fn cImageType(c: Ir.Call, i: usize, layouts: []const Layout) ?Type {
+    if (c.callee.kind != .import or c.params.len != c.args.len) return null;
+    return if (Abi.isCStruct(c.params[i], layouts)) c.params[i] else null;
+}
+
+/// The bytes an extern call's C images take: one per extern struct argument (by value or
+/// as a `mut` param) and one for an extern struct result, in that order, each padded to
+/// 16 so a two-word register load or store stays inside it.
+pub fn cScratchBytes(func: *const Ir.Function, c: Ir.Call, layouts: []const Layout) u32 {
+    var n: u32 = 0;
+    for (0..c.args.len) |i| if (cImageType(c, i, layouts)) |t| {
+        n += roundUp16(Abi.cLayout(t, layouts).size);
+    };
+    if (c.callee.kind == .import and c.ret_slot != Ir.none_slot and Abi.isCStruct(func.slots[c.ret_slot].type, layouts))
+        n += roundUp16(Abi.cLayout(func.slots[c.ret_slot].type, layouts).size);
+    return n;
 }
 
 /// One projected root: its sp-relative byte offset plus a TAG the collector reads to pick

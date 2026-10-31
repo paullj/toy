@@ -70,6 +70,17 @@ value is not checked. Operators on values never check at run time: they wrap at 
 operand width, so two `int8` 100s add to -56, and unary `-` on an unsigned value is
 `0 - u` (`u: uint8 = 1` then `-u` is 255).
 
+## Floats: `float` and `f32`
+
+`float` is a 64-bit IEEE double and `f32` a single, a distinct type that shares every
+float rule (a `.float` kind whose width byte is `w32`). A float literal is a `float`
+unless it is expected to be an `f32` (`x: f32 = 0.1`, an `f32` param or field) or sits
+beside an `f32` operand (`x *. 2.0`); it is then rounded to the nearest `f32`. The
+dotted operators and `==`/`!=` take two operands of the same float type: an `f32` and a
+`float` do not mix (**T0044**), so one is converted with `into` (to `float` exactly, to
+`f32` rounded to nearest). An integer converts to either with `into`, and either to an
+integer with `try_into`. See `ffi.md` for `f32` at the C boundary.
+
 ## Bidirectional checking: synth / check
 
 Checking is two cooperating modes over a known, concrete world:
@@ -1036,9 +1047,10 @@ from the same value on its own:
   name it, so it has no witness and the derive passes a fn field straight to this arm.
   `f.to_string()` is `"<fn>"`.
 - `char` → its UTF-8 encoding (the prelude `char` struct overrides the structural walk).
-- `float` → no builtin rendering: std/float's `impl float has Display` is its witness,
-  called like a struct's, so a float prints only when std/float is in the program
-  (std/io imports it). See `std.md` for the format.
+- `float`, `f32` → no builtin rendering: std/float's `impl float has Display` (and its
+  `f32` impl) is the witness, called like a struct's, so a float prints only when
+  std/float is in the program (std/io imports it). An `f32` prints the fewest digits
+  that read back as the same `f32`. See `std.md` for the format.
 
 **Structural derive.** `Display` for a struct or enum is synthesized on demand at a
 `to_string` use (which `io.print` makes), through the same source-less
@@ -1082,7 +1094,7 @@ never a fallback rendering (no addresses):
 
 | type | today |
 |------|-------|
-| `float` without std/float | its `Display` is an impl in std/float: a `[T has Display]` bound is **T0023** naming std/float, `(1.5).to_string()` is T0018 |
+| `float` or `f32` without std/float | its `Display` is an impl in std/float: a `[T has Display]` bound is **T0023** naming std/float, `(1.5).to_string()` is T0018 |
 | a struct or enum holding a `float` field without std/float | the derive is blocked: **T0023** at an `io.print`, **T0031** at a `to_string` naming the field |
 | `rawptr`, `cstr` | no `Display`: a `rawptr` exists only inside core, and a `cstr` prints through `c.to_str()` (std/ffi) |
 | a generic `T` without a `Display` bound | checked per instance: `fn f[T has Eq](x: T) { io.print(x) }` accepts `f(2)` and `f(1.5)` (std/io brings std/float); an instance whose type does not conform is **T0023** at the call |

@@ -27,7 +27,7 @@ pub fn instance(gpa: std.mem.Allocator, template_name: []const u8, args: []const
             .bool => try buf.appendSlice(gpa, "bool"),
             .str => try buf.appendSlice(gpa, "str"),
             .unit => try buf.appendSlice(gpa, "unit"),
-            .float => try buf.appendSlice(gpa, "float"),
+            .float => try buf.appendSlice(gpa, a.floatName()),
             .rawptr => try buf.appendSlice(gpa, "rawptr"),
             .cstr => try buf.appendSlice(gpa, "cstr"),
             .@"struct" => try buf.appendSlice(gpa, std.fmt.bufPrint(&nb, "s{d}", .{a.nominalId()}) catch unreachable),
@@ -72,7 +72,7 @@ pub fn spec(gpa: std.mem.Allocator, inst_name: []const u8, targets: []const Spec
 pub fn derive(gpa: std.mem.Allocator, protocol_name: []const u8, kind: Derive.Kind, conform_ty: Type) ![]u8 {
     // See `Derive.writeKey`: the name drops the int descriptor for the same reason (no
     // `.int` conformer ever reaches derive synthesis).
-    std.debug.assert(!Type.carriesIntDesc(conform_ty.kind));
+    std.debug.assert(!Type.carriesIntDesc(conform_ty.kind) or Type.eql(conform_ty, Type.float));
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(gpa);
     try buf.appendSlice(gpa, protocol_name);
@@ -113,7 +113,7 @@ pub fn erased(gpa: std.mem.Allocator, kind: Derive.ErasedKind, ty: Type) ![]u8 {
         .bool => try buf.appendSlice(gpa, "bool"),
         .str => try buf.appendSlice(gpa, "str"),
         .unit => try buf.appendSlice(gpa, "unit"),
-        .float => try buf.appendSlice(gpa, "float"),
+        .float => try buf.appendSlice(gpa, ty.floatName()),
         .rawptr => try buf.appendSlice(gpa, "rawptr"),
         .cstr => try buf.appendSlice(gpa, "cstr"),
         else => try buf.appendSlice(gpa, "other"),
@@ -152,6 +152,7 @@ test "each family spells its names" {
         .{ .got = instance(gpa, "id", &.{Type.int8}), .want = "id$int8" },
         .{ .got = instance(gpa, "id", &.{Type.uint32}), .want = "id$uint32" },
         .{ .got = instance(gpa, "id", &.{Type.cstr}), .want = "id$cstr" },
+        .{ .got = instance(gpa, "id", &.{Type.float32}), .want = "id$f32" },
         .{ .got = lambda(gpa, "f", 0), .want = "f$l0" },
         .{ .got = lambda(gpa, "f", 12), .want = "f$l12" },
         .{ .got = adapter(gpa, "geometry/rect.area", .fn_value), .want = "geometry/rect.area$fnval" },
@@ -189,7 +190,7 @@ test "minted names never collide, within a family or across families" {
     var names: Names = .{};
     defer names.deinit();
 
-    const args = [_]Type{ Type.int, Type.int8, Type.uint32, Type.bool, Type.str, Type.unit, Type.float, Type.structT(0), Type.structT(3), Type.enumT(0), Type.enumT(4), Type.rawptr, Type.cstr };
+    const args = [_]Type{ Type.int, Type.int8, Type.uint32, Type.bool, Type.str, Type.unit, Type.float, Type.structT(0), Type.structT(3), Type.enumT(0), Type.enumT(4), Type.rawptr, Type.cstr, Type.float32 };
     for (args) |a| try names.add(instance(gpa, "f", &.{a}));
     for (args[0..3]) |a| for (args[3..6]) |b| try names.add(instance(gpa, "f", &.{ a, b }));
     for ([_]u32{ 0, 1, 12 }) |r| {

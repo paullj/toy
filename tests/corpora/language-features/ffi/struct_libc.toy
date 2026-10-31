@@ -1,0 +1,29 @@
+# expect: exit 0
+# expect: stdout "DivT{quot: 3, rem: 2}\ntrue\n17\ntrue\n"
+# libSystem's div returns a struct of two C ints in x0, and gettimeofday fills a struct
+# through a pointer: an extern struct is an ordinary value in toy code (printed, compared,
+# given methods) and C layout at the call.
+import std/io
+
+extern struct DivT { quot: int32, rem: int32 }
+extern struct Timeval { sec: int, usec: int32 }
+
+extern {
+    fn div(num: int32, den: int32) -> DivT
+    fn gettimeofday(mut tv: Timeval, tz: int) -> int32
+}
+
+impl DivT {
+    fn total(self, den: int32) -> int32 { self.quot * den + self.rem }
+}
+
+fn main() -> int {
+    d := unsafe { div(17, 5) }
+    io.println(d)
+    io.println(d == DivT { quot: 3, rem: 2 })
+    io.println(d.total(5))
+    tv := Timeval { sec: 0, usec: 0 }
+    if (unsafe { gettimeofday(tv, 0) }) != 0 { return 1 }
+    io.println(tv.sec > 1700000000)
+    return 0
+}

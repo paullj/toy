@@ -60,7 +60,7 @@ const from_params: []const Type = &.{Type.typeVar(1)};
 // `to_string` returns it, so a custom `impl .. has Display` MUST provide `fn display(self)
 // -> str` (a unit-returning body is a T0024 via the coherence ret-eql check).
 const specs = [_]ProtoSpec{
-    .{ .slot = .eq, .name = "Eq", .method = "eq", .params = homogeneous, .ret = .bool_t, .conf = &.{ Type.int, Type.bool, Type.str, Type.unit, Type.float } },
+    .{ .slot = .eq, .name = "Eq", .method = "eq", .params = homogeneous, .ret = .bool_t, .conf = &.{ Type.int, Type.bool, Type.str, Type.unit, Type.float, Type.float32 } },
     .{ .slot = .ord, .name = "Ord", .method = "cmp", .params = homogeneous, .ret = .ordering_t, .conf = &.{ Type.int, Type.str, Type.bool } },
     .{ .slot = .add, .name = "Add", .method = "add", .params = homogeneous, .ret = .self_t, .conf = &.{Type.int} },
     .{ .slot = .sub, .name = "Sub", .method = "sub", .params = homogeneous, .ret = .self_t, .conf = &.{Type.int} },

@@ -1,0 +1,21 @@
+struct Plain { x: int }
+
+extern struct Point { x: f32, y: f32 }
+
+extern struct Bad {
+    s: str,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    p: Plain,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    q: Point,
+}
+
+extern "c" {
+    fn fill(mut n: int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
+    fn move(mut p: Point)
+}
+
+fn main() -> int {
+    n := 1
+    p := Point { x: 1.0, y: 2.0 }
+    unsafe { move(p) }
+    return n
+}

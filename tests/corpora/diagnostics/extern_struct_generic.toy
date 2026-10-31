@@ -1,0 +1,5 @@
+extern struct Box[T] { x: T }  #~ ERROR [P0003] an extern struct cannot be generic
+
+fn main() -> int {
+    return 0
+}

@@ -30,7 +30,7 @@ pub fn renderType(a: std.mem.Allocator, buf: *std.ArrayList(u8), t: Type, layout
         .int => try buf.appendSlice(a, t.intName()),
         .bool => try buf.appendSlice(a, "bool"),
         .str => try buf.appendSlice(a, "str"),
-        .float => try buf.appendSlice(a, "float"),
+        .float => try buf.appendSlice(a, t.floatName()),
         .unit => try buf.appendSlice(a, "()"),
         .rawptr => try buf.appendSlice(a, "rawptr"),
         .cstr => try buf.appendSlice(a, "cstr"),

@@ -610,6 +610,15 @@ pub fn isMutParam(tree: Tree, tokens: []const Token, param_idx: Index) bool {
     return n.tag == .param and n.main_token > 0 and tokens[n.main_token - 1].tag == .kw_mut;
 }
 
+/// True when the struct decl at `decl_idx` is an `extern struct` (C layout at the C
+/// boundary). Detected like `mut`, by the `extern struct` keywords before its name, so the
+/// node shape stays as it was.
+pub fn isExternStruct(tree: Tree, tokens: []const Token, decl_idx: Index) bool {
+    const n = tree.nodes[decl_idx.int()];
+    if (n.tag != .struct_decl and n.tag != .tuple_struct_decl) return false;
+    return n.main_token >= 2 and tokens[n.main_token - 1].tag == .kw_struct and tokens[n.main_token - 2].tag == .kw_extern;
+}
+
 /// True when token `i` is the identifier `self`: a method's receiver, recognized by its
 /// text like `mut` by adjacency (see `isMutParam`).
 pub fn isSelfTok(tokens: []const Token, src: []const u8, i: usize) bool {

@@ -722,7 +722,9 @@ pub fn lowerExpr(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Operand
         },
         .literal_float => {
             const f = Literal.floatValue(b.in.tokens[n.main_token].text(b.in.source)) orelse 0.0;
-            return .{ .value = try b.emit(.{ .fconst = f }, Typecheck.Type.float) };
+            // An f32 constant holds the f32 value, so codegen materializes its bits exactly.
+            const v: f64 = if (ty.isF32()) @as(f32, @floatCast(f)) else f;
+            return .{ .value = try b.emit(.{ .fconst = v }, ty) };
         },
         .literal_bool => {
             const t = b.in.tokens[n.main_token].tag == .kw_true;
@@ -1041,7 +1043,7 @@ fn lowerBinOp(b: *Builder, op_tok: u32, op: TokenTag, lhs_node: Ast.Index, rhs_n
                 .slash_dot => .{ .fdiv = bin },
                 else => unreachable,
             };
-            return .{ .value = try b.emit(ir_op, Typecheck.Type.float) };
+            return .{ .value = try b.emit(ir_op, b.in.nodes.typeOf(lhs_node)) };
         },
         .lt_dot, .gt_dot, .le_dot, .ge_dot => {
             const lhs = operandValue(try lowerExpr(b, lhs_node));
@@ -2227,7 +2229,7 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
     }
 
     const target: CallTarget = if (callee.kind == .import and callee_gid < b.in.sigs.len)
-        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params } }
+        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask } }
     else
         .{ .direct = callee };
     const result = try emitCall(b, target, args, result_ty, n.main_token);
@@ -2378,14 +2380,14 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
 /// An `extern` callee also carries its declared param types.
 pub const CallTarget = union(enum) {
     direct: Link.SymName,
-    import: struct { sym: Link.SymName, params: []const Typecheck.Type },
+    import: struct { sym: Link.SymName, params: []const Typecheck.Type, by_ptr: u64 = 0 },
     indirect: Ir.ValueId,
 };
 
 fn callOp(target: CallTarget, args: []Ir.Operand, ret_slot: Ir.SlotId) Ir.Op {
     return switch (target) {
         .direct => |callee| .{ .call = .{ .callee = callee, .args = args, .ret_slot = ret_slot } },
-        .import => |im| .{ .call = .{ .callee = im.sym, .args = args, .ret_slot = ret_slot, .params = im.params } },
+        .import => |im| .{ .call = .{ .callee = im.sym, .args = args, .ret_slot = ret_slot, .params = im.params, .by_ptr = im.by_ptr } },
         .indirect => |t| .{ .call_indirect = .{ .target = t, .args = args, .ret_slot = ret_slot } },
     };
 }
@@ -2798,9 +2800,11 @@ fn lowerConvMethod(b: *Builder, node_idx: Ast.Index, cv: ConvCall) error{OutOfMe
         }
         const into_ty = b.in.nodes.typeOf(node_idx);
         if (into_ty.kind == .float) {
-            // int -> float: lossless single scvtf. No Result, no witness, no slot.
+            // int -> float: lossless single scvtf; between float and f32 one fcvt. No
+            // Result, no witness, no slot.
             const v = operandValue(try lowerExpr(b, cv.recv));
-            return .{ .value = try b.emit(.{ .scvtf = v }, Typecheck.Type.float) };
+            if (recv_ty.kind == .float) return .{ .value = try b.emit(.{ .fcvt = v }, into_ty) };
+            return .{ .value = try b.emit(.{ .scvtf = v }, into_ty) };
         }
         if (isCharTy(b, into_ty)) {
             // byte -> char: construct `char{0: byte}` (a byte is always a valid scalar).
@@ -2816,7 +2820,9 @@ fn lowerConvMethod(b: *Builder, node_idx: Ast.Index, cv: ConvCall) error{OutOfMe
     }
 
     // try_into: build a `Result[T, ConvErr]` into a fresh slot.
-    const v = if (recv_is_char) try loadCharCodepoint(b, cv.recv) else operandValue(try lowerExpr(b, cv.recv));
+    const v0 = if (recv_is_char) try loadCharCodepoint(b, cv.recv) else operandValue(try lowerExpr(b, cv.recv));
+    // The float -> int witness takes a float; an f32 widens to one exactly first.
+    const v = if (recv_ty.isF32()) try b.emit(.{ .fcvt = v0 }, Typecheck.Type.float) else v0;
     const call_ty = b.in.nodes.typeOf(node_idx);
     const e = b.in.enum_layouts[call_ty.enum_id];
     const dst_T = Typecheck.somePayload(e);

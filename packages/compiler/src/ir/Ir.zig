@@ -94,8 +94,14 @@ pub const Call = struct {
     ret_slot: SlotId,
     /// An `extern` callee's declared param types, borrowed from the checker's
     /// signatures. The C convention sizes a stack argument by its declared type, and an
-    /// operand can carry another int width (a literal's `int`, or a forwarded store).
+    /// operand can carry another int width (a literal's `int`, or a forwarded store). A
+    /// `mut` extern struct param keeps its struct type while its operand is the address of
+    /// the argument (see `isByPtrArg`).
     params: []const Type = &.{},
+    /// Bit `i`: argument `i` is a `mut` extern param, passed to C as a pointer. Recorded
+    /// from the callee's signature because the operand's type cannot tell: the address of a
+    /// closure-captured local is its box pointer, a `rawptr`.
+    by_ptr: u64 = 0,
 };
 
 /// An indirect call. `target` is a computed value holding the callee's runtime
@@ -186,6 +192,9 @@ pub const Op = union(enum) {
     /// f64 value → signed i64 value, truncating toward zero (FCVTZS). Pure. Emitted ONLY inside the
     /// range-guarded float→int witness, so the hardware saturation is never observable.
     fcvtzs: ValueId,
+    /// Between `float` and `f32` (FCVT), the direction from the operand and result types:
+    /// to `float` exact, to `f32` rounding to nearest. Pure.
+    fcvt: ValueId,
 
     call_indirect: CallIndirect,
 
@@ -283,8 +292,16 @@ pub const Function = struct {
     /// or an arg lands at the wrong offset (SIGBUS).
     /// The type call argument `i` is passed as: its declared type when the callee has
     /// `params` (an `extern`), else its operand's type.
-    pub fn argType(func: *const Function, args: []const Operand, params: []const Type, i: usize) Type {
-        return if (params.len == args.len) params[i] else func.operandType(args[i]);
+    pub fn argType(func: *const Function, args: []const Operand, params: []const Type, by_ptr: u64, i: usize) Type {
+        if (params.len != args.len) return func.operandType(args[i]);
+        return if (isByPtrArg(by_ptr, i)) Type.rawptr else params[i];
+    }
+
+    /// Whether call argument `i` is a `mut` extern struct param: the C callee gets a
+    /// pointer, and the operand is the address of the toy value it is copied from and back
+    /// into.
+    pub fn isByPtrArg(by_ptr: u64, i: usize) bool {
+        return i < 64 and (by_ptr >> @intCast(i)) & 1 != 0;
     }
 
     pub fn operandType(func: *const Function, op: Operand) Type {
@@ -373,7 +390,7 @@ fn renderType(
         .bool => try out.writeAll("bool"),
         .str => try out.writeAll("str"),
         .never => try out.writeAll("never"),
-        .float => try out.writeAll("float"),
+        .float => try out.writeAll(ty.floatName()),
         .rawptr => try out.writeAll("rawptr"),
         .cstr => try out.writeAll("cstr"),
         .@"struct" => {
@@ -506,6 +523,7 @@ fn renderInstr(
         .fdiv => |b| try out.print("fdiv %{d}, %{d}\n", .{ b.lhs, b.rhs }),
         .fcmp => |c| try out.print("fcmp {s} %{d}, %{d}\n", .{ fcondName(c.cc), c.lhs, c.rhs }),
         .scvtf => |v| try out.print("scvtf %{d}\n", .{v}),
+        .fcvt => |v| try out.print("fcvt %{d}\n", .{v}),
         .fcvtzs => |v| try out.print("fcvtzs %{d}\n", .{v}),
         .call_indirect => |c| {
             try out.print("call_indirect %{d}(", .{c.target});
