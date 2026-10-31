@@ -45,6 +45,9 @@ pub const Layout = struct {
     /// carried through so codegen reads it directly rather than re-deriving tuple-ness
     /// by sniffing whether the first field name leads with a digit.
     is_tuple: bool = false,
+    /// An `extern struct`: toy code keeps it in its own layout, and an extern call passes
+    /// it in C layout (`Abi.cLayout`). Copied from `StructSym`.
+    is_extern: bool = false,
     /// The template name of a reified generic instance (`Pair` for `Pair$int`), else null.
     /// Owned. Copied from `StructSym`; see `displayName`.
     source_name: ?[]const u8 = null,
@@ -172,6 +175,9 @@ pub const StructSym = struct {
     /// (`N(args)` is positional, not `N{..}`) and `.N` access in the checker. Layout /
     /// derive / Display reuse the record machinery over the numeric field names.
     is_tuple: bool = false,
+    /// An `extern struct S { .. }`: its fields must be C types, and an extern call passes
+    /// it in C layout. Set at registration from the decl's `extern` keyword.
+    is_extern: bool = false,
     /// The template name of a reified generic instance, else null. Set in
     /// `reifyAppToStruct`; borrows the template's `name`.
     source_name: ?[]const u8 = null,
@@ -794,6 +800,7 @@ pub fn snapshotLayouts(gpa: std.mem.Allocator, structs: []const StructSym) ![]La
             .size = s.size,
             .@"align" = s.@"align",
             .is_tuple = s.is_tuple,
+            .is_extern = s.is_extern,
             .source_name = if (s.source_name) |sn| try gpa.dupe(u8, sn) else null,
             .native_family = s.native_family,
             .fn_sig = if (s.fn_sig) |fs| .{ .params = try gpa.dupe(Type, fs.params), .ret = fs.ret } else null,

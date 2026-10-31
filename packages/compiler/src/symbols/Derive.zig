@@ -143,10 +143,11 @@ pub fn lessThan(_: void, a: Derive, b: Derive) bool {
 /// injective — two distinct recipes never share a key (the kind + enum flag + id are
 /// fixed-width). Used by the synthesis worklist dedup.
 pub fn writeKey(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), protocol_id: u32, kind: Kind, conform_ty: Type) !void {
-    // Derive recipes only ever target struct/enum nominal types; the key deliberately
-    // omits the int descriptor, which is only sound because no `.int` conformer reaches
-    // here. Pin that so the omission is principled, not an accidental drop.
-    std.debug.assert(!Type.carriesIntDesc(conform_ty.kind));
+    // Derive recipes only ever target struct/enum nominal types (and the float->int
+    // witness, anchored on `float`); the key deliberately omits the descriptor byte, which
+    // is only sound because no `.int` or `f32` conformer reaches here. Pin that so the
+    // omission is principled, not an accidental drop.
+    std.debug.assert(!Type.carriesIntDesc(conform_ty.kind) or Type.eql(conform_ty, Type.float));
     var w: [4]u8 = undefined;
     std.mem.writeInt(u32, &w, protocol_id, .little);
     try buf.appendSlice(gpa, &w);

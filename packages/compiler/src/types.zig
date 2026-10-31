@@ -183,6 +183,7 @@ pub const refs = struct {
         // An integer type renders its sign/width spelling (`int8`/`uint`/…), not the
         // bare `int` kind tag — the single source both passes share.
         if (ty.kind == .int) return ty.intName();
+        if (ty.kind == .float) return ty.floatName();
         return @tagName(ty.kind);
     }
 
@@ -1416,7 +1417,7 @@ pub fn isBuiltinTypeMethod(recv: Type, name: []const u8, char_id: ?u32) bool {
 
 /// The kind of a conversion the `Into`/`TryInto` recognizer accepts. `widen`/`narrow`
 /// are the int↔int cases; the four `char_*`/`*_char` cases are the char surface.
-pub const ConvKind = enum { widen, narrow, char_to_int, byte_to_char, int_to_char, char_to_byte, int_to_float, float_to_int };
+pub const ConvKind = enum { widen, narrow, char_to_int, byte_to_char, int_to_char, char_to_byte, int_to_float, float_to_int, float_to_float };
 
 /// Whether `t` is the compiler-provided `char` struct (`char_id` from the prelude). The
 /// single source of the "is this char" predicate; the checker and lower delegate here.
@@ -1455,6 +1456,10 @@ pub fn builtinConvMethod(recv: Type, expected: Type, member: []const u8, char_id
         // Signed / sub-64-bit only: a 64-bit unsigned >= 2^63 would scvtf negative (T0018).
         if (recv.isInteger() and expected.kind == .float and (recv.isSigned() or recv.intBits() < 64))
             return .{ .kind = .int_to_float, .target = expected };
+        // f32 -> float is exact; float -> f32 rounds to nearest (and overflows to inf) as
+        // int -> float rounds past 2^53: one precision change with no failure to report.
+        if (recv.kind == .float and expected.kind == .float and !Type.eql(recv, expected))
+            return .{ .kind = .float_to_float, .target = expected };
         return null;
     }
     if (std.mem.eql(u8, member, "try_into")) {
@@ -2830,6 +2835,7 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
         if (t.enums.items[id].is_generic) continue;
         try LayoutEngine.layoutEnum(t.layoutEnv(), @intCast(id));
     }
+    try t.checkExternStructs();
 
     try t.decodeImplHeads(mods);
 
@@ -4979,9 +4985,9 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
     const mc = t.graph.mods[mod];
     const core = StdNames.isCoreModule(mc.bundled, mc.path);
     const bad_type_msg = if (core)
-        "extern function parameter/return type must be int, float, str, rawptr, cstr, or bool"
+        "extern function parameter/return type must be int, float, f32, str, rawptr, cstr, bool, or an extern struct"
     else
-        "extern function parameter/return type must be int, float, rawptr, cstr, or bool";
+        "extern function parameter/return type must be int, float, f32, rawptr, cstr, bool, or an extern struct";
     const params = try t.gpa.alloc(Type, proto.params.len);
     for (proto.params, 0..) |param_idx, i| {
         const param = t.tree.nodes[param_idx.int()];
@@ -4991,7 +4997,12 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
         if (pty.kind == .str and !core) {
             try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "an extern function cannot take a 'str', which is not NUL-terminated; take a 'cstr' and pass 's.to_cstr()' (std/ffi)", .{});
             params[i] = .invalid;
-        } else if (externTypeOk(pty)) {
+        } else if (Ast.isMutParam(t.tree, t.tokens, param_idx) and !t.isExternStructTy(pty) and pty.kind != .invalid) {
+            // A `mut` argument passes its address, which C reads in C layout; only an
+            // extern struct is laid out that way at the boundary.
+            try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "a 'mut' extern parameter is a C pointer, so its type must be an extern struct", .{});
+            params[i] = .invalid;
+        } else if (t.externTypeOk(pty)) {
             params[i] = pty;
         } else {
             try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "{s}", .{bad_type_msg});
@@ -5004,11 +5015,11 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
     if (proto.ret_type != Ast.none and ret.kind == .str and !core) {
         try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "an extern function cannot return a 'str'; return a 'cstr' and copy it with 'c.to_str()' (std/ffi)", .{});
         ret = .invalid;
-    } else if (proto.ret_type != Ast.none and ret.kind != .never and !externTypeOk(ret)) {
+    } else if (proto.ret_type != Ast.none and ret.kind != .never and !t.externTypeOk(ret)) {
         try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "{s}", .{bad_type_msg});
         ret = .invalid;
     }
-    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod });
+    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod, .mut_mask = Modes.ofProto(t.tree, t.tokens, proto) });
 }
 
 /// The C-ABI type set an `extern` param/return may use: any integer width, `bool`,
@@ -5017,10 +5028,36 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
 /// param spreads to a C `(const char* buf, size_t len)` pair — the only way to hand a
 /// toy string to a raw C call in plain toy source (no address-of-local exists to
 /// decompose it into a `rawptr`). A `float` is an f64 riding the V-register (NSRN)
-/// sequence, matching C `double`. Poison (`.invalid`) is accepted so a prior error
-/// does not cascade into a second T0037.
-fn externTypeOk(ty: Type) bool {
-    return ty.isInteger() or ty.kind == .bool or ty.isRawPtr() or ty.kind == .cstr or ty.kind == .str or ty.kind == .float or ty.kind == .invalid;
+/// sequence, matching C `double`, and an `f32` the same sequence as a C `float`. An
+/// extern struct passes in C layout (by value, or by pointer as a `mut` param). Poison
+/// (`.invalid`) is accepted so a prior error does not cascade into a second T0037.
+fn externTypeOk(t: *const Typecheck, ty: Type) bool {
+    return ty.kind == .str or t.cTypeOk(ty);
+}
+
+/// A C type: what an extern struct's field may be, and (with core's `str`) an extern
+/// signature's. Poison is accepted so a prior error does not cascade.
+fn cTypeOk(t: *const Typecheck, ty: Type) bool {
+    return ty.isInteger() or ty.kind == .bool or ty.isRawPtr() or ty.kind == .cstr or ty.kind == .float or ty.kind == .invalid or t.isExternStructTy(ty);
+}
+
+fn isExternStructTy(t: *const Typecheck, ty: Type) bool {
+    return ty.isStruct() and ty.struct_id < t.structs.items.len and t.structs.items[ty.struct_id].is_extern;
+}
+
+/// An `extern struct`'s fields must be C types (T0037 at each other one), so the C
+/// layout an extern call passes it in exists.
+fn checkExternStructs(t: *Typecheck) !void {
+    for (t.structs.items) |s| {
+        if (!s.is_extern or s.is_generic or s.decl_node == Ast.none) continue;
+        _ = t.gphSelect(s.mod);
+        const decl = t.tree.nodes[s.decl_node.int()];
+        const fields = Ast.rangeSlice(t.tree, decl.lhs.int());
+        for (fields, s.field_types) |f, fty| {
+            if (!t.cTypeOk(fty))
+                try t.sink.report(.{ .span = t.fieldTypeSpan(f), .code = .T0037 }, "an extern struct field must be a C type: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct", .{});
+        }
+    }
 }
 
 /// Append a placeholder `(str) -> ret` sig for a bodyless builtin (`panic`/the intrinsics).
@@ -10587,6 +10624,19 @@ test "a cstr is a C-ABI extern param and return, distinct from rawptr" {
     try expectOnlyDiag("extern fn strlen(s: cstr) -> int\nextern fn malloc(n: int) -> rawptr\nfn main() -> int {\n return unsafe { strlen(malloc(1)) }\n}\n", .T0040);
 }
 
+test "an extern struct passes to and from an extern; a field that is no C type is T0037" {
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount("extern struct V { x: f32, y: f32 }\nextern struct R { a: V, b: V, n: uint8, p: rawptr, s: cstr, ok: bool, d: float, w: int64 }\nextern fn grow(r: R, d: f32) -> R\nextern fn fill(mut v: V)\nfn main() -> int {\n v := V { x: 1.0, y: 2.0 }\n unsafe { fill(v) }\n return 0\n}\n"));
+    try expectOnlyDiag("struct P { x: int }\nextern struct V { p: P }\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("extern struct V { s: str }\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("struct P { x: int }\nextern fn f(p: P) -> int\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("extern fn f(mut n: int)\nfn main() -> int {\n return 0\n}\n", .T0037);
+}
+
+test "a float literal takes f32 where one is expected, and beside an f32 operand" {
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount("fn main() -> int {\n a: f32 = 1.5\n b := a *. 2.0\n c: f32 = 1.0 +. 2.0\n d: float = (b +. c).into()\n e: f32 = d.into()\n if e == a { return 1 }\n return 0\n}\n"));
+    try expectOnlyDiag("fn main() -> int {\n a: f32 = 1.5\n b: float = 2.0\n c := a +. b\n return 0\n}\n", .T0044);
+}
+
 test "a user fn named panic keeps its declared type" {
     try testing.expectEqual(@as(usize, 0), try checkDiagCount("fn panic(_s: str) -> int { 7 }\nfn main() -> int {\n return panic(\"x\")\n}\n"));
     try expectOnlyDiag("fn panic(_s: str) -> int { 7 }\nfn g() -> bool {\n return panic(\"x\")\n}\nfn main() {\n g()\n}\n", .T0042);
@@ -11138,6 +11188,12 @@ test "builtinConvMethod int↔float verdicts" {
     // float.into() to int and int.try_into() to float are NOT this surface.
     try testing.expect(builtinConvMethod(Type.float, Type.int, "into", null) == null);
     try testing.expect(builtinConvMethod(Type.int, Type.float, "try_into", null) == null);
+    // f32 <-> float both ways through into; int -> f32 and f32 -> int as for float.
+    try testing.expectEqual(ConvKind.float_to_float, builtinConvMethod(Type.float32, Type.float, "into", null).?.kind);
+    try testing.expectEqual(ConvKind.float_to_float, builtinConvMethod(Type.float, Type.float32, "into", null).?.kind);
+    try testing.expect(builtinConvMethod(Type.float32, Type.float32, "into", null) == null);
+    try testing.expectEqual(Type.float32, builtinConvMethod(Type.int32, Type.float32, "into", null).?.target);
+    try testing.expectEqual(ConvKind.float_to_int, builtinConvMethod(Type.float32, Type.int, "try_into", null).?.kind);
 }
 
 test "builtinConvMethod char verdicts (char↔int/byte)" {

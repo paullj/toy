@@ -1,0 +1,56 @@
+# expect: exit 0
+# expect: stdout "fill 12 -1 300\ncaptured 23 -1 300 23\nnorm 10.0\nnamed ada 8\nok\n"
+# libdir: "@harness"
+# A `mut` extern parameter of an extern struct is a C pointer to the caller's variable:
+# the callee reads and writes it through C layout, also when a closure captures the
+# variable (its home is then a box). A struct holding a cstr and a rawptr
+# keeps both alive across collections, and they survive the trip through C.
+import std/io
+import std/ffi
+import std/gc
+import std/vec
+
+extern struct Small { a: int32, b: int8, c: int16 }
+extern struct Vec4d { x: float, y: float, z: float, w: float }
+extern struct Named { name: cstr, data: rawptr, n: uint16 }
+
+extern "toyffi" {
+    fn toyffi_small_fill(mut s: Small, a: int32)
+    fn toyffi_vec4d_norm1(mut v: Vec4d) -> float
+    fn toyffi_named_echo(n: Named) -> Named
+    fn toyffi_counter_new(start: int) -> rawptr
+    fn toyffi_counter_bump(p: rawptr) -> int
+}
+
+fn churn() {
+    i := 0
+    while i < 3000 {
+        junk: Vec[str] = []
+        junk.push("x".concat(i.to_string()))
+        i += 1
+    }
+    gc.collect()
+}
+
+fn main() -> int {
+    s := Small { a: 2, b: 0, c: 0 }
+    unsafe { toyffi_small_fill(s, 10) }
+    io.println("fill ".concat(s.a.to_string()).concat(" ").concat(s.b.to_string()).concat(" ").concat(s.c.to_string()))
+    k := Small { a: 3, b: 0, c: 0 }
+    peek := fn() -> int32 { k.a }
+    unsafe { toyffi_small_fill(k, 20) }
+    io.println("captured ".concat(k.a.to_string()).concat(" ").concat(k.b.to_string()).concat(" ").concat(k.c.to_string()).concat(" ").concat(peek().to_string()))
+    v := Vec4d { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }
+    io.println("norm ".concat(unsafe { toyffi_vec4d_norm1(v) }.to_string()))
+    held: Vec[Named] = []
+    held.push(Named { name: "ad".concat("a").to_cstr(), data: unsafe { toyffi_counter_new(6) }, n: 7 })
+    churn()
+    n := unsafe { toyffi_named_echo(held.get(0).expect("held")) }
+    churn()
+    io.println("named ".concat(n.name.to_str()).concat(" ").concat(n.n.to_string()))
+    unsafe { toyffi_counter_bump(n.data) }
+    if (unsafe { toyffi_counter_bump(n.data) }) != 8 { return 1 }
+    if gc.collections() < 2 { return 2 }
+    io.println("ok")
+    return 0
+}

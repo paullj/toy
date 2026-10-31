@@ -2,7 +2,8 @@
 
 A program calls a C function by declaring it as an `extern` and calling it inside
 `unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` (`cstr.toy` and `cstr_libc.toy`
-for C strings) and
+for C strings, `f32.toy`, `structs.toy`, `struct_ptr.toy` and `struct_libc.toy` for `f32`
+and C structs) and
 `tests/corpora/language-features/modules/ffi_extern/` and `ffi_dylib/`.
 
 ```toy
@@ -22,9 +23,9 @@ fn main() -> int {
 
 ## Declaring externs
 
-- A bare `extern fn name(params) -> R` declares one C function. It has no body, no type
-  parameters and no `mut` params (P0006), and its name is the C symbol, never
-  qualified by the module.
+- A bare `extern fn name(params) -> R` declares one C function. It has no body and no
+  type parameters, and its name is the C symbol, never qualified by the module. A `mut`
+  param must be an extern struct; it is a C pointer (see [Structs](#structs)).
 - An `extern "lib" { .. }` block declares several functions of one library, one per
   line, and links that library (see [Libraries](#libraries)). A block without a name,
   `extern { .. }`, and a bare `extern fn` both bind to libSystem, which holds libc and
@@ -39,14 +40,78 @@ fn main() -> int {
 ## Types
 
 An extern's params and return use C ABI types: an integer of any width, `float` (C
-`double`), `bool`, `rawptr` (C `void*`) and `cstr` (C `const char*`, see
-[C strings](#c-strings)). Omitting `-> R` is a `void` return, and `-> never` is a C
-function that does not return (`exit`, `abort`). Any other type is T0037, reported once
-at the type; the extern stays declared, so its calls add no second error.
+`double`), `f32` (C `float`), `bool`, `rawptr` (C `void*`), `cstr` (C `const char*`, see
+[C strings](#c-strings)) and an extern struct (see [Structs](#structs)). Omitting
+`-> R` is a `void` return, and `-> never` is a C function that does not return (`exit`,
+`abort`). Any other type is T0037, reported once at the type; the extern stays
+declared, so its calls add no second error.
 
 Calls follow Apple's arm64 C convention: a narrow integer or `bool` returned by C is
-widened to its toy width, and arguments past the eighth that go on the stack are packed
-at their own size and alignment, as C expects.
+widened to its toy width, a `float` or `f32` goes in a V register (`d` or `s`), and
+arguments that go on the stack are packed at their own size and alignment, as C
+expects.
+
+### f32
+
+`f32` is a single-precision float, a type of its own beside `float`; it works in toy code
+as well as at the C boundary.
+
+- A float literal is an `f32` where one is expected (`x: f32 = 0.1`, an `f32` param, or
+  beside an `f32` operand: `x *. 2.0`), rounded to the nearest `f32`.
+- The dotted operators (`+. -. *. /.`, `<. >. <=. >=.`) and `==`/`!=` take two `f32`s.
+  An `f32` and a `float` do not mix (T0044); convert one.
+- `x.into()` converts between `f32` and `float`: to `float` exactly, to `f32` rounded
+  to nearest (a value past the `f32` range becomes `inf`, as in C). An integer converts
+  to `f32` with `into` as it does to `float`, and an `f32` to an `int` with `try_into`.
+- With std/float (which std/io brings), an `f32` prints the fewest digits that read back
+  as the same `f32`: `0.1`, not `0.10000000149011612`.
+
+## Structs
+
+An `extern struct` is a struct whose fields are C types: integers of any width, `f32`,
+`float`, `bool`, `rawptr`, `cstr` and other extern structs. Any other field is T0037. It
+cannot be generic (P0003). In toy code it is an ordinary struct: it is built, copied,
+compared and printed like any other, and can have methods.
+
+```toy
+import std/io
+
+extern struct DivT { quot: int32, rem: int32 }
+extern struct Timeval { sec: int, usec: int32 }
+
+extern {
+    fn div(num: int32, den: int32) -> DivT
+    fn gettimeofday(mut tv: Timeval, tz: int) -> int32
+}
+
+fn main() -> int {
+    d := unsafe { div(17, 5) }
+    io.println(d)                            # DivT{quot: 3, rem: 2}
+    tv := Timeval { sec: 0, usec: 0 }
+    unsafe { gettimeofday(tv, 0) }           # C writes tv in place
+    io.println(tv.sec > 0)
+    return 0
+}
+```
+
+At an extern call it crosses in C layout: each field at its C size and alignment, the
+struct padded to its largest alignment, as C lays out the same declaration.
+
+- **By value** it follows Apple's arm64 convention: a struct of one to four fields that
+  are all `f32` or all `float` (nested structs counted field by field) goes in V
+  registers; any other struct of up to 16 bytes in one or two X registers; a larger one
+  as a pointer to a copy the callee may change. A struct result comes back the same way,
+  a large one through the buffer the caller points `x8` at. A struct that does not fit in
+  the registers left goes on the stack whole.
+- **By pointer**, a `mut` param (`fn fill(mut s: S)` is C's `void fill(struct S *s)`):
+  the argument must be a variable or another place, as for a toy `mut` param, and C
+  reads and writes it in place. The pointer is valid only during the call, so a C
+  library must not keep it.
+
+Toy code holds an extern struct in its own layout and copies it to and from C layout
+at each call, so the pointer a `mut` param passes is to that copy, written back when the
+call returns. A struct holding a `cstr` or a `rawptr` keeps what they point at alive
+like any other struct field.
 
 A `str` is not allowed in a program's extern (T0037): it is a pointer and a length
 with no NUL at the end, so a C function reading a `const char*` would run past it.
@@ -200,5 +265,6 @@ library relinks against the new set.
 ## Not yet
 
 - Static libraries (`.a`, `.o`), and libraries in a project manifest.
-- `f32` and C structs (`extern struct`): #151.
+- Fixed-size arrays in an extern struct, and a C pointer to a struct that C returns or
+  keeps (a `rawptr` toy cannot read).
 - C callbacks and varargs (`printf`): #152, #153.

@@ -469,6 +469,8 @@ pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layo
         try buf.appendSlice(gpa, fn_);
         try buf.append(gpa, 0);
         try buf.append(gpa, @intFromEnum(fty.kind));
+        // A C layout sizes a field by its width, which toy's 8-byte cells do not.
+        if (l.is_extern) try buf.append(gpa, @bitCast(fty.int_desc));
         var ob: [4]u8 = undefined;
         std.mem.writeInt(u32, &ob, off, .little);
         try buf.appendSlice(gpa, &ob);
@@ -478,6 +480,7 @@ pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layo
     std.mem.writeInt(u32, sz[0..4], l.size, .little);
     std.mem.writeInt(u32, sz[4..8], l.@"align", .little);
     try buf.appendSlice(gpa, &sz);
+    if (l.is_extern) try buf.appendSlice(gpa, "extern");
 }
 
 /// Index-free enum layout descriptor: name + tag_size + payload_off + per-variant

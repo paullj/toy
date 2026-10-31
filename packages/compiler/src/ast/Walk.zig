@@ -398,6 +398,7 @@ fn walkInner(src: Source, idx: Ast.Index, collect: bool, visitor: anytype) Visit
         },
         .struct_decl => {
             try emit(visitor, .{ .leaf = leaf });
+            if (Ast.isExternStruct(tree, src.tokens, idx)) try emit(visitor, .{ .raw_leaf = "extern" });
             const fields = Ast.rangeSlice(tree, n.lhs.int());
             try emit(visitor, .{ .count = @intCast(fields.len) });
             for (fields) |f| try walkInner(src, f, collect, visitor);
@@ -418,6 +419,7 @@ fn walkInner(src: Source, idx: Ast.Index, collect: bool, visitor: anytype) Visit
         },
         .tuple_struct_decl => {
             try emit(visitor, .{ .leaf = leaf });
+            if (Ast.isExternStruct(tree, src.tokens, idx)) try emit(visitor, .{ .raw_leaf = "extern" });
             const types = Ast.rangeSlice(tree, n.lhs.int());
             try emit(visitor, .{ .count = @intCast(types.len) });
             for (types) |ty| try walkInner(src, ty, collect, visitor);

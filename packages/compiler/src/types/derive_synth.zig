@@ -533,9 +533,9 @@ fn descLess(_: void, a: Type, b: Type) bool {
     const cb = descClass(b);
     if (ca != cb) return ca < cb;
     return switch (ca) {
-        // A tie on scalar rank means both are `.int` (every other scalar has a unique
-        // rank); break it on the sign/width byte so distinct int widths get a stable
-        // order — else the unstable sort could reorder them across `-jN`.
+        // A tie on scalar rank means both are `.int` or both `.float` (`float`/`f32`);
+        // break it on the sign/width byte so distinct widths get a stable order — else
+        // the unstable sort could reorder them across `-jN`.
         0 => if (scalarRank(a) != scalarRank(b))
             scalarRank(a) < scalarRank(b)
         else

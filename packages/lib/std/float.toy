@@ -6,17 +6,36 @@ import core/text
 
 impl float has Display {
     fn display(self) -> str {
-        s := fmt.shortest(self)
-        # Point 9999 marks inf or NaN (core/fmt); only NaN's digits start with 'N' (78).
-        if s.point == 9999 {
-            if s.digits.byte_at(0) == 78 { return "NaN" }
-            if s.neg { return "-inf" }
-            return "inf"
-        }
-        body := plain_or_sci(s.digits, s.point)
-        if s.neg { return "-".concat(body) }
-        return body
+        return render(fmt.shortest(self))
     }
+}
+
+# An f32 widens to float exactly; the fewest significant digits (at most 9, which always
+# suffice) that round back to the same f32 are its shortest form.
+impl f32 has Display {
+    fn display(self) -> str {
+        d: float = self.into()
+        s := fmt.shortest(d)
+        if s.point == 9999 { return render(s) }
+        for n in 1..9 {
+            r := fmt.rounded(d, n)
+            back: f32 = fmt.parse("0.".concat(r.digits).concat("e").concat(r.point.to_string())).expect("dtoa digits").into()
+            if back == self || back == 0.0 -. self { return render(r) }
+        }
+        return render(fmt.rounded(d, 9))
+    }
+}
+
+fn render(s: fmt.Shortest) -> str {
+    # Point 9999 marks inf or NaN (core/fmt); only NaN's digits start with 'N' (78).
+    if s.point == 9999 {
+        if s.digits.byte_at(0) == 78 { return "NaN" }
+        if s.neg { return "-inf" }
+        return "inf"
+    }
+    body := plain_or_sci(s.digits, s.point)
+    if s.neg { return "-".concat(body) }
+    return body
 }
 
 # The float `s` spells in full, as C strtod reads it (so `inf`, `nan` and `1e999` -> inf

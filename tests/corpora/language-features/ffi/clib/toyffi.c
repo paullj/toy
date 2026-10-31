@@ -60,3 +60,127 @@ char *toyffi_shout(const char *s) {
     out[n + 1] = 0;
     return out;
 }
+
+// f32 rides the s registers; past v7 Apple packs each at 4 bytes.
+float toyffi_scalef(float x, float k) { return x * k; }
+
+double toyffi_widenf(float x) { return x; }
+
+float toyffi_sumf10(float a, float b, float c, float d, float e, float f, float g, float h,
+                    float i, float j) {
+    return a + b + c + d + e + f + g + h + i * 10 + j * 100;
+}
+
+// C layouts: small (8 bytes, padded), pair (16 bytes), big (> 16, by hidden pointer),
+// HFAs of floats and doubles (v registers), mixed (x registers), nested.
+struct toyffi_small {
+    int32_t a;
+    int8_t b;
+    int16_t c;
+};
+
+struct toyffi_pair {
+    long x;
+    int32_t y;
+    bool z;
+};
+
+struct toyffi_big {
+    long a, b, c;
+    int8_t d;
+};
+
+struct toyffi_vec2f {
+    float x, y;
+};
+
+struct toyffi_vec4d {
+    double x, y, z, w;
+};
+
+struct toyffi_mixed {
+    uint8_t r, g, b;
+    float alpha;
+};
+
+struct toyffi_rect {
+    struct toyffi_vec2f min, max;
+};
+
+struct toyffi_named {
+    const char *name;
+    void *data;
+    uint16_t n;
+};
+
+struct toyffi_small toyffi_small_make(int32_t a, int8_t b, int16_t c) {
+    struct toyffi_small s = {a, b, c};
+    return s;
+}
+
+long toyffi_small_sum(struct toyffi_small s) { return s.a + s.b * 1000 + s.c * 100000L; }
+
+struct toyffi_pair toyffi_pair_flip(struct toyffi_pair p) {
+    struct toyffi_pair r = {p.y, (int32_t)p.x, !p.z};
+    return r;
+}
+
+struct toyffi_big toyffi_big_make(long a) {
+    struct toyffi_big b = {a, a * 2, a * 3, (int8_t)-a};
+    return b;
+}
+
+// Writes its copy, which must not reach the caller's value.
+long toyffi_big_sum(struct toyffi_big b) {
+    long s = b.a + b.b + b.c + b.d;
+    b.a = 0;
+    return s;
+}
+
+struct toyffi_vec2f toyffi_vec2f_add(struct toyffi_vec2f a, struct toyffi_vec2f b) {
+    struct toyffi_vec2f r = {a.x + b.x, a.y + b.y};
+    return r;
+}
+
+struct toyffi_vec4d toyffi_vec4d_scale(struct toyffi_vec4d v, double k) {
+    struct toyffi_vec4d r = {v.x * k, v.y * k, v.z * k, v.w * k};
+    return r;
+}
+
+double toyffi_vec4d_dot(struct toyffi_vec4d a, struct toyffi_vec4d b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+struct toyffi_mixed toyffi_mixed_dim(struct toyffi_mixed m, float k) {
+    struct toyffi_mixed r = {(uint8_t)(m.r / 2), (uint8_t)(m.g / 2), (uint8_t)(m.b / 2), m.alpha * k};
+    return r;
+}
+
+float toyffi_rect_area(struct toyffi_rect r) { return (r.max.x - r.min.x) * (r.max.y - r.min.y); }
+
+struct toyffi_rect toyffi_rect_grow(struct toyffi_rect r, float d) {
+    struct toyffi_rect o = {{r.min.x - d, r.min.y - d}, {r.max.x + d, r.max.y + d}};
+    return o;
+}
+
+struct toyffi_named toyffi_named_echo(struct toyffi_named n) {
+    n.n += 1;
+    return n;
+}
+
+// Through a pointer: the callee reads and writes the caller's struct.
+void toyffi_small_fill(struct toyffi_small *s, int32_t a) {
+    s->a += a;
+    s->b = -1;
+    s->c = 300;
+}
+
+double toyffi_vec4d_norm1(const struct toyffi_vec4d *v) { return v->x + v->y + v->z + v->w; }
+
+// Seven ints leave one GPR, so the pair goes to the stack whole; two vec4d fill v0-v7,
+// so the vec2f goes to the stack too.
+double toyffi_spill(long a, long b, long c, long d, long e, long f, long g, struct toyffi_pair p,
+                    struct toyffi_vec4d v, struct toyffi_vec4d w, struct toyffi_vec2f q) {
+    return (double)(a + b + c + d + e + f + g) + (double)(p.x + p.y + p.z) + v.x + w.w +
+           (double)(q.x * q.y);
+}

@@ -32,6 +32,7 @@ pub const builtin_names = std.StaticStringMap(Type).initComptime(.{
     .{ "float", Type.float },
     .{ "rawptr", Type.rawptr },
     .{ "cstr", Type.cstr },
+    .{ "f32", Type.float32 },
 });
 
 /// The type kind. `invalid` is the poison/error type: it absorbs further errors
@@ -77,7 +78,10 @@ pub const Kind = enum(u8) { invalid, unit, int, bool, str, never, @"struct", @"e
 pub const IntWidth = enum(u3) { plat, w8, w16, w32, w64 };
 
 /// The sign+width descriptor an `.int`-kind `Type` carries in its otherwise-spare
-/// pad byte. Defaults to signed platform `int`, so `Type.int` (`.{ .kind = .int }`)
+/// pad byte. A `.float` reuses its width: `w32` is `f32`, the default is the 64-bit
+/// `float`, so `f32` shares every float path and stays a distinct type.
+///
+/// Defaults to signed platform `int`, so `Type.int` (`.{ .kind = .int }`)
 /// stays byte-identical to before this field existed. `packed struct(u8)` keeps
 /// `@sizeOf(Type)==12` and makes the descriptor a single deterministic byte for the
 /// fingerprint/dedup/order serializers.
@@ -110,6 +114,7 @@ pub const Type = struct {
     pub const float: Type = .{ .kind = .float };
     pub const rawptr: Type = .{ .kind = .rawptr };
     pub const cstr: Type = .{ .kind = .cstr };
+    pub const float32: Type = .{ .kind = .float, .int_desc = .{ .width = .w32 } };
 
     pub const uint: Type = .{ .kind = .int, .int_desc = .{ .signed = false } };
     pub const int8: Type = .{ .kind = .int, .int_desc = .{ .width = .w8 } };
@@ -202,7 +207,7 @@ pub const Type = struct {
     /// home for the int-only descriptor rule the coherence key once dropped: an identity
     /// serializer either folds `int_desc` for exactly these kinds or under-discriminates.
     pub fn carriesIntDesc(kind: Kind) bool {
-        return kind == .int;
+        return kind == .int or kind == .float;
     }
 
     pub fn eql(a: Type, b: Type) bool {
@@ -244,6 +249,16 @@ pub const Type = struct {
 
     pub fn isFloat(t: Type) bool {
         return t.kind == .float;
+    }
+
+    /// The single-precision `f32` (a `.float` of width `w32`).
+    pub fn isF32(t: Type) bool {
+        return t.kind == .float and t.int_desc.width == .w32;
+    }
+
+    /// The source spelling of a float type.
+    pub fn floatName(t: Type) []const u8 {
+        return if (t.isF32()) "f32" else "float";
     }
 
     pub fn isNumeric(t: Type) bool {
@@ -489,6 +504,17 @@ test "algebra: cstr is its own scalar kind, spelled cstr, not a rawptr" {
     try testing.expect(!Type.assignable(Type.rawptr, Type.cstr));
     try testing.expect(!Type.assignable(Type.cstr, Type.rawptr));
     try testing.expectEqual(IdField.none, Type.idField(.cstr));
+}
+
+test "algebra: f32 is a float of its own, spelled f32" {
+    try testing.expect(Type.eql(builtin_names.get("f32").?, Type.float32));
+    try testing.expect(Type.float32.isFloat() and Type.float32.isF32());
+    try testing.expect(!Type.float.isF32());
+    try testing.expect(!Type.assignable(Type.float, Type.float32));
+    try testing.expect(!Type.assignable(Type.float32, Type.float));
+    try testing.expectEqualStrings("f32", Type.float32.floatName());
+    try testing.expectEqualStrings("float", Type.float.floatName());
+    try testing.expect(Type.orderLeaf(Type.float, Type.float32) != .eq);
 }
 
 test "algebra: integer widths are distinct byte-foldable types" {

@@ -89,6 +89,54 @@ test "user dylibs: cstr params and returns run at -O0 and -O1" {
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-cstr", cstr_src, &.{ "-L", test_lib_dir }, "hello from C\n");
 }
 
+const structs_src =
+    \\import std/io
+    \\import std/ffi
+    \\import std/gc
+    \\
+    \\extern struct Small { a: int32, b: int8, c: int16 }
+    \\extern struct Big { a: int, b: int, c: int, d: int8 }
+    \\extern struct Vec2f { x: f32, y: f32 }
+    \\extern struct Rect { min: Vec2f, max: Vec2f }
+    \\extern struct Named { name: cstr, data: rawptr, n: uint16 }
+    \\
+    \\extern "toyffi" {
+    \\    fn toyffi_small_make(a: int32, b: int8, c: int16) -> Small
+    \\    fn toyffi_big_make(a: int) -> Big
+    \\    fn toyffi_rect_grow(r: Rect, d: f32) -> Rect
+    \\    fn toyffi_small_fill(mut s: Small, a: int32)
+    \\    fn toyffi_named_echo(n: Named) -> Named
+    \\    fn toyffi_scalef(x: f32, k: f32) -> f32
+    \\    fn toyffi_counter_new(start: int) -> rawptr
+    \\    fn toyffi_counter_bump(p: rawptr) -> int
+    \\}
+    \\
+    \\fn main() -> int {
+    \\    s := unsafe { toyffi_small_make(1, -2, 3) }
+    \\    unsafe { toyffi_small_fill(s, 4) }
+    \\    b := unsafe { toyffi_big_make(2) }
+    \\    r := unsafe { toyffi_rect_grow(Rect { min: Vec2f { x: 1.0, y: 1.0 }, max: Vec2f { x: 2.0, y: 3.0 } }, 0.5) }
+    \\    n := Named { name: "na".concat("me").to_cstr(), data: unsafe { toyffi_counter_new(s.a.into()) }, n: 1 }
+    \\    gc.collect()
+    \\    e := unsafe { toyffi_named_echo(n) }
+    \\    gc.collect()
+    \\    k := unsafe { toyffi_scalef(r.max.y, 2.0) }
+    \\    ok := s.a == 5 && s.b == -1 && s.c == 300 && b.c == 6 && b.d == -2 && r.min.x == 0.5 && k == 7.0 && e.n == 2 && unsafe { toyffi_counter_bump(e.data) } == 6
+    \\    io.println(if ok { e.name.to_str() } else { "bad" })
+    \\    0
+    \\}
+    \\
+;
+
+test "user dylibs: f32 and extern structs by value and by pointer run at -O0 and -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-structs", structs_src, &.{ "-L", test_lib_dir }, "name\n");
+}
+
 test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -96,6 +144,8 @@ test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     const io = threaded.io();
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-j0", calls_src, &.{ "-O0", "-L", test_lib_dir }, 0);
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-j1", calls_src, &.{ "-O1", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-sj0", structs_src, &.{ "-O0", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-sj1", structs_src, &.{ "-O1", "-L", test_lib_dir }, 0);
 }
 
 /// Run the built `toy` with `args` in `cwd_abs`, capturing its output (caller frees).

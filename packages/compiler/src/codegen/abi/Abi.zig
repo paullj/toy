@@ -194,6 +194,10 @@ pub const ParamLoc = union(enum) {
     /// A float that overflows v7 does NOT use this — it reuses `.stack` (8 raw
     /// bytes moved by GPR loads/stores, correct for the f64 bit pattern).
     fpr: u8,
+    /// A C homogeneous floating-point aggregate (an extern struct of up to four floats
+    /// or four doubles) in `count` consecutive V-registers from v`first`, one element
+    /// each; `single` when the elements are f32.
+    fpr_run: struct { first: u8, count: u8, single: bool },
     stack: struct { nsaa_off: u32, bytes: u32 },
     stack_ptr: u32,
     /// A zero-sized value (`()`): consumes no register and no stack byte; the
@@ -259,6 +263,43 @@ fn walkAbi(
     var nsrn: u32 = 0;
     var nsaa: u32 = 0;
     for (types_, 0..) |ty, i| {
+        // An extern struct passed to C goes in its C layout (AAPCS64 B.2-B.4, C.2-C.4):
+        // a homogeneous float aggregate in V-registers, else its C size picks a GPR run
+        // or a pointer to a copy. A struct that does not fit whole goes to the stack.
+        if (conv == .c and isCStruct(ty, layouts)) {
+            const size = cLayout(ty, layouts).size;
+            if (hfaOf(ty, layouts)) |h| {
+                if (nsrn + h.count <= num_fp_args) {
+                    out_locs[i] = .{ .fpr_run = .{ .first = @intCast(nsrn), .count = h.count, .single = h.single } };
+                    nsrn += h.count;
+                } else {
+                    nsrn = num_fp_args;
+                    nsaa = std.mem.alignForward(u32, nsaa, 8);
+                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = eightbytes(size) * 8 } };
+                    nsaa += eightbytes(size) * 8;
+                }
+            } else if (size > 16) {
+                if (ngrn < num_gpr_args) {
+                    out_locs[i] = .{ .gpr_ptr = @intCast(ngrn) };
+                    ngrn += 1;
+                } else {
+                    out_locs[i] = .{ .stack_ptr = nsaa };
+                    nsaa += 8;
+                }
+            } else {
+                const ebs = eightbytes(size);
+                if (ngrn + ebs <= num_gpr_args) {
+                    out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = @intCast(ebs) } };
+                    ngrn += ebs;
+                } else {
+                    ngrn = num_gpr_args;
+                    nsaa = std.mem.alignForward(u32, nsaa, 8);
+                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = ebs * 8 } };
+                    nsaa += ebs * 8;
+                }
+            }
+            continue;
+        }
         switch (classify(ty, layouts, enum_layouts)) {
             // A zero-sized value consumes no register and no stack byte, so it does
             // NOT touch ngrn/nsrn/nsaa — this is what keeps a later real arg at its
@@ -269,8 +310,13 @@ fn walkAbi(
                     out_locs[i] = .{ .fpr = @intCast(nsrn) };
                     nsrn += 1;
                 } else {
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = 8 } };
-                    nsaa += 8;
+                    const bytes: u32 = switch (conv) {
+                        .toy => 8,
+                        .c => cScalarSize(ty),
+                    };
+                    nsaa = std.mem.alignForward(u32, nsaa, bytes);
+                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = bytes } };
+                    nsaa += bytes;
                 }
             },
             .indirect => {
@@ -320,11 +366,12 @@ fn walkAbi(
 /// function, so only the call side needs `.c`.
 pub const Conv = enum { toy, c };
 
-/// The bytes a scalar takes as a C argument on the stack: a narrow int its width, a
-/// `bool` one byte (C `_Bool`), everything else 8.
+/// The bytes a scalar takes as a C argument on the stack or as a C struct field: a narrow
+/// int its width, a `bool` one byte (C `_Bool`), an `f32` four, everything else 8.
 pub fn cScalarSize(ty: Type) u32 {
     return switch (ty.kind) {
         .bool => 1,
+        .float => if (ty.isF32()) 4 else 8,
         .int => switch (ty.int_desc.width) {
             .w8 => 1,
             .w16 => 2,
@@ -419,8 +466,78 @@ pub fn planCallConv(
     return .{
         .locs = locs,
         .nsaa_bytes = nsaa,
-        .sret_in_x8 = classifyRet(ret, layouts, enum_layouts) == .sret,
+        .sret_in_x8 = if (conv == .c and isCStruct(ret, layouts)) cRet(ret, layouts) == .sret else classifyRet(ret, layouts, enum_layouts) == .sret,
     };
+}
+
+/// Whether `ty` is an extern struct: toy code holds it in its own layout, and a C call
+/// passes it in the C layout `cLayout` gives.
+pub fn isCStruct(ty: Type, layouts: []const Layout) bool {
+    return ty.isStruct() and ty.struct_id < layouts.len and layouts[ty.struct_id].is_extern;
+}
+
+pub const CLayout = struct { size: u32, @"align": u32 };
+
+/// The C size and alignment of a field or extern struct: a scalar its own size, a struct
+/// its fields in order, each at its alignment, the size rounded to the largest one.
+pub fn cLayout(ty: Type, layouts: []const Layout) CLayout {
+    if (!isCStruct(ty, layouts)) {
+        const n = cScalarSize(ty);
+        return .{ .size = n, .@"align" = n };
+    }
+    var off: u32 = 0;
+    var al: u32 = 1;
+    for (layouts[ty.struct_id].field_types) |f| {
+        const c = cLayout(f, layouts);
+        off = std.mem.alignForward(u32, off, c.@"align") + c.size;
+        al = @max(al, c.@"align");
+    }
+    return .{ .size = std.mem.alignForward(u32, off, al), .@"align" = al };
+}
+
+/// The C offset of field `field` of the extern struct `ty`.
+pub fn cFieldOffset(ty: Type, field: usize, layouts: []const Layout) u32 {
+    var off: u32 = 0;
+    for (layouts[ty.struct_id].field_types[0 .. field + 1], 0..) |f, i| {
+        const c = cLayout(f, layouts);
+        off = std.mem.alignForward(u32, off, c.@"align");
+        if (i == field) return off;
+        off += c.size;
+    }
+    unreachable;
+}
+
+/// A homogeneous floating-point aggregate: `count` (1-4) elements, all f32 (`single`) or
+/// all float, after nested structs are flattened.
+pub const Hfa = struct { count: u8, single: bool };
+
+pub fn hfaOf(ty: Type, layouts: []const Layout) ?Hfa {
+    var count: u8 = 0;
+    var single: ?bool = null;
+    if (!hfaWalk(ty, layouts, &count, &single) or count == 0) return null;
+    return .{ .count = count, .single = single.? };
+}
+
+fn hfaWalk(ty: Type, layouts: []const Layout, count: *u8, single: *?bool) bool {
+    if (isCStruct(ty, layouts)) {
+        for (layouts[ty.struct_id].field_types) |f| if (!hfaWalk(f, layouts, count, single)) return false;
+        return true;
+    }
+    if (ty.kind != .float) return false;
+    if (single.*) |s| if (s != ty.isF32()) return false;
+    single.* = ty.isF32();
+    count.* += 1;
+    return count.* <= 4;
+}
+
+/// Where a C function returns an extern struct: a homogeneous float aggregate in v0..,
+/// one of up to 16 bytes in x0/x1, a larger one through the buffer the caller points x8 at.
+pub const CRet = union(enum) { hfa: Hfa, regs: u8, sret };
+
+pub fn cRet(ty: Type, layouts: []const Layout) CRet {
+    if (hfaOf(ty, layouts)) |h| return .{ .hfa = h };
+    const size = cLayout(ty, layouts).size;
+    return if (size <= 16) .{ .regs = @intCast(eightbytes(size)) } else .sret;
 }
 
 const testing = std.testing;
@@ -646,6 +763,60 @@ test "planCallConv .c: stack args past x7 pack at their own size and alignment" 
     var toy = try planCall(gpa, &args, Type.int, ls, el);
     defer toy.deinit(gpa);
     try testing.expectEqual(@as(u32, 48), toy.nsaa_bytes);
+}
+
+fn cStruct(name: []const u8, fields: []const Type) Layout {
+    return .{ .name = name, .field_names = &.{}, .field_types = @constCast(fields), .offsets = &.{}, .size = @intCast(fields.len * 8), .@"align" = 8, .is_extern = true };
+}
+
+test "cLayout: C alignment and padding, nested extern structs" {
+    const small = [_]Type{ Type.int32, Type.int8, Type.int16 };
+    const vec2f = [_]Type{ Type.float32, Type.float32 };
+    const rect = [_]Type{ Type.structT(1), Type.structT(1) };
+    const mixed = [_]Type{ Type.uint8, Type.uint8, Type.uint8, Type.float32 };
+    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
+    const ls = [_]Layout{ cStruct("Small", &small), cStruct("Vec2f", &vec2f), cStruct("Rect", &rect), cStruct("Mixed", &mixed), cStruct("Big", &big) };
+    try testing.expectEqual(CLayout{ .size = 8, .@"align" = 4 }, cLayout(Type.structT(0), &ls));
+    try testing.expectEqual(@as(u32, 4), cFieldOffset(Type.structT(0), 1, &ls));
+    try testing.expectEqual(@as(u32, 6), cFieldOffset(Type.structT(0), 2, &ls));
+    try testing.expectEqual(CLayout{ .size = 16, .@"align" = 4 }, cLayout(Type.structT(2), &ls));
+    try testing.expectEqual(@as(u32, 8), cFieldOffset(Type.structT(2), 1, &ls));
+    try testing.expectEqual(@as(u32, 4), cFieldOffset(Type.structT(3), 3, &ls));
+    try testing.expectEqual(CLayout{ .size = 32, .@"align" = 8 }, cLayout(Type.structT(4), &ls));
+
+    try testing.expectEqual(Hfa{ .count = 4, .single = true }, hfaOf(Type.structT(2), &ls).?);
+    try testing.expect(hfaOf(Type.structT(3), &ls) == null);
+    try testing.expectEqual(CRet{ .regs = 1 }, cRet(Type.structT(0), &ls));
+    try testing.expectEqual(CRet.sret, cRet(Type.structT(4), &ls));
+}
+
+test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest whole on the stack" {
+    const gpa = testing.allocator;
+    const pair = [_]Type{ Type.int, Type.int32, Type.bool };
+    const vec4d = [_]Type{ Type.float, Type.float, Type.float, Type.float };
+    const vec2f = [_]Type{ Type.float32, Type.float32 };
+    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
+    const ls = [_]Layout{ cStruct("Pair", &pair), cStruct("Vec4d", &vec4d), cStruct("Vec2f", &vec2f), cStruct("Big", &big) };
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const args = [_]Type{ i, i, i, i, i, i, i, Type.structT(0), Type.structT(1), Type.structT(1), Type.structT(2), Type.structT(3) };
+    var plan = try planCallConv(gpa, .c, &args, Type.structT(3), &ls, el);
+    defer plan.deinit(gpa);
+    try testing.expectEqual(@as(u32, 0), plan.locs[7].stack.nsaa_off);
+    try testing.expectEqual(@as(u32, 16), plan.locs[7].stack.bytes);
+    try testing.expectEqual(@as(u8, 0), plan.locs[8].fpr_run.first);
+    try testing.expectEqual(@as(u8, 4), plan.locs[9].fpr_run.first);
+    try testing.expectEqual(@as(u32, 16), plan.locs[10].stack.nsaa_off);
+    try testing.expectEqual(@as(u32, 8), plan.locs[10].stack.bytes);
+    // NGRN went to 8 when the pair spilled, so the big struct's pointer is on the stack.
+    try testing.expectEqual(@as(u32, 24), plan.locs[11].stack_ptr);
+    try testing.expect(plan.sret_in_x8);
+
+    const fl = [_]Type{ Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32 };
+    var fp = try planCallConv(gpa, .c, &fl, Type.float32, &ls, el);
+    defer fp.deinit(gpa);
+    try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.nsaa_off);
+    try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.bytes);
 }
 
 test "planCall: AAPCS no-split — reg-pair that doesn't fit goes wholly to stack and forbids backfill" {

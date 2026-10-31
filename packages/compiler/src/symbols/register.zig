@@ -59,7 +59,7 @@ pub fn registerStructs(t: *Typecheck, decl_nodes: []const Ast.Index, mod: u32) !
             gparams = names;
         }
         const id: u32 = @intCast(t.structs.items.len);
-        try t.structs.append(t.gpa, .{ .decl_node = decl_idx, .name = name, .mod = mod, .pub_export = t.tree.isPub(decl_idx), .is_generic = is_generic, .generic_params = gparams, .is_tuple = decl.tag == .tuple_struct_decl });
+        try t.structs.append(t.gpa, .{ .decl_node = decl_idx, .name = name, .mod = mod, .pub_export = t.tree.isPub(decl_idx), .is_generic = is_generic, .generic_params = gparams, .is_tuple = decl.tag == .tuple_struct_decl, .is_extern = Ast.isExternStruct(t.tree, t.tokens, decl_idx) });
         try t.activeStructMap().put(t.gpa, name, id);
     }
 }

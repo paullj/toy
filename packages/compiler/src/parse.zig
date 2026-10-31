@@ -444,8 +444,11 @@ fn parseDeclRecoverable(p: *Parser, decls: *std.ArrayList(Ast.Index)) Error!void
     const is_pub = p.eat(.kw_pub);
     const decl = switch (p.peek().tag) {
         .kw_fn => try p.parseFnDecl(.top_level),
-        .kw_extern => try p.parseExternFn(),
-        .kw_struct => try p.parseStructDecl(),
+        .kw_extern => if (p.peek2().tag == .kw_struct) blk: {
+            p.bump(.kw_extern);
+            break :blk try p.parseStructDecl(true);
+        } else try p.parseExternFn(),
+        .kw_struct => try p.parseStructDecl(false),
         .kw_enum => try p.parseEnumDecl(),
         .kw_protocol => try p.parseProtocolDecl(),
         .kw_type => try p.parseTypeAlias(),
@@ -583,12 +586,13 @@ const FnKind = union(enum) {
 };
 
 /// Only a fn called by name or as a method can take a `mut` param: a lambda or local fn is
-/// called as a value, an extern through the C ABI, and protocol code passes arguments by value.
+/// called as a value, and protocol code passes arguments by value. An extern's `mut` param
+/// is a C pointer to the argument; the checker limits it to an extern struct.
 fn mutParamRejection(kind: FnKind) ?[]const u8 {
     return switch (kind) {
         .top_level, .inherent_method => null,
         .protocol_sig, .conformance_method => "'mut' may only qualify the 'self' receiver of a protocol method",
-        .extern_top_level => "an 'extern' function's parameters cannot be 'mut'",
+        .extern_top_level => null,
         .local => "a local function's parameters cannot be 'mut'; it is called as a value, which passes every argument by value",
     };
 }
@@ -958,7 +962,7 @@ fn parseProtocolDecl(p: *Parser) Error!Ast.Index {
 /// with newlines insignificant inside `{}`. Reuses the `.param` node for fields.
 /// A field (or tuple-struct field type) may lead with `pub`; its node then joins
 /// `pub_decls`, so field visibility rides the same bitset as decl exports.
-fn parseStructDecl(p: *Parser) Error!Ast.Index {
+fn parseStructDecl(p: *Parser, is_extern: bool) Error!Ast.Index {
     try p.expect(.kw_struct, "expected 'struct'");
     const name_tok = p.index;
     try p.expect(.identifier, "expected a struct name");
@@ -966,7 +970,15 @@ fn parseStructDecl(p: *Parser) Error!Ast.Index {
     // Optional generic-param list `[T]` between the name and the body `{`.
     var generics: std.ArrayList(Ast.Index) = .empty;
     defer generics.deinit(p.gpa);
-    if (p.at(.l_bracket)) try p.parseGenericParams(&generics);
+    if (p.at(.l_bracket)) {
+        const generics_start = p.peek().start;
+        try p.parseGenericParams(&generics);
+        // A C layout is fixed by its field types, so it has none to substitute.
+        if (is_extern) {
+            try p.warnSpan(generics_start, p.prevEnd(), .P0003, "an extern struct cannot be generic");
+            generics.clearRetainingCapacity();
+        }
+    }
 
     if (p.at(.l_paren)) {
         p.bump(.l_paren);
@@ -4101,7 +4113,7 @@ test "isMutParam is true for `mut self` and any `mut` param, false for plain sel
     try testing.expect(Ast.isMutParam(tree, tokens, g.params[1])); // `mut b: int`
 }
 
-test "mut params parse on fns and inherent (incl. static) methods; lambda, local fn, extern, protocol-sig and conformance-method params reject them (P0006)" {
+test "mut params parse on fns, externs and inherent (incl. static) methods; lambda, local fn, protocol-sig and conformance-method params reject them (P0006)" {
     const gpa = testing.allocator;
     const cases = [_]struct { src: []const u8, diags: usize }{
         .{ .src = "fn f(mut x: int) -> int { x }\n", .diags = 0 },
@@ -4112,7 +4124,8 @@ test "mut params parse on fns and inherent (incl. static) methods; lambda, local
         .{ .src = "protocol Q { fn q(mut self) }\nstruct P { x: int }\nimpl P has Q { fn q(mut self) { self.x = 1 } }\n", .diags = 0 },
         .{ .src = "fn main() { f := fn(mut a: int) -> int { a } }\n", .diags = 1 },
         .{ .src = "fn main() {\n    fn g(mut a: int) -> int { a }\n}\n", .diags = 1 },
-        .{ .src = "extern fn ex(mut a: int) -> int\n", .diags = 1 },
+        .{ .src = "extern fn ex(mut a: int) -> int\n", .diags = 0 },
+        .{ .src = "extern struct S { a: int32 }\nextern \"c\" { fn fill(mut s: S) }\n", .diags = 0 },
         .{ .src = "protocol Q { fn q(self, mut a: int) }\n", .diags = 1 },
         .{ .src = "protocol Q { fn q(mut a: int) }\n", .diags = 1 },
         .{ .src = "protocol Q { fn q(self, a: int) }\nstruct P { x: int }\nimpl P has Q { fn q(self, mut a: int) { a = 1 } }\n", .diags = 1 },
@@ -4129,6 +4142,26 @@ test "mut params parse on fns and inherent (incl. static) methods; lambda, local
         };
         for (res.diags) |d| try testing.expectEqual(Code.P0006, d.code);
     }
+}
+
+test "extern struct parses as a struct decl marked by its keywords; a generic one is P0003" {
+    const gpa = testing.allocator;
+    const src = "pub extern struct S { a: int32, b: f32 }\nstruct T { a: int }\nextern struct G[X] { x: X }\n";
+    const tokens = try Lexer.tokenize(gpa, src);
+    defer gpa.free(tokens);
+    const res = try parse(gpa, tokens, src);
+    defer gpa.free(@constCast(res.diags));
+    defer freeTree(gpa, res.tree);
+    try testing.expectEqual(@as(usize, 1), res.diags.len);
+    try testing.expectEqual(Code.P0003, res.diags[0].code);
+    var externs: [3]bool = undefined;
+    var n: usize = 0;
+    for (res.tree.nodes, 0..) |nd, i| if (nd.tag == .struct_decl) {
+        externs[n] = Ast.isExternStruct(res.tree, tokens, Ast.Index.from(@intCast(i)));
+        n += 1;
+    };
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualSlices(bool, &.{ true, false, true }, &externs);
 }
 
 test "mut on the 65th parameter is P0006" {

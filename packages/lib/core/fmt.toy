@@ -20,12 +20,22 @@ fn load_i32(p: rawptr) -> int {
     return v
 }
 
-# Mode 0 asks for the shortest round-trip digits. They live in memory `__dtoa` allocated, so
-# they are copied into a gc str before it is freed.
+# Mode 0 asks for the shortest round-trip digits.
 pub fn shortest(f: float) -> Shortest {
+    return dtoa(f, 0, 0)
+}
+
+# The value rounded to `n` significant digits (mode 2), trailing zeros dropped.
+pub fn rounded(f: float, n: int) -> Shortest {
+    return dtoa(f, 2, n)
+}
+
+# The digits live in memory `__dtoa` allocated, so they are copied into a gc str before it
+# is freed.
+fn dtoa(f: float, mode: int, n: int) -> Shortest {
     out := gc_alloc(8)
     sign := gc_alloc(8)
-    p := unsafe { __dtoa(f, 0, 0, out, sign, offset(0, 0)) }
+    p := unsafe { __dtoa(f, mode, n, out, sign, offset(0, 0)) }
     digits := os.from_cstr(p)
     unsafe { __freedtoa(p) }
     return Shortest { digits: digits, point: load_i32(out), neg: load_i32(sign) != 0 }

@@ -139,6 +139,7 @@ module.exports = grammar({
     struct_declaration: ($) =>
       seq(
         optional("pub"),
+        optional("extern"),
         "struct",
         field("name", $.identifier),
         optional($.type_parameters),

@@ -198,6 +198,7 @@ const core_replacements = std.StaticStringMap([]const u8).initComptime(.{
 /// <protocol>"`. A program that never imports it gets T0023, and the hint names it.
 const scalar_impls = std.StaticStringMap([]const u8).initComptime(.{
     .{ "float has Display", "float" },
+    .{ "f32 has Display", "float" },
 });
 
 /// The std module whose `impl <ty> has <protocol>` makes the scalar `ty` conform, or null.
