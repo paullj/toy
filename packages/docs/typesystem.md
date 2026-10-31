@@ -1084,7 +1084,7 @@ never a fallback rendering (no addresses):
 |------|-------|
 | `float` without std/float | its `Display` is an impl in std/float: a `[T has Display]` bound is **T0023** naming std/float, `(1.5).to_string()` is T0018 |
 | a struct or enum holding a `float` field without std/float | the derive is blocked: **T0023** at an `io.print`, **T0031** at a `to_string` naming the field |
-| `rawptr` | no `Display`; it exists only inside core |
+| `rawptr`, `cstr` | no `Display`: a `rawptr` exists only inside core, and a `cstr` prints through `c.to_str()` (std/ffi) |
 | a generic `T` without a `Display` bound | checked per instance: `fn f[T has Eq](x: T) { io.print(x) }` accepts `f(2)` and `f(1.5)` (std/io brings std/float); an instance whose type does not conform is **T0023** at the call |
 | `Vec[X]`, `Map[K, V]`, `Set[X]` or `Ref[X]` whose type argument does not conform | std's impl bounds its params (`impl Vec[T has Display]`): **T0023** names the type argument that fails it |
 | a managed box with no impl (the private `gc_array`), and any aggregate holding one | a box never derives `Display` (its one field is a cell address); only an explicit impl makes it print. **T0023** at an `io.print`, whose hint names the box; T0031 at a struct's `to_string` naming the field. `Eq` (cell identity) and `Hash` (no box keys) keep their own rules |

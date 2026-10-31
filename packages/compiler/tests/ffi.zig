@@ -49,6 +49,46 @@ test "user dylibs: int, float and rawptr calls run at -O0 and -O1" {
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-levels", calls_src, &.{ "-L", test_lib_dir }, "ok\n");
 }
 
+const cstr_src =
+    \\import std/io
+    \\import std/ffi
+    \\import std/gc
+    \\
+    \\extern "toyffi" {
+    \\    fn toyffi_greeting() -> cstr
+    \\    fn toyffi_nothing() -> cstr
+    \\    fn toyffi_echo(s: cstr) -> cstr
+    \\    fn toyffi_shout(s: cstr) -> cstr
+    \\}
+    \\
+    \\extern {
+    \\    fn strlen(s: cstr) -> int
+    \\    fn free(p: cstr)
+    \\}
+    \\
+    \\fn main() -> int {
+    \\    back := unsafe { toyffi_echo("round ".concat("trip").to_cstr()) }
+    \\    gc.collect()
+    \\    loud := unsafe { toyffi_shout(back) }
+    \\    s := loud.to_str()
+    \\    unsafe { free(loud) }
+    \\    g := unsafe { toyffi_greeting() }
+    \\    ok := back.to_str() == "round trip" && s == "ROUND TRIP!" && unsafe { strlen(g) } == 12 && unsafe { toyffi_nothing() }.is_null()
+    \\    io.println(if ok { g.to_str() } else { "bad" })
+    \\    0
+    \\}
+    \\
+;
+
+test "user dylibs: cstr params and returns run at -O0 and -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-cstr", cstr_src, &.{ "-L", test_lib_dir }, "hello from C\n");
+}
+
 test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});

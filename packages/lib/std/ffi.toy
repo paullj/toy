@@ -1,0 +1,26 @@
+# C strings for extern calls. A `cstr` is one pointer to NUL-terminated bytes, a C
+# `const char*`; a `str` is a pointer and a length with no NUL, so C cannot read one.
+# Both directions copy, so a toy str never points into memory C may free or change.
+import core/os
+
+impl str {
+    # A NUL-terminated copy on the gc heap. The collector frees it once toy code no longer
+    # holds the cstr: a C library that keeps the pointer after the call returns must be
+    # given a copy it owns. A NUL inside the str ends the C string there.
+    fn to_cstr(self) -> cstr {
+        return os.cstr_of(self)
+    }
+}
+
+impl cstr {
+    # A new str holding the bytes up to the NUL. Toy never frees the C memory: when a C
+    # function hands over a string the caller must free, call its free after this copy.
+    # Panics on a null cstr; check `is_null` first when C may return NULL.
+    fn to_str(self) -> str {
+        return os.cstr_to_str(self)
+    }
+
+    fn is_null(self) -> bool {
+        return os.cstr_is_null(self)
+    }
+}

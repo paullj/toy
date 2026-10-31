@@ -655,7 +655,7 @@ fn storeOperandInto(b: *Builder, op: Ir.Operand, dst_ptr: Ir.ValueId, ty: Typech
         .box => if (!b.termSet()) {
             _ = try b.emit(.{ .store = .{ .addr = dst_ptr, .val = operandValue(op), .ty = Typecheck.Type.int } }, null);
         },
-        .int, .bool, .float => if (!b.termSet()) {
+        .int, .bool, .float, .rawptr => if (!b.termSet()) {
             _ = try b.emit(.{ .store = .{ .addr = dst_ptr, .val = operandValue(op), .ty = ty } }, null);
         },
         .str, .@"struct", .@"enum" => {
@@ -666,7 +666,7 @@ fn storeOperandInto(b: *Builder, op: Ir.Operand, dst_ptr: Ir.ValueId, ty: Typech
         // `never` means the producer diverged and set its own terminator, so there is no
         // value to store.
         .unit, .never => {},
-        .rawptr, .invalid => try b.note(tok, "produce-into-slot type unsupported in lower"),
+        .invalid => try b.note(tok, "produce-into-slot type unsupported in lower"),
     }
 }
 
@@ -1933,7 +1933,7 @@ pub fn passKind(b: *Builder, t: Typecheck.Type) PassKind {
         .int => .int,
         .bool => .bool,
         .float => .float,
-        .rawptr => .rawptr,
+        .rawptr, .cstr => .rawptr,
         .str => .str,
         .@"struct" => .@"struct",
         .@"enum" => .@"enum",
@@ -2954,9 +2954,9 @@ pub fn lowerExprInto(b: *Builder, expr: Ast.Index, dst_ptr: Ir.ValueId, ty: Type
     const n = b.in.tree.nodes[(expr).int()];
     // A managed box produces an 8-byte scalar cell pointer straight into the destination.
     switch (passKind(b, ty)) {
-        .box, .int, .bool, .float, .unit, .never => return storeOperandInto(b, try lowerExpr(b, expr), dst_ptr, ty, n.main_token),
+        .box, .int, .bool, .float, .rawptr, .unit, .never => return storeOperandInto(b, try lowerExpr(b, expr), dst_ptr, ty, n.main_token),
         .str, .@"struct", .@"enum" => {},
-        .rawptr, .invalid => {
+        .invalid => {
             try b.note(n.main_token, "produce-into-slot type unsupported in lower");
             return;
         },
@@ -3326,7 +3326,7 @@ fn lowerFieldAccess(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{
     // A managed-box field reads as an 8-byte scalar cell pointer, not by aggregate copy.
     switch (passKind(b, ty)) {
         .box => return .{ .value = try b.emit(.{ .load = .{ .addr = addr, .ty = Typecheck.Type.int } }, box_repr_ty) },
-        .int, .bool, .float => {
+        .int, .bool, .float, .rawptr => {
             const v = try b.emit(.{ .load = .{ .addr = addr, .ty = ty } }, ty);
             return .{ .value = v };
         },
@@ -3339,7 +3339,7 @@ fn lowerFieldAccess(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{
             return .{ .slot = tmp };
         },
         .unit => return .none,
-        .rawptr, .never, .invalid => {
+        .never, .invalid => {
             try b.note(b.in.tree.nodes[(node_idx).int()].main_token, "field access type unsupported in lower");
             return .none;
         },

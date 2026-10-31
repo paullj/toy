@@ -127,7 +127,7 @@ test "descriptor record layout is six contiguous 8-byte fields the .toy runtime 
 /// Byte size of a type (int/bool 8, str 16, struct/enum → its layout size).
 pub fn typeSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
     return switch (ty.kind) {
-        .int, .bool, .float, .rawptr => 8,
+        .int, .bool, .float, .rawptr, .cstr => 8,
         .str => 16,
         .@"struct" => layouts[ty.struct_id].size,
         .@"enum" => enum_layouts[ty.enum_id].size,
@@ -139,7 +139,7 @@ pub fn typeSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLay
 /// alignment).
 pub fn typeAlign(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
     return switch (ty.kind) {
-        .int, .bool, .float, .str, .rawptr => 8,
+        .int, .bool, .float, .str, .rawptr, .cstr => 8,
         .@"struct" => layouts[ty.struct_id].@"align",
         .@"enum" => enum_layouts[ty.enum_id].@"align",
         else => 1,

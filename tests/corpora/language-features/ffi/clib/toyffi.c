@@ -42,3 +42,21 @@ long toyffi_stack(int8_t a, long b, long c, long d, long e, long f, long g, long
     return a + b + c + d + e + f + g + h + i * 10 + j * 100 + k * 1000 + l * 10000 + m * 100000 +
            n * 1000000;
 }
+
+const char *toyffi_greeting(void) { return "hello from C"; }
+
+const char *toyffi_nothing(void) { return NULL; }
+
+// Returns its argument, so a toy string can make a round trip through C.
+const char *toyffi_echo(const char *s) { return s; }
+
+// The caller owns the result and frees it with free().
+char *toyffi_shout(const char *s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    char *out = malloc(n + 2);
+    for (size_t i = 0; i < n; i++) out[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+    out[n] = '!';
+    out[n + 1] = 0;
+    return out;
+}

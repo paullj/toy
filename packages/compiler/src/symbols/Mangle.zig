@@ -28,6 +28,8 @@ pub fn instance(gpa: std.mem.Allocator, template_name: []const u8, args: []const
             .str => try buf.appendSlice(gpa, "str"),
             .unit => try buf.appendSlice(gpa, "unit"),
             .float => try buf.appendSlice(gpa, "float"),
+            .rawptr => try buf.appendSlice(gpa, "rawptr"),
+            .cstr => try buf.appendSlice(gpa, "cstr"),
             .@"struct" => try buf.appendSlice(gpa, std.fmt.bufPrint(&nb, "s{d}", .{a.nominalId()}) catch unreachable),
             .@"enum" => try buf.appendSlice(gpa, std.fmt.bufPrint(&nb, "e{d}", .{a.nominalId()}) catch unreachable),
             else => try buf.appendSlice(gpa, "x"),
@@ -113,6 +115,7 @@ pub fn erased(gpa: std.mem.Allocator, kind: Derive.ErasedKind, ty: Type) ![]u8 {
         .unit => try buf.appendSlice(gpa, "unit"),
         .float => try buf.appendSlice(gpa, "float"),
         .rawptr => try buf.appendSlice(gpa, "rawptr"),
+        .cstr => try buf.appendSlice(gpa, "cstr"),
         else => try buf.appendSlice(gpa, "other"),
     }
     return buf.toOwnedSlice(gpa);
@@ -148,6 +151,7 @@ test "each family spells its names" {
         .{ .got = instance(gpa, "pair", &.{ Type.int, Type.bool }), .want = "pair$int$bool" },
         .{ .got = instance(gpa, "id", &.{Type.int8}), .want = "id$int8" },
         .{ .got = instance(gpa, "id", &.{Type.uint32}), .want = "id$uint32" },
+        .{ .got = instance(gpa, "id", &.{Type.cstr}), .want = "id$cstr" },
         .{ .got = lambda(gpa, "f", 0), .want = "f$l0" },
         .{ .got = lambda(gpa, "f", 12), .want = "f$l12" },
         .{ .got = adapter(gpa, "geometry/rect.area", .fn_value), .want = "geometry/rect.area$fnval" },
@@ -185,7 +189,7 @@ test "minted names never collide, within a family or across families" {
     var names: Names = .{};
     defer names.deinit();
 
-    const args = [_]Type{ Type.int, Type.int8, Type.uint32, Type.bool, Type.str, Type.unit, Type.float, Type.structT(0), Type.structT(3), Type.enumT(0), Type.enumT(4), Type.rawptr };
+    const args = [_]Type{ Type.int, Type.int8, Type.uint32, Type.bool, Type.str, Type.unit, Type.float, Type.structT(0), Type.structT(3), Type.enumT(0), Type.enumT(4), Type.rawptr, Type.cstr };
     for (args) |a| try names.add(instance(gpa, "f", &.{a}));
     for (args[0..3]) |a| for (args[3..6]) |b| try names.add(instance(gpa, "f", &.{ a, b }));
     for ([_]u32{ 0, 1, 12 }) |r| {

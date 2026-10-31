@@ -307,7 +307,7 @@ fn projectCell(
         return;
     }
     switch (ty.kind) {
-        .rawptr, .str => try out.append(gpa, .{ .off = base, .tag = .word }),
+        .rawptr, .cstr, .str => try out.append(gpa, .{ .off = base, .tag = .word }),
         .@"struct" => {
             if (ty.struct_id >= layouts.len) return;
             const l = layouts[ty.struct_id];

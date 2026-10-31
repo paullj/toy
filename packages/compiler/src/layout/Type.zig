@@ -31,6 +31,7 @@ pub const builtin_names = std.StaticStringMap(Type).initComptime(.{
     .{ "str", Type.str },
     .{ "float", Type.float },
     .{ "rawptr", Type.rawptr },
+    .{ "cstr", Type.cstr },
 });
 
 /// The type kind. `invalid` is the poison/error type: it absorbs further errors
@@ -63,7 +64,12 @@ pub const builtin_names = std.StaticStringMap(Type).initComptime(.{
 /// per grounded signature (its `Layout.fn_sig` set), BEFORE the layout snapshot, so a
 /// `func` never reaches lower/codegen (Debug-asserted there); only a generic template's
 /// signature keeps one.
-pub const Kind = enum(u8) { invalid, unit, int, bool, str, never, @"struct", @"enum", type_var, app, float, rawptr, func };
+///
+/// `cstr` (APPENDED — ordinals frozen) is a C `const char*` to NUL-terminated bytes: one
+/// pointer word like `rawptr`, and traced like it (conservatively, so a pointer into C
+/// memory is ignored and one into the heap keeps its cell alive). It is its own kind,
+/// not a `rawptr`, so the `str` conversions of std/ffi are its methods alone.
+pub const Kind = enum(u8) { invalid, unit, int, bool, str, never, @"struct", @"enum", type_var, app, float, rawptr, func, cstr };
 
 /// The width class of an integer type. `plat` is the platform-word `int`/`uint`
 /// (currently 64-bit); the numbered classes are the fixed-width `int8..int64`.
@@ -103,6 +109,7 @@ pub const Type = struct {
     pub const never: Type = .{ .kind = .never };
     pub const float: Type = .{ .kind = .float };
     pub const rawptr: Type = .{ .kind = .rawptr };
+    pub const cstr: Type = .{ .kind = .cstr };
 
     pub const uint: Type = .{ .kind = .int, .int_desc = .{ .signed = false } };
     pub const int8: Type = .{ .kind = .int, .int_desc = .{ .width = .w8 } };
@@ -177,7 +184,7 @@ pub const Type = struct {
         return switch (kind) {
             .@"struct", .type_var, .app, .func => .struct_id,
             .@"enum" => .enum_id,
-            .invalid, .unit, .int, .bool, .str, .never, .float, .rawptr => .none,
+            .invalid, .unit, .int, .bool, .str, .never, .float, .rawptr, .cstr => .none,
         };
     }
 
@@ -283,7 +290,7 @@ pub const Type = struct {
 
     /// A builtin scalar type — one with no laid-out referent (`int`/`bool`/`str`/`unit`).
     pub fn isScalar(t: Type) bool {
-        return t.kind == .int or t.kind == .bool or t.kind == .str or t.kind == .unit or t.kind == .rawptr;
+        return t.kind == .int or t.kind == .bool or t.kind == .str or t.kind == .unit or t.kind == .rawptr or t.kind == .cstr;
     }
 
     /// The source spelling of an integer type (`int`/`uint`/`int8`.../`uint64`).
@@ -473,6 +480,15 @@ test "algebra: rawptr is a distinct nominal-id-free 8-byte scalar" {
     try testing.expect(!Type.eql(Type.rawptr, Type.int));
     try testing.expect(!Type.eql(Type.rawptr, Type.str));
     try testing.expectEqual(IdField.none, Type.idField(.rawptr));
+}
+
+test "algebra: cstr is its own scalar kind, spelled cstr, not a rawptr" {
+    try testing.expect(Type.eql(builtin_names.get("cstr").?, Type.cstr));
+    try testing.expect(Type.cstr.isScalar());
+    try testing.expect(!Type.cstr.isRawPtr());
+    try testing.expect(!Type.assignable(Type.rawptr, Type.cstr));
+    try testing.expect(!Type.assignable(Type.cstr, Type.rawptr));
+    try testing.expectEqual(IdField.none, Type.idField(.cstr));
 }
 
 test "algebra: integer widths are distinct byte-foldable types" {

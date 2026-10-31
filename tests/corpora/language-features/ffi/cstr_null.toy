@@ -1,0 +1,13 @@
+# expect: exit 1
+# expect: stderr "to_str of a null cstr"
+# A null C string has no bytes to copy, so `to_str` stops the program; `is_null` is the
+# check a program makes first when C may return NULL.
+import std/ffi
+
+extern fn strchr(s: cstr, c: int32) -> cstr
+
+fn main() -> int {
+    miss := unsafe { strchr("abc".to_cstr(), 122) }
+    _s := miss.to_str()
+    return 0
+}

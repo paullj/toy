@@ -1,0 +1,37 @@
+# expect: exit 0
+# expect: stdout "k0\nk1000\nk2000\nf1000\n"
+# A cstr held only by the heap is traced: the pushes happen inside a loop that allocates,
+# so by the time the collector runs no stack slot still holds the to_cstr buffers, and
+# only the Vec element trace keeps them alive.
+import std/io
+import std/ffi
+import std/gc
+import std/vec
+
+struct Field {
+    name: cstr,
+    n: int,
+}
+
+fn main() -> int {
+    i := 0
+    keep: Vec[cstr] = []
+    fields: Vec[Field] = []
+    while i < 3000 {
+        want := "k".concat(i.to_string())
+        junk: Vec[str] = []
+        junk.push("pad".concat(i.to_string()))
+        if i % 1000 == 0 {
+            keep.push(want.to_cstr())
+            fields.push(Field { name: "f".concat(i.to_string()).to_cstr(), n: i })
+        }
+        i += 1
+    }
+    gc.collect()
+    io.println(keep.get(0).expect("k").to_str())
+    io.println(keep.get(1).expect("k").to_str())
+    io.println(keep.get(2).expect("k").to_str())
+    io.println(fields.get(1).expect("f").name.to_str())
+    if gc.collections() < 2 { return 1 }
+    return 0
+}

@@ -33,6 +33,7 @@ pub fn renderType(a: std.mem.Allocator, buf: *std.ArrayList(u8), t: Type, layout
         .float => try buf.appendSlice(a, "float"),
         .unit => try buf.appendSlice(a, "()"),
         .rawptr => try buf.appendSlice(a, "rawptr"),
+        .cstr => try buf.appendSlice(a, "cstr"),
         .never => try buf.appendSlice(a, "never"),
         .@"struct" => if (t.struct_id < layouts.len) {
             if (fnSigOf(t, layouts)) |fs| try renderFnType(a, buf, fs, layouts, enum_layouts) else try renderNominal(a, buf, layouts[t.struct_id].name, layouts, enum_layouts);

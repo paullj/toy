@@ -375,6 +375,7 @@ fn renderType(
         .never => try out.writeAll("never"),
         .float => try out.writeAll("float"),
         .rawptr => try out.writeAll("rawptr"),
+        .cstr => try out.writeAll("cstr"),
         .@"struct" => {
             if (ty.struct_id < layouts.len) {
                 try out.writeAll(layouts[ty.struct_id].name);

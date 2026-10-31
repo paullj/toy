@@ -1,7 +1,8 @@
 # Calling C (FFI)
 
 A program calls a C function by declaring it as an `extern` and calling it inside
-`unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` and
+`unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` (`cstr.toy` and `cstr_libc.toy`
+for C strings) and
 `tests/corpora/language-features/modules/ffi_extern/` and `ffi_dylib/`.
 
 ```toy
@@ -38,10 +39,10 @@ fn main() -> int {
 ## Types
 
 An extern's params and return use C ABI types: an integer of any width, `float` (C
-`double`), `bool` and `rawptr` (C `void*`). Omitting `-> R` is a `void` return, and
-`-> never` is a C function that does not return (`exit`, `abort`). Any other type is
-T0037, reported once at the type; the extern stays declared, so its calls add no
-second error.
+`double`), `bool`, `rawptr` (C `void*`) and `cstr` (C `const char*`, see
+[C strings](#c-strings)). Omitting `-> R` is a `void` return, and `-> never` is a C
+function that does not return (`exit`, `abort`). Any other type is T0037, reported once
+at the type; the extern stays declared, so its calls add no second error.
 
 Calls follow Apple's arm64 C convention: a narrow integer or `bool` returned by C is
 widened to its toy width, and arguments past the eighth that go on the stack are packed
@@ -49,8 +50,57 @@ at their own size and alignment, as C expects.
 
 A `str` is not allowed in a program's extern (T0037): it is a pointer and a length
 with no NUL at the end, so a C function reading a `const char*` would run past it.
-Use `rawptr` until the `cstr` type arrives (#150). Only `core/` uses a `str` there,
-spread to a C `buf, len` pair for functions such as `write`.
+Use `cstr`. Only `core/` uses a `str` there, spread to a C `buf, len` pair for
+functions such as `write`.
+
+## C strings
+
+A `cstr` is one pointer to NUL-terminated bytes, passed and returned as a single C
+argument. It is a builtin type, like `rawptr`; its conversions come with
+`import std/ffi`:
+
+```toy
+import std/ffi
+import std/io
+
+extern {
+    fn strlen(s: cstr) -> int
+    fn getenv(name: cstr) -> cstr
+    fn free(p: cstr)
+}
+
+extern "toyffi" {
+    fn toyffi_shout(s: cstr) -> cstr  # returns a malloc'd copy the caller frees
+}
+
+fn main() -> int {
+    n := unsafe { strlen("hello".to_cstr()) }
+    home := unsafe { getenv("HOME".to_cstr()) }
+    if !home.is_null() { io.println(home.to_str()) }
+    loud := unsafe { toyffi_shout("hi".to_cstr()) }
+    io.println(loud.to_str())
+    unsafe { free(loud) }
+    return n
+}
+```
+
+- `s.to_cstr()` copies `s` into a new NUL-terminated buffer on the gc heap. The
+  collector owns it and keeps it alive while toy code holds the `cstr` (a local, a
+  field, a `Vec` element), and frees it after that. A C function may read it during the
+  call; if C keeps the pointer after the call returns (a callback context, a cache),
+  that is the program's risk: keep the `cstr` alive in toy for as long as C uses it, or
+  give C a copy it owns. A NUL inside `s` ends the C string there.
+- `c.to_str()` copies the bytes up to the NUL into a new `str`, so the `str` never
+  points into C memory. It panics on a null `cstr`.
+- `c.is_null()` tells whether C returned `NULL`. A `cstr` is nullable, as the C
+  pointer is: check it before `to_str` when the C function may return `NULL`.
+- Toy never frees a `cstr` that C returns. When the C API says the caller owns the
+  string, copy it with `to_str` and then call the library's free function through an
+  extern, as above. A `cstr` from `to_cstr` must not be passed to `free`: the collector
+  owns it.
+- The collector traces a `cstr` like a `rawptr`: a pointer into its heap (the start of
+  a `to_cstr` buffer, or a pointer into it that C returned, such as `strchr`'s) keeps the
+  buffer alive, and a pointer into C memory is left alone.
 
 ## unsafe
 
@@ -150,5 +200,5 @@ library relinks against the new set.
 ## Not yet
 
 - Static libraries (`.a`, `.o`), and libraries in a project manifest.
-- `cstr`, `f32` and C structs (`extern struct`): #150, #151.
+- `f32` and C structs (`extern struct`): #151.
 - C callbacks and varargs (`printf`): #152, #153.

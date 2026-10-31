@@ -67,7 +67,7 @@ pub fn substTy(bc: *BodyChecker, ty: Type, targs: []const Type) Type {
 /// Mirrors `Typecheck.isConcreteValue`.
 pub fn isConcreteValue(ty: Type) bool {
     return switch (ty.kind) {
-        .int, .bool, .float, .str, .@"struct", .@"enum", .app, .unit, .func => true,
+        .int, .bool, .float, .str, .rawptr, .cstr, .@"struct", .@"enum", .app, .unit, .func => true,
         else => false,
     };
 }
@@ -3959,6 +3959,7 @@ pub const BodyChecker = struct {
     /// The family of `recv_ty` whose methods partly live in a std module (`StdNames`).
     fn methodFamily(bc: *const BodyChecker, recv_ty: Type) ?StdNames.MethodFamily {
         if (recv_ty.kind == .str) return .str;
+        if (recv_ty.kind == .cstr) return .cstr;
         if (!recv_ty.isApp()) return null;
         const e = bc.composite.at(recv_ty.appIdx());
         if (e.ctor_is_enum) return switch (Typecheck.optResultFamilyOf(bc.model, e.ctor)) {
