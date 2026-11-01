@@ -1,0 +1,10 @@
+# Feature: a fn's type param shadows a module alias of the same name: inside `f`,
+# `A` is the param in the signature and in the body, not the alias's `K`.
+# expect: exit 7
+struct K { v: int }
+type A = K
+fn f[A](x: A) -> A {
+    y: A = x
+    y
+}
+fn main() -> int { f(5) + f(K { v: 2 }).v }

@@ -218,6 +218,11 @@ pub const refs = struct {
         const tok = tn.main_token;
         const name = refs.nameText(self, tok);
         if (type_names.get(name)) |b| return b;
+        // A generic-parameter name resolves to a `type_var` (template decode) or a
+        // concrete type (per-instance re-check via the checker's substitution). It is
+        // looked up before the module's aliases, structs and enums: the param is the
+        // innermost scope, so it shadows a module-level type of the same name.
+        if (self.genericParamType(name)) |ty| return ty;
         if (self.activeAliasMap().get(name)) |ty| return ty;
         if (self.activeStructMap().get(name)) |id| {
             // A generic struct named WITHOUT type args (`x: Box`) is not a value type —
@@ -244,10 +249,6 @@ pub const refs = struct {
         if (std.mem.eql(u8, name, "Self")) {
             if (self.selfType()) |ty| return ty;
         }
-        // A generic-parameter name resolves to a `type_var` (template decode) or a
-        // concrete type (per-instance re-check via the checker's substitution). Empty
-        // context => null => the normal unknown-type path, byte-identical otherwise.
-        if (self.genericParamType(name)) |ty| return ty;
         if (std.mem.eql(u8, name, "never")) {
             if (pos == .ret) return Type.never;
             self.sink.report(.{ .span = refs.tokSpan(self, tok), .code = .T0001 }, "'never' can only be the return type of a function", .{}) catch {};
@@ -2727,14 +2728,8 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
         try register.registerEnums(t, Ast.rangeSlice(t.tree, prog.lhs.int()), mod);
     }
 
-    // Phase 0-alias: register each module's transparent `type X = Y` aliases and
-    // seed the prelude `byte = uint8` (if-absent). AFTER structs+enums (a target may be
-    // either), BEFORE layout (0b) / fn-sig decode (A) so field/param/ret refs resolve
-    // through a full alias map. BEFORE prelude, so a `type X = Ordering` (a prelude enum)
-    // is out of scope — the corpus never needs it.
-    // A selected alias resolves in its own module first, so the alias pass walks the
-    // import DAG dependencies-first. A selected struct or enum is bound before any alias
-    // can name it.
+    // A selected struct or enum is bound before the prelude's if-absent injection, so
+    // the selection wins over a prelude type of the same name.
     for (t.graph.mods) |*m| for (m.selections) |sel| {
         if (sel.kind != .type) continue;
         const owner = &t.graph.mods[sel.target];
@@ -2744,21 +2739,6 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
             if (t.enums.items[id].mod == sel.target) try m.enum_ids.put(t.gpa, sel.local, id);
         }
     };
-    const alias_order = try importPostOrder(t.gpa, t.graph.mods);
-    defer t.gpa.free(alias_order);
-    for (alias_order) |mod| {
-        _ = t.gphSelect(mod);
-        if (t.tree.nodes.len == 0) continue;
-        const prog = t.tree.nodes[Ast.root(t.tree.nodes).int()];
-        if (prog.tag != .program) continue;
-        const m = &t.graph.mods[mod];
-        for (m.selections) |sel| {
-            if (sel.kind != .type) continue;
-            if (t.graph.mods[sel.target].alias_ids.get(sel.name)) |ty| try m.alias_ids.put(t.gpa, sel.local, ty);
-        }
-        try register.registerAliases(t, Ast.rangeSlice(t.tree, prog.lhs.int()));
-    }
-
     // Prelude: native-register `Eq` (+ its builtin scalar conformances) BEFORE the
     // per-module protocol loop, so `Eq` is global id 0 and is bare-nameable everywhere
     // with no import (the `print` precedent — no module-graph/fingerprint surface).
@@ -2797,6 +2777,28 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
                 }
             }
         }
+    }
+
+    // Phase 0-alias: register each module's transparent `type X = Y` aliases and
+    // seed the prelude `byte = uint8` (if-absent). AFTER every struct and enum a module
+    // can name bare (its own, selected, prelude `Option`/`Result`/`Ref`, imported
+    // `Vec`/`Map`/`Set`), since a target may be any of them; BEFORE layout (0b) / fn-sig
+    // decode (A) so field/param/ret refs resolve through a full alias map.
+    // A selected alias resolves in its own module first, so the alias pass walks the
+    // import DAG dependencies-first.
+    const alias_order = try importPostOrder(t.gpa, t.graph.mods);
+    defer t.gpa.free(alias_order);
+    for (alias_order) |mod| {
+        _ = t.gphSelect(mod);
+        if (t.tree.nodes.len == 0) continue;
+        const prog = t.tree.nodes[Ast.root(t.tree.nodes).int()];
+        if (prog.tag != .program) continue;
+        const m = &t.graph.mods[mod];
+        for (m.selections) |sel| {
+            if (sel.kind != .type) continue;
+            if (t.graph.mods[sel.target].alias_ids.get(sel.name)) |ty| try m.alias_ids.put(t.gpa, sel.local, ty);
+        }
+        try register.registerAliases(t, Ast.rangeSlice(t.tree, prog.lhs.int()));
     }
 
     // Phase 0c: register every module's `protocol` decls into ONE global id
@@ -8832,6 +8834,63 @@ fn fnPairIds(c: *const Checked, out: []u32) []u32 {
         n += 1;
     };
     return out[0..n];
+}
+
+test "a fn type param shadows a module alias of the same name in its signature and body" {
+    const gpa = testing.allocator;
+    var c = try checkSource(
+        \\struct K { v: int }
+        \\type A = K
+        \\fn f[A](x: A) -> A {
+        \\    y: A = x
+        \\    y
+        \\}
+        \\fn main() -> int { f(1) + f(K { v: 2 }).v }
+        \\
+    );
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+    // The pattern qualifier is in the param's scope too, so it names no enum.
+    try expectOneDiag("enum E { X(int), Y }\ntype A = E\nfn f[A](_x: A, e: E) -> int {\n match e { A.X(n) -> n, E.Y -> 0 }\n}\nfn main() -> int { f(true, E.X(4)) }\n", .T0062, "'A' is not an enum type");
+}
+
+test "an alias of a prelude generic names it in every type position" {
+    const gpa = testing.allocator;
+    var c = try checkSource(
+        \\type OO = Option[int]
+        \\type RR = Result[OO, str]
+        \\type O = Ordering
+        \\struct W { o: OO }
+        \\fn h(x: OO, f: fn(OO) -> RR) -> RR { f(x) }
+        \\fn main() -> int {
+        \\    x: OO = Option.some(3)
+        \\    w := W { o: x }
+        \\    r := h(w.o, fn(v: OO) -> RR { Result.ok(v) })
+        \\    _o: O = Ordering.lt
+        \\    match r { Result.ok(Option.some(v)) -> v, _ -> 0 }
+        \\}
+        \\
+    );
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+
+    try expectOneDiag("type OO = Option[int]\nfn main() -> int {\n _x: OO = Option.some(true)\n 0\n}\n", .T0015, "conflicting types for type parameter 'T': bool inferred from the value, int from the expected type");
+}
+
+test "an alias that shadows a prelude type names its target as a receiver too" {
+    try expectNoErrors(
+        \\struct K { v: int }
+        \\impl K { fn new() -> K { K { v: 7 } } }
+        \\enum D { up, down }
+        \\type Option = K
+        \\type Ordering = D
+        \\fn main() -> int {
+        \\    o: Option = Option.new()
+        \\    d: Ordering = Ordering.down
+        \\    match d { Ordering.up -> 0, Ordering.down -> o.v }
+        \\}
+        \\
+    );
 }
 
 test "fn types are assignable iff structurally equal, aliases included" {

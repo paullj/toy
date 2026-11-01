@@ -1,0 +1,18 @@
+# expect: stdout "2\n3\n7\n4\n"
+# expect: exit 0
+# A pub alias qualified through its module works in expression position as the
+# unqualified alias does: variants (`util.D2.down`, `util.E2.X(3)`), an instance
+# alias's variants (`util.OI.some(4)`) and associated fns (`util.IV.new()`).
+import std/io.{println}
+import util
+
+fn main() -> int {
+    e := util.D2.down
+    println(match e { util.D2.up -> 1, util.D2.down -> 2 })
+    x := util.E2.X(3)
+    println(match x { util.E2.X(n) -> n, util.E2.Y -> 0 })
+    println(util.IV.new().v)
+    o := util.OI.some(4)
+    println(match o { util.OI.some(v) -> v, util.OI.none -> 0 })
+    0
+}

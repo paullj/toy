@@ -470,7 +470,13 @@ struct or enum (or `Box.new(5)`, inferred as above). An alias names its target's
 (`type A = K` makes `A.make(1)` call `K.make`, and `type B = Box[int]` makes `B.new()` call
 `Box[int].new`), and a builtin type has them too: with `impl int { fn zero() -> int { 0 } }`,
 `int.zero()` calls it. Through an alias or a builtin, a member that names no associated fn
-leaves a type used as a value (**T0056**). The call selects it like a method and
+leaves a type used as a value (**T0056**). An alias of an enum names its variants too, in
+an expression and a pattern (`A.V(1)`, `match e { A.V(n) -> n }`), and an alias of an enum
+instance fixes its args (`type OI = Option[int]` makes `OI.some(true)` **T0040**). A
+module's alias shadows a prelude or imported type of its name in every position, a
+receiver included, and a fn's type parameter shadows a module alias: inside `fn f[A]`,
+`A` is the parameter, so `A.V` names no enum (**T0062** in a pattern, **T0056** in an
+expression). The call selects it like a method and
 passes no receiver. It is never called on a value (`k.make(1)` is **T0018**), an instance
 method is never called on a type (`K.get()` is **T0018**), and on an enum a variant keeps
 its name: `E.A(1)` constructs the variant `A` even when an associated fn `A` exists.

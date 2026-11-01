@@ -1,0 +1,20 @@
+# Feature: an alias names its enum's variants wherever the enum does: `A.X(2)`,
+# `A.Y` and `A.S { a }` build and match variants of `E`. An alias of an instance
+# fixes its args, so `OI.some(5)` is `Option[int].some(5)`.
+# expect: stdout "2\n0\n1\n5\n9\n"
+# expect: exit 0
+import std/io.{println}
+enum E { X(int), Y, S { a: int } }
+type A = E
+type OI = Option[int]
+fn g(e: A) -> int { match e { A.X(n) -> n, A.Y -> 0, A.S { a } -> a } }
+fn main() -> int {
+    println(g(A.X(2)))
+    println(g(A.Y))
+    println(g(A.S { a: 1 }))
+    o := OI.some(5)
+    p: OI = OI.none
+    println(match o { OI.some(v) -> v, OI.none -> 0 })
+    println(p.or(9))
+    0
+}

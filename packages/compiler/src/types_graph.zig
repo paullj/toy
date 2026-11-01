@@ -1063,6 +1063,75 @@ test "a type alias of an enum or an enum instance qualifies a variant pattern" {
     try withCheckedGraph(".toy-test-typ-alias-pattern", files, "main.toy", Check.run);
 }
 
+test "a qualified alias names its variants and associated fns in expression position" {
+    const files = &[_]FixtureFile{
+        .{ .path = "main.toy", .source =
+        \\import util
+        \\fn main() -> int {
+        \\    e := util.D2.down
+        \\    i := util.IV.new()
+        \\    o := util.OI.some(4)
+        \\    x := util.E2.X(3)
+        \\    k := match e { util.D2.up -> 1, util.D2.down -> 2 }
+        \\    n := match x { util.E2.X(n) -> n, util.E2.Y -> 0 }
+        \\    k + n + i.v + o.or(0)
+        \\}
+        \\
+        },
+        .{ .path = "util.toy", .source =
+        \\pub enum Dir { up, down }
+        \\pub type D2 = Dir
+        \\pub enum E { X(int), Y }
+        \\pub type E2 = E
+        \\pub type OI = Option[int]
+        \\pub struct I { pub v: int }
+        \\impl I { fn new() -> I { I { v: 7 } } }
+        \\pub type IV = I
+        \\
+        },
+    };
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *ResolveGraph.GraphResult, tr: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 0), r.diags.len);
+            try testing.expectEqual(@as(usize, 0), tr.diags.len);
+        }
+    };
+    try withCheckedGraph(".toy-test-typ-alias-expr", files, "main.toy", Check.run);
+}
+
+test "a private alias in expression position is R0005 once per use" {
+    const files = &[_]FixtureFile{
+        .{ .path = "main.toy", .source =
+        \\import util
+        \\fn main() -> int {
+        \\    _e := util.P.down
+        \\    _i := util.Q.new()
+        \\    0
+        \\}
+        \\
+        },
+        .{ .path = "util.toy", .source =
+        \\pub enum Dir { up, down }
+        \\type P = Dir
+        \\pub struct I { v: int }
+        \\impl I { fn new() -> I { I { v: 7 } } }
+        \\type Q = I
+        \\
+        },
+    };
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *ResolveGraph.GraphResult, tr: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 2), r.diags.len);
+            try testing.expectEqualStrings("type alias 'P' is not exported by module 'util'", r.diags[0].message);
+            try testing.expectEqualStrings("type alias 'Q' is not exported by module 'util'", r.diags[1].message);
+            for (tr.diags) |d| try testing.expect(d.severity != .err);
+        }
+    };
+    try withCheckedGraph(".toy-test-typ-alias-expr-private", files, "main.toy", Check.run);
+}
+
 test "type arguments on a qualified non-generic type name the type as written" {
     const files = &[_]FixtureFile{
         .{ .path = "main.toy", .source =

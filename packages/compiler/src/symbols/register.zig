@@ -319,10 +319,7 @@ pub fn registerAliases(t: *Typecheck, decl_nodes: []const Ast.Index) !void {
     // Seed `byte` only if no `byte` already lives in ANY namespace consulted at or
     // before the alias-map lookup: a user `struct`/`enum byte` (struct/enum maps) must
     // win, and a user `type byte` (recorded below) overwrites the seed in the resolve pass.
-    if (map.get("byte") == null and
-        t.activeStructMap().get("byte") == null and
-        t.activeEnumMap().get("byte") == null)
-    {
+    if (map.get("byte") == null and !bindsTypeHere(t, "byte")) {
         try map.put(t.gpa, "byte", Type.uint8);
     }
 
@@ -341,7 +338,7 @@ pub fn registerAliases(t: *Typecheck, decl_nodes: []const Ast.Index) !void {
             try t.sink.report(.{ .span = t.tokSpan(decl.main_token), .code = .T0011 }, "type alias '{s}' shadows a builtin type", .{name});
             continue;
         }
-        if (t.activeStructMap().get(name) != null or t.activeEnumMap().get(name) != null or by_name.contains(name)) {
+        if (bindsTypeHere(t, name) or by_name.contains(name)) {
             try t.sink.report(.{ .span = t.tokSpan(decl.main_token), .code = .T0012 }, "duplicate type declaration '{s}'", .{name});
             continue;
         }
@@ -350,6 +347,25 @@ pub fn registerAliases(t: *Typecheck, decl_nodes: []const Ast.Index) !void {
     }
 
     for (0..entries.items.len) |i| _ = try resolveAlias(t, entries.items, i, map, &by_name);
+}
+
+/// Whether the active module itself binds type `name`: declares a struct or enum of it,
+/// or selects it in an import. A prelude or bare-imported type the module merely sees
+/// does not count, so an alias may shadow it as a local declaration does.
+fn bindsTypeHere(t: *Typecheck, name: []const u8) bool {
+    const mod = t.graph_mod;
+    if (t.activeStructMap().get(name)) |id| {
+        const s = t.structs.items[id];
+        if (s.mod == mod and s.decl_node != Ast.none) return true;
+    }
+    if (t.activeEnumMap().get(name)) |id| {
+        const e = t.enums.items[id];
+        if (e.mod == mod and e.decl_node != Ast.none) return true;
+    }
+    for (t.graph.mods[mod].selections) |sel| {
+        if (sel.kind == .type and std.mem.eql(u8, sel.local, name)) return true;
+    }
+    return false;
 }
 
 /// Resolve `entries[start]` to a concrete `Type`, writing it (and every alias on the
