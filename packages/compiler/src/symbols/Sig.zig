@@ -25,15 +25,20 @@ pub const Sig = struct {
     /// with no extra args passes them as a plain call does, and extra args already
     /// change the caller's own walk.
     variadic: bool = false,
+    /// The fn declares type params. Not folded: they show in `params` and `ret`. A
+    /// template whose type params sit only in its return type (`fn none[T]() ->
+    /// Option[T]`) has no param to say so.
+    generic: bool = false,
 
-    /// True when this sig is a generic template — some param is a bare `type_var`
-    /// (flat generic) OR an `.app`/`.func` (a type-var hidden inside a container or fn
-    /// param like `Vec[T]` / `fn(T) -> int`). After reify only a template keeps
-    /// `.app`/`.func` params (reify rewrites every non-generic fn's composite params to a
-    /// concrete `structT`), so such a param is a sound composite-free template signal.
-    /// Gates the bare-inferred-call sites that must resolve to a reified INSTANCE, not
-    /// the never-lowered template symbol.
+    /// True when this sig is a generic template — it declares type params, or some
+    /// param is a bare `type_var` (flat generic) OR an `.app`/`.func` (a type-var hidden
+    /// inside a container or fn param like `Vec[T]` / `fn(T) -> int`). After reify only a
+    /// template keeps `.app`/`.func` params (reify rewrites every non-generic fn's
+    /// composite params to a concrete `structT`), so such a param is a sound
+    /// composite-free template signal. Gates the bare-inferred-call sites that must
+    /// resolve to a reified INSTANCE, not the never-lowered template symbol.
     pub fn isGenericTemplate(sig: Sig) bool {
+        if (sig.generic) return true;
         for (sig.params) |p| if (p.isTypeVar() or p.isApp() or p.isFunc()) return true;
         return false;
     }
@@ -67,6 +72,8 @@ test "a template whose only type var is inside a fn param is generic" {
     try @import("std").testing.expect(tmpl.isGenericTemplate());
     const plain: Sig = .{ .kind = .user_fn, .name = "keep", .params = &.{ Type.structT(3), Type.int }, .ret = Type.func(1) };
     try @import("std").testing.expect(!plain.isGenericTemplate());
+    const ret_only: Sig = .{ .kind = .user_fn, .name = "none", .params = &.{}, .ret = Type.enumT(0), .generic = true };
+    try @import("std").testing.expect(ret_only.isGenericTemplate());
 }
 
 test "fixedArgs drops a variadic call's extra args and rejects a count that does not fit" {

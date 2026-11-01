@@ -1,0 +1,38 @@
+# A type that failed is reported once: an arm beside a failed arm, a variant or a
+# generic call under an expected type naming an unknown type, and type args on a
+# method whose own type params were rejected add no T0013, T0015, T0016 or T0054. A
+# struct literal through an alias whose type failed adds no T0001.
+import std/vec
+impl int { fn mk[U](_u: U) -> int { 7 } }  #~ ERROR [T0013] 'mk' declares its own type parameters
+fn nothing[T]() -> Option[T] { Option.none }
+struct S[T] { n: int }
+type BadA = Nope  #~ ERROR [T0001] unknown type 'Nope'
+type GenA = S  #~ ERROR [T0001] generic type 'S' requires type arguments
+impl S[T] {
+    fn mk() -> S[T] { S[T] { n: 1 } }
+}
+
+fn arms(c: bool) -> int {
+    _z := if c { Option.some(1 + true) } else { Option.none }  #~ ERROR [T0044] operands of '+' must have the same type
+    _m := match c { true -> Option.some(2 + true), false -> nothing() }  #~ ERROR [T0044] operands of '+' must have the same type
+    _l := if c { Option.some(3 + true) } else { [] }  #~ ERROR [T0044] operands of '+' must have the same type
+    0
+}
+
+fn annotated() -> int {
+    _a: Option[Nope] = Option.some(1)  #~ ERROR [T0001] unknown type 'Nope'
+    _b: Option[Nope] = Option.none  #~ ERROR [T0001] unknown type 'Nope'
+    _c: Option[Nope] = nothing()  #~ ERROR [T0001] unknown type 'Nope'
+    _d: S[Nope] = S.mk()  #~ ERROR [T0001] unknown type 'Nope'
+    0
+}
+
+fn aliases() -> int {
+    _a := BadA { v: 3 }
+    _g := GenA { n: 1 }
+    0
+}
+
+fn main() -> int {
+    arms(true) + annotated() + aliases() + int.mk[bool](false)
+}

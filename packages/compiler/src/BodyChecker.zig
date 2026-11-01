@@ -463,8 +463,8 @@ pub const BodyChecker = struct {
 
         // A non-unit function must produce a value on every path: either all paths
         // structurally return, OR the body's trailing expression has the declared
-        // type. `assignable` folds poison/never/eql exactly as before.
-        if (want_value and !bc.blockReturns(decl.rhs) and !Type.assignable(f.ret, body_ty)) {
+        // type.
+        if (want_value and !bc.blockReturns(decl.rhs) and !bc.assignableOrPoison(f.ret, body_ty)) {
             if (!try bc.reportTailMismatch(decl.rhs, body_ty, f.ret))
                 try bc.report(.{ .span = bc.tokSpan(decl.main_token), .code = .T0043 }, "function '{s}' must return {f} but may fall off the end", .{ bc.nameText(decl.main_token), bc.fmtType(f.ret) });
         }
@@ -670,7 +670,7 @@ pub const BodyChecker = struct {
                 const ty: Type = if (stmt.rhs != Ast.none) blk: {
                     const declared = bc.typeFromNode(stmt.rhs);
                     const got = try bc.typeOfExpected(stmt.lhs, declared);
-                    if (!Type.assignable(declared, got)) {
+                    if (!bc.assignableOrPoison(declared, got)) {
                         try bc.report(.{ .span = bc.spanOf(stmt.lhs), .code = .T0041 }, "cannot bind {f} to '{s}' of type {f}", .{ bc.fmtType(got), bc.nameText(stmt.main_token), bc.fmtType(declared) });
                     }
                     break :blk declared;
@@ -708,7 +708,7 @@ pub const BodyChecker = struct {
                     try bc.compoundValue(stmt_idx, base, lhs)
                 else
                     try bc.typeOfExpected(stmt.rhs, if (lhs.kind == .invalid) null else lhs);
-                if (!Type.assignable(lhs, rhs)) {
+                if (!bc.assignableOrPoison(lhs, rhs)) {
                     const what = if (target.tag == .index) "an element" else "variable";
                     try bc.report(.{ .span = bc.spanOf(stmt.rhs), .code = .T0041 }, "cannot assign {f} to {s} of type {f}", .{ bc.fmtType(rhs), what, bc.fmtType(lhs) });
                 }
@@ -733,7 +733,7 @@ pub const BodyChecker = struct {
                 // loop) is also fine: control never actually reaches the return, so
                 // `never` unifies with any declared type — mirrors the trailing-expr
                 // body check above.
-                if (!Type.assignable(bc.body.cur_ret, ty)) {
+                if (!bc.assignableOrPoison(bc.body.cur_ret, ty)) {
                     const at: DiagnosticSink.Report = .{ .span = bc.spanOf(if (stmt.lhs == Ast.none) stmt_idx else stmt.lhs), .code = .T0042 };
                     if (bc.body.ret_expected) |e|
                         try bc.report(at, "return type {f} does not match expected {f} (the lambda is expected to be {f})", .{ bc.fmtType(ty), bc.fmtType(bc.body.cur_ret), bc.fmtType(e) })
@@ -1053,9 +1053,12 @@ pub const BodyChecker = struct {
     /// A method call's receiver. The call's expected type is the result's, not the
     /// receiver's, yet a receiver that is itself a literal used to take it (`x: int8 =
     /// Box { v: 1 }.get()`), and programs rely on that; so it reaches the receiver only as
-    /// a hint (`typeUnderHint`).
+    /// a hint (`typeUnderHint`). A poisoned one is withheld: it can give the receiver no
+    /// type, and as a soft poison it would read as failed arms before (`expectedPoisoned`)
+    /// and silence the receiver's own errors.
     fn typeOfReceiver(bc: *BodyChecker, recv: Ast.Index) error{OutOfMemory}!Type {
-        return bc.typeUnderHint(recv, if (bc.body.expected) |e| e.ty else null);
+        const hint = if (bc.body.expected) |e| if (bc.holdsInvalid(e.ty)) null else e.ty else null;
+        return bc.typeUnderHint(recv, hint);
     }
 
     /// Type `node_idx` under `hint` as a soft expected type, which never turns into an
@@ -1440,6 +1443,7 @@ pub const BodyChecker = struct {
                 // type: a `Vec[T]` annotation makes it the type's associated `new()`
                 // constructor. With no expected type (a bare `xs := []`) the element type
                 // is uninferable — require an annotation.
+                if (bc.expectedPoisoned()) break :blk Type.invalid;
                 const exp = bc.groundExpectedTy() orelse {
                     try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0016 }, "an empty list literal '[]' requires a type annotation, e.g. 'xs: Vec[int] = []'", .{});
                     break :blk Type.invalid;
@@ -1474,7 +1478,7 @@ pub const BodyChecker = struct {
                 const result = Type.app(bc.internApp(vec_ctor, &.{v_ty}, false) catch break :blk Type.invalid);
                 for (elems[1..], 1..) |ei, k| {
                     const at = try bc.typeOfExpected(ei, v_ty);
-                    if (!Type.assignable(v_ty, at))
+                    if (!bc.assignableOrPoison(v_ty, at))
                         try bc.report(.{ .span = bc.spanOf(ei), .code = .T0065 }, "list element {d}: expected '{f}', got '{f}'", .{ k, bc.fmtType(v_ty), bc.fmtType(at) });
                 }
                 if (bc.body.expected) |exp| if (!Type.eql(result, exp.ty) and !exp.soft and bc.givesType(exp.ty)) {
@@ -1547,11 +1551,26 @@ pub const BodyChecker = struct {
             return bc.checkStructFieldInits(node_idx, n, sym, e.args, sym.name, app_ty, null);
         }
         const id = bc.activeStructMap().get(bc.nameText(lhs.main_token)) orelse {
+            if (bc.aliasTypeNamed(n.lhs)) |ty| if (try bc.aliasStructInit(node_idx, n, ty, lhs.main_token)) |t| return t;
             for (Ast.rangeSlice(bc.tree, (n.rhs).int())) |fi| _ = try bc.typeUnder(bc.tree.nodes[(fi).int()].lhs, bc.partHint());
+            // An alias whose type failed was reported at its decl.
+            if (bc.activeAliasMap().get(bc.nameText(lhs.main_token))) |t| if (t.kind == .invalid) return .invalid;
             try bc.sink.report(.{ .span = bc.tokSpan(lhs.main_token), .code = .T0001 }, "unknown struct type '{s}'", .{bc.nameText(lhs.main_token)});
             return .invalid;
         };
         return bc.typeOfNamedStructInit(node_idx, n, id, lhs.main_token);
+    }
+
+    /// A struct literal through an alias `ty` named at `name_tok`: of the struct it names,
+    /// with an instance alias (`type BI = Box[int]`) fixing the args as `Box[int] { .. }`
+    /// does. Null when the alias names no struct.
+    fn aliasStructInit(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, ty: Type, name_tok: u32) error{OutOfMemory}!?Type {
+        if (ty.kind == .@"struct") return try bc.typeOfNamedStructInit(node_idx, n, ty.struct_id, name_tok);
+        if (!ty.isApp()) return null;
+        const e = bc.composite.at(ty.appIdx());
+        if (e.ctor_is_enum) return null;
+        const sym = bc.model.structs[e.ctor];
+        return try bc.checkStructFieldInits(node_idx, n, sym, e.args, bc.nameText(name_tok), ty, null);
     }
 
     /// A struct literal with no type args, of struct `id` named at `name_tok`: a bare
@@ -1684,7 +1703,7 @@ pub const BodyChecker = struct {
                 seen[j] = true;
                 try bc.checkFieldVisible(sym, j, bc.tokSpan(fi.main_token));
                 const fty = want.?;
-                if (!Type.assignable(fty, vt)) {
+                if (!bc.assignableOrPoison(fty, vt)) {
                     try bc.report(.{ .span = bc.spanOf(fi.lhs), .code = .T0041 }, "field '{s}': expected {f}, got {f}", .{ fname, bc.fmtType(fty), bc.fmtType(vt) });
                 }
             } else {
@@ -2096,8 +2115,19 @@ pub const BodyChecker = struct {
     fn typeOfModuleStructInit(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, node_form: InitForm, args: Ast.Index) error{OutOfMemory}!Type {
         if (node_form == .@"struct") {
             const target = bc.resolutions[n.lhs.int()].module;
-            if (bc.model.graph.mods[target].struct_ids.get(bc.nameText(n.main_token))) |id|
+            const mod = &bc.model.graph.mods[target];
+            if (mod.struct_ids.get(bc.nameText(n.main_token))) |id|
                 return bc.typeOfNamedStructInit(node_idx, n, id, n.main_token);
+            // The resolver reported a non-pub alias; it still names its type, as a non-pub
+            // struct does.
+            if (mod.alias_ids.get(bc.nameText(n.main_token))) |ty| {
+                // An alias whose type failed was reported at its decl.
+                if (ty.kind == .invalid) {
+                    try bc.typeArgsForEffect(node_form, args);
+                    return .invalid;
+                }
+                if (try bc.aliasStructInit(node_idx, n, ty, n.main_token)) |t| return t;
+            }
         }
         try bc.typeArgsForEffect(node_form, args);
         const sp: Span = .{ .start = bc.spanOf(n.lhs).start, .end = bc.tokSpan(n.main_token).end };
@@ -2299,7 +2329,7 @@ pub const BodyChecker = struct {
                 for (elems, variant.field_types, 0..) |a, fty_pat, i| {
                     const fty = substTy(bc, fty_pat, targs);
                     const at = if (pretyped) |pt| pt[i] else try bc.typeOfExpected(a, fty);
-                    if (!Type.assignable(fty, at)) {
+                    if (!bc.assignableOrPoison(fty, at)) {
                         try bc.report(.{ .span = bc.spanOf(a), .code = .T0040 }, "variant '{s}.{s}': expected {f}, got {f}{f}", .{ e.name, vname, bc.fmtType(fty), bc.fmtType(at), bc.captureHint(a, fty, at) });
                     }
                 }
@@ -2324,7 +2354,7 @@ pub const BodyChecker = struct {
                         seen[j] = true;
                         const fty = substTy(bc, variant.field_types[j], targs);
                         const vt = if (pretyped) |pt| pt[ii] else try bc.typeOfExpected(fi.lhs, fty);
-                        if (!Type.assignable(fty, vt))
+                        if (!bc.assignableOrPoison(fty, vt))
                             try bc.report(.{ .span = bc.spanOf(fi.lhs), .code = .T0041 }, "field '{s}': expected {f}, got {f}", .{ fname, bc.fmtType(fty), bc.fmtType(vt) });
                     } else {
                         if (pretyped == null) _ = try bc.typeUnder(fi.lhs, bc.partHint());
@@ -2364,7 +2394,7 @@ pub const BodyChecker = struct {
         for (elems, sym.field_types, 0..) |a, fty, j| {
             try bc.checkFieldVisible(sym, j, bc.spanOf(a));
             const at = try bc.typeOfExpected(a, fty); // expected type drives literal narrowing (integer widths)
-            if (!Type.assignable(fty, at)) {
+            if (!bc.assignableOrPoison(fty, at)) {
                 try bc.report(.{ .span = bc.spanOf(a), .code = .T0040 }, "tuple struct '{s}': expected {f}, got {f}{f}", .{ sym.name, bc.fmtType(fty), bc.fmtType(at), bc.captureHint(a, fty, at) });
             }
         }
@@ -2441,14 +2471,17 @@ pub const BodyChecker = struct {
             // `App`'s type-args is a change to the shared `typeName` accessor, out of
             // scope for this leaf-carry fix; `arg`/`expected` render as-is.
             .conflict => |c| {
+                if (bc.holdsInvalid(c.expected)) return .err;
                 try bc.report(.{ .span = bc.tokSpan(span_tok), .code = .T0015 }, "conflicting types for type parameter '{s}': {f} inferred from the value, {f} from the expected type", .{ param_names[c.ord], bc.fmtType(c.arg), bc.fmtType(c.expected) });
                 return .err;
             },
             .unbound => |u| {
                 if (bc.body.ret_poisoned) if (bc.body.ret_partial) |p| if (bc.expectedTy()) |e| if (e.eql(p)) return .err;
+                if (bc.expectedPoisoned()) return .err;
                 return .{ .unbound = u.ord };
             },
             .ok => {
+                for (out) |ta| if (bc.holdsInvalid(ta)) return .err;
                 for (out) |ta| {
                     // A bounded template's own param inferred here grounds at the outer
                     // instantiation; admit it (the instance re-check re-gates concretely).
@@ -2574,6 +2607,9 @@ pub const BodyChecker = struct {
     /// own (`Option.none`, `[]`) takes theirs; as a hint it never errs where the arm alone
     /// would not (`typeUnderHint`).
     pub fn typeOfArm(bc: *BodyChecker, node_idx: Ast.Index, exp: ?Expected, join: Type) error{OutOfMemory}!Type {
+        // The arms before failed, so their type is the poison, which leaves a later arm
+        // with no type of its own silent rather than open.
+        if (join.kind == .invalid and exp == null) return bc.typeUnderHint(node_idx, .invalid);
         if (join.kind != .never and join.kind != .invalid) {
             if (exp == null) return bc.typeUnderHint(node_idx, join);
             const e = exp.?.ty;
@@ -2742,7 +2778,7 @@ pub const BodyChecker = struct {
                 try bc.drainArgs(&.{a});
                 break :blk Type.invalid;
             } else try bc.typeOfExpected(a, want);
-            if (!Type.assignable(want, got))
+            if (!bc.assignableOrPoison(want, got))
                 try bc.report(.{ .span = bc.spanOf(a), .code = .T0040, .related = sig.decl }, "argument {d}{s}: expected {f}, got {f}{f}{f}", .{ i + 1, bc.pipedArgHint(call, i + 1), bc.fmtType(want), bc.fmtType(got), bc.sigSuffix(sig), bc.captureHint(a, want, got) });
             if (Modes.isMut(sig.mut_mask, i)) try bc.checkMutArg(call, a, i, sig);
         }
@@ -3488,7 +3524,10 @@ pub const BodyChecker = struct {
         }
         if (try bc.explicitCallOnType(node_idx, n, callee, explicit)) |t| return t;
         const recv_ty = try bc.typeOfReceiver(fa.lhs); // also populates node_types[recv] for lower
-        if (recv_ty.kind == .invalid) return .invalid;
+        if (recv_ty.kind == .invalid) {
+            try bc.drainArgs(args);
+            return .invalid;
+        }
         if (bc.concreteTemplate(recv_ty, member) != null) return bc.explicitTemplateCall(node_idx, n, callee, recv_ty, explicit, false);
         if (recv_ty.kind == .@"struct" or recv_ty.kind == .@"enum" or recv_ty.isScalar()) {
             var bound_args: std.ArrayList(Type) = .empty;
@@ -3597,7 +3636,11 @@ pub const BodyChecker = struct {
                 return try bc.explicitTemplateCall(node_idx, n, callee, ty, explicit, true);
             }
             try bc.drainArgs(args);
-            if (is_variant or Typecheck.pickMethodIndex(bc.model.methods, ty, member, null, null, bc.methodSite()) != .none)
+            const pick = Typecheck.pickMethodIndex(bc.model.methods, ty, member, null, null, bc.methodSite());
+            // Type params a builtin type's method declares were rejected at the decl
+            // (T0013), so its type args are no new error.
+            if (!is_variant and pick == .one and bc.model.fns[bc.model.methods[pick.one].fn_id].generic_params.len > 0) return .invalid;
+            if (is_variant or pick != .none)
                 try bc.sink.report(.{ .span = bc.typeArgsSpan(n.lhs), .code = .T0054 }, "'{s}' is not generic; drop the type arguments", .{member})
             else
                 try bc.report(.{ .span = bc.tokSpan(fa.main_token), .code = .T0018 }, "'{f}' has no associated function '{s}'", .{ bc.fmtType(ty), member });
@@ -4331,7 +4374,7 @@ pub const BodyChecker = struct {
                             return payload;
                         }
                         const vt = try bc.typeOfExpected(args[1], if (payload.kind == .invalid) null else payload);
-                        if (payload.kind != .invalid and !Type.assignable(payload, vt)) {
+                        if (payload.kind != .invalid and !bc.assignableOrPoison(payload, vt)) {
                             try bc.report(.{ .span = bc.spanOf(args[1]), .code = .T0040 }, "argument 2: expected {f}, got {f}{f}", .{ bc.fmtType(payload), bc.fmtType(vt), bc.captureHint(args[1], payload, vt) });
                         }
                         bc.node_types[(node_idx).int()] = Type.unit;
@@ -4422,18 +4465,21 @@ pub const BodyChecker = struct {
             defer bc.gpa.free(out);
             switch (try CallInfer.inferArgs(bc, .{ .call = node_idx, .sig = sig }, args, f.params, f.generic_params, null, .{ .ret = f.ret }, arg_types, out)) {
                 .failed => return .invalid,
-                .unbound => |ord| {
-                    try bc.reportUninferable(bc.spanOf(node_idx), " '{s}'", .{f.generic_params[ord]}, bc.calleeText(n.lhs), out, &.{"(..)"}, null);
-                    return .invalid;
+                .unbound => switch (try CallInfer.bindFromExpected(bc, f.ret, out, out.len)) {
+                    .ok => {},
+                    .poisoned => return .invalid,
+                    .open => |ord| {
+                        try bc.reportUninferable(bc.spanOf(node_idx), " '{s}'", .{f.generic_params[ord]}, bc.calleeText(n.lhs), out, &.{"(..)"}, null);
+                        return .invalid;
+                    },
                 },
-                .ok => {
-                    if (!try CallInfer.concreteTargs(bc, node_idx, out)) return .invalid;
-                    var inferred = sig.substituted(out);
-                    inferred.pretyped = arg_types;
-                    _ = try bc.checkCall(node_idx, args, inferred);
-                    return bc.substRet(node_idx, f, out);
-                },
+                .ok => {},
             }
+            if (!try CallInfer.concreteTargs(bc, node_idx, out)) return .invalid;
+            var inferred = sig.substituted(out);
+            inferred.pretyped = arg_types;
+            _ = try bc.checkCall(node_idx, args, inferred);
+            return bc.substRet(node_idx, f, out);
         }
         const sig = bc.fnSig(f, bc.nameText(callee.main_token));
         const fixed = if (f.variadic and args.len >= f.params.len) args[0..f.params.len] else args;
@@ -4546,7 +4592,11 @@ pub const BodyChecker = struct {
 
     fn dispatchValueMethod(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, callee: Ast.Node) error{OutOfMemory}!?Type {
         const recv_ty = try bc.typeOfReceiver(callee.lhs); // also populates node_types[recv] for lower
-        if (recv_ty.kind == .invalid) return Type.invalid; // receiver already errored → no cascade
+        if (recv_ty.kind == .invalid) {
+            // The receiver already erred; the args' own errors still surface.
+            try bc.drainArgs(Ast.rangeSlice(bc.tree, (n.rhs).int()));
+            return Type.invalid;
+        }
         if (recv_ty.kind == .@"struct" or recv_ty.kind == .@"enum" or recv_ty.isScalar() or recv_ty.kind == .float) {
             return try bc.dispatchConcreteMethod(node_idx, n, callee, recv_ty);
         } else if (recv_ty.kind == .app) {
@@ -5123,6 +5173,25 @@ pub const BodyChecker = struct {
             return true;
         }
         return true;
+    }
+
+    /// Whether `t` is or holds the poison `invalid`: a type that failed and was reported.
+    pub fn holdsInvalid(bc: *BodyChecker, t: Type) bool {
+        return Typecheck.holdsPoison(bc.composite, t);
+    }
+
+    /// Whether a `got` may stand where `want` is wanted: `Type.assignable`, or either holds
+    /// the poison deep inside (`Option[Nope]`), whose failure was already reported.
+    pub fn assignableOrPoison(bc: *BodyChecker, want: Type, got: Type) bool {
+        return Type.assignable(want, got) or bc.holdsInvalid(want) or bc.holdsInvalid(got);
+    }
+
+    /// Whether the expected type holds the poison (`Option[Nope]`, or the arms before
+    /// this one failed): a type param it would fix is reported where it failed, so one
+    /// left open or bound to the poison is no new error.
+    pub fn expectedPoisoned(bc: *BodyChecker) bool {
+        const t = bc.expectedTy() orelse return false;
+        return bc.holdsInvalid(t);
     }
 
     /// Where a generic call's still-open var `ord` sits in the type a waiting arg is
@@ -5981,7 +6050,75 @@ test "a receiver's expected type stays a hint through every arm, break and scrut
 }
 
 test "an expected type arg poisoned by an unknown type is no open var to infer" {
-    try Typecheck.expectDiagCodes("fn f() -> int {\n _x: Option[Foo] = Option.none\n _y: Result[int, Bar] = Result.ok(1)\n 0\n}\n", &.{ .T0001, .T0013, .T0001, .T0013 });
+    try Typecheck.expectDiagCodes("fn f() -> int {\n _x: Option[Foo] = Option.none\n _y: Result[int, Bar] = Result.ok(1)\n 0\n}\n", &.{ .T0001, .T0001 });
+    try Typecheck.expectDiagCodes("fn f() -> int {\n _x: Option[Nope] = Option.some(1)\n 0\n}\n", &.{.T0001});
+    try Typecheck.expectDiagCodes("struct Box[T] { v: int }\nfn f() -> int {\n _b: Box[Nope] = Box { v: 1 }\n 0\n}\n", &.{.T0001});
+    try Typecheck.expectDiagCodes("fn nothing[T]() -> Option[T] { Option.none }\nfn some_of[T](v: T) -> Option[T] { Option.some(v) }\nfn f() -> int {\n _a: Option[Nope] = nothing()\n _b: Option[Nope] = some_of(1)\n 0\n}\n", &.{ .T0001, .T0001 });
+    try Typecheck.expectDiagCodes("struct S[T] { n: int }\nimpl S[T] {\n fn mk() -> S[T] { S[T] { n: 1 } }\n}\nfn f() -> int {\n _s: S[Nope] = S.mk()\n 0\n}\n", &.{.T0001});
+}
+
+test "an arm beside a poisoned arm takes no type from it and adds no error" {
+    try Typecheck.expectDiagCodes("fn g(c: bool) -> int {\n _z := if c { Option.some(1 + true) } else { Option.none }\n 0\n}\n", &.{.T0044});
+    try Typecheck.expectDiagCodes("fn g(c: bool) -> int {\n _z := if c { Option.some(1 + true) } else if !c { Option.none } else { Option.none }\n 0\n}\n", &.{.T0044});
+    try Typecheck.expectDiagCodes("fn g(c: bool) -> int {\n _z := match c { true -> Option.some(1 + true), false -> Option.none }\n 0\n}\n", &.{.T0044});
+    try Typecheck.expectDiagCodes("fn nothing[T]() -> Option[T] { Option.none }\nfn g(c: bool) -> int {\n _z := if c { Option.some(1 + true) } else { nothing() }\n 0\n}\n", &.{.T0044});
+    // A sound arm still gives its type to the next one.
+    try Typecheck.expectDiagCodes("fn g(c: bool) -> int {\n z := if c { Option.some(1) } else { Option.none }\n z.or(0)\n}\n", &.{});
+}
+
+test "a type arg on a method whose own type params were rejected adds no error" {
+    try Typecheck.expectDiagCodes("impl int { fn mk[U](_u: U) -> int { 7 } }\nfn main() -> int { int.mk[bool](false) }\n", &.{.T0013});
+}
+
+test "a struct literal names its struct through an alias" {
+    try Typecheck.expectDiagCodes(
+        \\struct K { v: int }
+        \\type A = K
+        \\struct Box[T] { v: T }
+        \\type BI = Box[int]
+        \\fn main() -> int {
+        \\    a := A { v: 4 }
+        \\    b := BI { v: 2 }
+        \\    a.v + b.v
+        \\}
+        \\
+    , &.{});
+    // An instance alias fixes the args, as `Box[int] { .. }` does.
+    try Typecheck.expectDiagCodes(
+        \\struct Box[T] { v: T }
+        \\type BI = Box[int]
+        \\type I = int
+        \\fn main() -> int {
+        \\    _b := BI { v: true }
+        \\    _i := I { v: 1 }
+        \\    0
+        \\}
+        \\
+    , &.{ .T0041, .T0001 });
+}
+
+test "the expected type binds a generic fn's type params its args leave open" {
+    const decls =
+        \\fn nothing[T]() -> Option[T] { Option.none }
+        \\fn wrap[T, E](v: T) -> Result[T, E] { Result.ok(v) }
+        \\fn take(o: Option[bool]) -> int { if o.is_some() { 1 } else { 0 } }
+        \\fn ret() -> Option[str] { nothing() }
+        \\
+    ;
+    try Typecheck.expectDiagCodes(decls ++ "fn main() -> int {\n o: Option[int] = nothing()\n r: Result[int, str] = wrap(1)\n _s := ret()\n o.or(0) + r.or(0) + take(nothing())\n}\n", &.{});
+    // No expected type, or one the return type cannot be.
+    try Typecheck.expectDiagCodes(decls ++ "fn main() -> int {\n _o := nothing()\n _x: int = nothing()\n 0\n}\n", &.{ .T0016, .T0016 });
+    // A receiver's soft hint is the outer call's result type, not this call's.
+    try Typecheck.expectDiagCodes(decls ++ "fn main() -> int {\n _b: bool = nothing().is_some()\n 0\n}\n", &.{.T0016});
+    // A poisoned annotation is no reason to silence the receiver's own error.
+    try Typecheck.expectDiagCodes(decls ++ "fn main() -> int {\n _b: Option[Nope] = nothing().is_some()\n 0\n}\n", &.{ .T0001, .T0016 });
+    // The args bind first, so an annotation that disagrees with them stays an error.
+    try Typecheck.expectDiagCodes(decls ++ "fn main() -> int {\n _r: Result[int, str] = wrap(true)\n 0\n}\n", &.{.T0041});
+}
+
+test "a method call whose receiver erred still checks its args" {
+    try Typecheck.expectDiagCodes("fn go() -> int {\n _c := (1 + true).foo(2 + \"x\")\n 0\n}\n", &.{ .T0044, .T0044 });
+    try Typecheck.expectDiagCodes("fn go() -> int {\n _c := (1 + true).foo[int](2 + \"x\")\n 0\n}\n", &.{ .T0044, .T0044 });
 }
 
 test "a poisoned payload leaves the type params it would bind to the poison, not the others" {

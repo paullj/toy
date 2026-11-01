@@ -1,0 +1,6 @@
+pub struct K { pub v: int }
+pub type A = K
+pub struct Box[T] { pub v: T }
+pub type BI = Box[int]
+
+pub fn nothing[T]() -> Option[T] { Option.none }

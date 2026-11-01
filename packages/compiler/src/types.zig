@@ -1544,7 +1544,7 @@ fn isAggregate(t: Type) bool {
 }
 
 /// Whether `ty` is or holds the poison type `.invalid`.
-fn holdsPoison(composite: *Composite, ty: Type) bool {
+pub fn holdsPoison(composite: *Composite, ty: Type) bool {
     if (ty.kind == .invalid) return true;
     if (!ty.isApp() and !ty.isFunc()) return false;
     for (composite.at(ty.struct_id).args) |a| if (holdsPoison(composite, a)) return true;
@@ -2491,7 +2491,7 @@ pub fn checkGraph(
     // `fns`; the sig name is the resolver's qualified/bare name for that id.
     std.debug.assert(t.fns.items.len == fns.len);
     for (t.fns.items, 0..) |f, i| {
-        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask, .variadic = f.variadic };
+        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask, .variadic = f.variadic, .generic = f.isGeneric() };
         sigs_built += 1;
     }
 
@@ -2992,7 +2992,7 @@ fn monomorphize(t: *Typecheck, model: *const Model) !void {
     // Each template's facts as the checker holds them: `generic_params.len` is the count.
     const template_refs = try t.gpa.alloc(?Mono.TemplateRef, model.fns.len);
     defer t.gpa.free(template_refs);
-    for (model.fns, template_refs) |f, *r| r.* = if (f.isGeneric()) .{ .params = f.params, .count = @intCast(f.generic_params.len) } else null;
+    for (model.fns, template_refs) |f, *r| r.* = if (f.isGeneric()) .{ .params = f.params, .ret = f.ret, .count = @intCast(f.generic_params.len) } else null;
     const templates: Mono.Templates = .{ .refs = .{ .of = template_refs, .decomposer = t.composite.decomposer() } };
     const seeded = try t.gpa.alloc(bool, nts.len);
     defer t.gpa.free(seeded);
@@ -3526,7 +3526,7 @@ fn scanCalls(t: *Typecheck, model: *const Model, templates: Mono.Templates, mod:
         // The explicit-turbofish `id[int](..)` and bare-inferred `id(7)` shapes route
         // through the SAME arg-extraction the fingerprint fold uses (`callInstanceRef`),
         // so discovery selects the exact instance the caller's fingerprint targets.
-        if (try Mono.callInstanceRef(t.gpa, view, n)) |ref| {
+        if (try Mono.callInstanceRef(t.gpa, view, Ast.Index.from(@intCast(ci)))) |ref| {
             defer t.gpa.free(ref.args);
             // Turbofish arity (a no-op for the inferred shape + any valid turbofish):
             // guards a wrong-arity `id[int,bool]()` on an already-erroring program.

@@ -1,0 +1,12 @@
+# A generic fn's type param its args leave open takes the expected type; with none,
+# or under a receiver (whose expected type is the outer call's), it is T0016. A
+# struct literal through an alias of a non-struct names no struct.
+fn nothing[T]() -> Option[T] { Option.none }
+type I = int
+
+fn main() -> int {
+    _o := nothing()  #~ ERROR [T0016] cannot infer type parameter 'T'; add explicit type arguments, e.g. nothing[int](..)
+    _b: bool = nothing().is_some()  #~ ERROR [T0016] cannot infer type parameter 'T'
+    _i := I { v: 1 }  #~ ERROR [T0001] unknown struct type 'I'
+    return 0
+}

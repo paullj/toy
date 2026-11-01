@@ -275,7 +275,7 @@ fn checkDeclaredRet(bc: *BodyChecker, n: Ast.Node, params: []const Type, r: Type
     if (!annotated) bc.body.ret_expected = exp_fn;
     const want_value = r.kind != .unit and r.kind != .invalid;
     const body_ty = try bc.typeOfBlockExpected(n.rhs, want_value, if (want_value) r else null);
-    if (want_value and !bc.blockReturns(n.rhs) and !Type.assignable(r, body_ty)) {
+    if (want_value and !bc.blockReturns(n.rhs) and !bc.assignableOrPoison(r, body_ty)) {
         if (annotated) {
             if (!try bc.reportTailMismatch(n.rhs, body_ty, r))
                 try bc.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0043 }, "lambda must return {f} but may fall off the end", .{bc.fmtType(r)});
@@ -325,7 +325,7 @@ pub fn checkLocalFn(bc: *BodyChecker, idx: Ast.Index, n: Ast.Node) error{OutOfMe
     bc.body.ret_infer = false;
     const want_value = ret.kind != .unit and ret.kind != .invalid;
     const body_ty = try bc.typeOfBlockExpected(n.rhs, want_value, if (want_value) ret else null);
-    if (want_value and !bc.blockReturns(n.rhs) and !Type.assignable(ret, body_ty)) {
+    if (want_value and !bc.blockReturns(n.rhs) and !bc.assignableOrPoison(ret, body_ty)) {
         if (!try bc.reportTailMismatch(n.rhs, body_ty, ret))
             try bc.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0043 }, "function '{s}' must return {f} but may fall off the end", .{ bc.nameText(n.main_token), bc.fmtType(ret) });
     }
