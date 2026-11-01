@@ -23,6 +23,9 @@
 //!   LC_MAIN, LC_LOAD_DYLIB libSystem, an LC_LOAD_DYLIB per user library and the
 //!   LC_RPATHs they need, LC_CODE_SIGNATURE (LAST).
 //! A user library also forces this path, even with no import, so dyld loads it.
+//! A debug build adds LC_SYMTAB + LC_DYSYMTAB to either layout (`Symtab`), right after
+//! LC_DYLD_CHAINED_FIXUPS, with the nlists and strings in __LINKEDIT between the fixups
+//! blob and the signature.
 //! The `__got` slot is seeded with the chained-fixups bind sentinel
 //! (0x8000000000000000), and `LC_DYLD_CHAINED_FIXUPS` names `_write` against
 //! libSystem so dyld binds the slot at load. `assemble` reports every segment's
@@ -63,6 +66,8 @@ const LC_MAIN: u32 = 0x28 | LC_REQ_DYLD;
 const LC_DYLD_CHAINED_FIXUPS: u32 = 0x34 | LC_REQ_DYLD;
 const LC_CODE_SIGNATURE: u32 = 0x1d;
 const LC_RPATH: u32 = 0x1c | LC_REQ_DYLD;
+const LC_SYMTAB: u32 = 0x2;
+const LC_DYSYMTAB: u32 = 0xb;
 
 const VM_PROT_READ: u32 = 0x1;
 const VM_PROT_WRITE: u32 = 0x2;
@@ -123,6 +128,68 @@ pub const Libraries = struct {
     }
 };
 
+/// The debug symbol table: one local `N_SECT` nlist per function, naming its `__text`
+/// offset, and the string table their names live in. Empty (the default) emits no
+/// LC_SYMTAB, leaving the image byte-identical to a build without it.
+pub const Symtab = struct {
+    syms: []const Sym = &.{},
+    strtab: []const u8 = &.{},
+
+    pub const Sym = struct { strx: u32, text_off: u32 };
+
+    /// One function to name, by its `__text` offset.
+    pub const Entry = struct { name: []const u8, text_off: u32 };
+
+    /// Build the table for `entries`, already in the order the nlists should take.
+    /// Each name gets the leading `_` of a C-level Mach-O symbol, so `nm` and `lldb`
+    /// show and match the toy name as they would a C function. Caller owns the
+    /// result (`deinit`).
+    pub fn build(gpa: std.mem.Allocator, entries: []const Entry) !Symtab {
+        if (entries.len == 0) return .{};
+        const syms = try gpa.alloc(Sym, entries.len);
+        errdefer gpa.free(syms);
+        // strx 0 means "no name", so the table opens with a NUL.
+        var len: usize = 1;
+        for (entries) |e| len += e.name.len + 2;
+        const strtab = try gpa.alloc(u8, std.mem.alignForward(usize, len, 8));
+        @memset(strtab, 0);
+        var pos: usize = 1;
+        for (entries, syms) |e, *s| {
+            s.* = .{ .strx = @intCast(pos), .text_off = e.text_off };
+            strtab[pos] = '_';
+            @memcpy(strtab[pos + 1 ..][0..e.name.len], e.name);
+            pos += e.name.len + 2;
+        }
+        return .{ .syms = syms, .strtab = strtab };
+    }
+
+    pub fn deinit(self: Symtab, gpa: std.mem.Allocator) void {
+        gpa.free(self.syms);
+        gpa.free(self.strtab);
+    }
+
+    fn isEmpty(self: Symtab) bool {
+        return self.syms.len == 0;
+    }
+
+    fn cmdsCount(self: Symtab) u32 {
+        return if (self.isEmpty()) 0 else 2;
+    }
+
+    fn cmdsSize(self: Symtab) u32 {
+        return if (self.isEmpty()) 0 else SYMTAB_CMD_SIZE + DYSYMTAB_CMD_SIZE;
+    }
+
+    /// Where the nlists and strings sit in __LINKEDIT, after the bytes that end at
+    /// `after_fixups`, and where the signature may start. With no symbols the
+    /// signature start is unchanged.
+    fn place(self: Symtab, after_fixups: u32) struct { symoff: u32, stroff: u32, end: u32 } {
+        const symoff = std.mem.alignForward(u32, after_fixups, 8);
+        const stroff = symoff + @as(u32, @intCast(self.syms.len)) * NLIST_SIZE;
+        return .{ .symoff = symoff, .stroff = stroff, .end = stroff + @as(u32, @intCast(self.strtab.len)) };
+    }
+};
+
 /// The chained-fixups bind sentinel written into a SINGLE-import `__got` slot on
 /// disk: a `dyld_chained_ptr_64_bind` with bind=1 (bit 63), ordinal 0 (→ imports[0]),
 /// and next=0 (chain ends). dyld overwrites it in memory with the bound address at
@@ -173,6 +240,12 @@ const TEXT_SEG_CMD_SIZE: u32 = SEG_CMD_SIZE + SECT_SIZE; // one section
 const FIXUPS_CMD_SIZE: u32 = 16; // linkedit_data_command
 const MAIN_CMD_SIZE: u32 = 24; // entry_point_command
 const SIG_CMD_SIZE: u32 = 16; // linkedit_data_command
+const SYMTAB_CMD_SIZE: u32 = 24; // symtab_command
+const DYSYMTAB_CMD_SIZE: u32 = 80; // dysymtab_command
+const NLIST_SIZE: u32 = 16; // nlist_64
+const N_SECT: u8 = 0xe;
+// Every symbol names code, and `__text` is the image's first section.
+const TEXT_SECT_INDEX: u8 = 1;
 
 /// `cmdsize` for a dylinker/dylib command: a fixed head plus the NUL-terminated
 /// path, rounded up to 8.
@@ -243,18 +316,21 @@ pub fn assemble(
     cstrings: []const u8,
     imports: []const Import,
     libs: Libraries,
+    symtab: Symtab,
 ) !Layout {
     if (cstrings.len == 0 and imports.len == 0 and libs.isEmpty()) {
-        return assembleEmpty(gpa, identifier, code, entry_text_off);
+        return assembleEmpty(gpa, identifier, code, entry_text_off, symtab);
     }
-    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs);
+    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs, symtab);
 }
 
 /// The unchanged single-segment layout (no __cstring, no imports). Kept
 /// byte-identical so existing binaries/tests stay green.
-fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u8, entry_text_off: u32) !Layout {
+fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u8, entry_text_off: u32, symtab: Symtab) !Layout {
+    const ncmds: u32 = NCMDS + symtab.cmdsCount();
+    const sizeofcmds: u32 = SIZEOFCMDS + symtab.cmdsSize();
     // Code immediately follows the header + load commands, 4-byte aligned.
-    const code_file_off: u32 = std.mem.alignForward(u32, HEADER_SIZE + SIZEOFCMDS, 4);
+    const code_file_off: u32 = std.mem.alignForward(u32, HEADER_SIZE + sizeofcmds, 4);
     const text_size: u32 = @intCast(code.len);
 
     // The entry must land inside the code blob (it is `main`'s text offset).
@@ -272,7 +348,8 @@ fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u
     const linkedit_off: u32 = text_seg_size;
     const fixups_off: u32 = linkedit_off;
     const after_fixups: u32 = fixups_off + @as(u32, CHAINED_FIXUPS_BLOB.len);
-    const sig_file_off: u32 = std.mem.alignForward(u32, after_fixups, 16);
+    const st = symtab.place(after_fixups);
+    const sig_file_off: u32 = std.mem.alignForward(u32, st.end, 16);
 
     // The signature length is deterministic from the identifier and the number
     // of code pages, so we can reserve it before hashing.
@@ -291,8 +368,8 @@ fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u
     w.put32(CPU_TYPE_ARM64);
     w.put32(CPU_SUBTYPE_ARM64_ALL);
     w.put32(MH_EXECUTE);
-    w.put32(NCMDS);
-    w.put32(SIZEOFCMDS);
+    w.put32(ncmds);
+    w.put32(sizeofcmds);
     w.put32(MH_FLAGS);
     w.put32(0);
 
@@ -350,6 +427,7 @@ fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u
     w.put32(FIXUPS_CMD_SIZE);
     w.put32(fixups_off);
     w.put32(@intCast(CHAINED_FIXUPS_BLOB.len));
+    w.symtabCmds(symtab, st.symoff, st.stroff);
 
     // LC_LOAD_DYLINKER /usr/lib/dyld.
     w.put32(LC_LOAD_DYLINKER);
@@ -379,12 +457,13 @@ fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u
     w.put32(sig_len);
 
     // Sanity: we wrote exactly the header + all load commands.
-    std.debug.assert(w.pos == HEADER_SIZE + SIZEOFCMDS);
+    std.debug.assert(w.pos == HEADER_SIZE + sizeofcmds);
 
     @memcpy(image[code_file_off..][0..code.len], code);
 
     // __LINKEDIT: chained-fixups blob (sig region stays zeroed).
     @memcpy(image[fixups_off..][0..CHAINED_FIXUPS_BLOB.len], &CHAINED_FIXUPS_BLOB);
+    writeSymtab(image, symtab, st.symoff, st.stroff, BASE + code_file_off);
 
     return .{
         .image = image,
@@ -430,10 +509,11 @@ fn assembleMulti(
     cstrings: []const u8,
     imports: []const Import,
     libs: Libraries,
+    symtab: Symtab,
 ) !Layout {
     std.debug.assert(libs.dylibs.len <= Libraries.max_dylibs);
-    const ncmds: u32 = NCMDS_MULTI + libs.cmdsCount();
-    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + libs.cmdsSize();
+    const ncmds: u32 = NCMDS_MULTI + libs.cmdsCount() + symtab.cmdsCount();
+    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + libs.cmdsSize() + symtab.cmdsSize();
     const code_file_off: u32 = std.mem.alignForward(u32, HEADER_SIZE + sizeofcmds, 4);
     const text_size: u32 = @intCast(code.len);
 
@@ -462,7 +542,8 @@ fn assembleMulti(
     defer gpa.free(fixups_blob);
 
     const after_fixups: u32 = fixups_off + @as(u32, @intCast(fixups_blob.len));
-    const sig_file_off: u32 = std.mem.alignForward(u32, after_fixups, 16);
+    const st = symtab.place(after_fixups);
+    const sig_file_off: u32 = std.mem.alignForward(u32, st.end, 16);
     const sig_len: u32 = CodeSign.signatureLen(identifier, sig_file_off);
 
     const total: u32 = sig_file_off + sig_len;
@@ -584,6 +665,7 @@ fn assembleMulti(
     w.put32(FIXUPS_CMD_SIZE);
     w.put32(fixups_off);
     w.put32(@intCast(fixups_blob.len));
+    w.symtabCmds(symtab, st.symoff, st.stroff);
 
     // LC_LOAD_DYLINKER /usr/lib/dyld.
     w.put32(LC_LOAD_DYLINKER);
@@ -645,6 +727,7 @@ fn assembleMulti(
 
     // __LINKEDIT: the chained-fixups blob (sig region stays zeroed).
     @memcpy(image[fixups_off..][0..fixups_blob.len], fixups_blob);
+    writeSymtab(image, symtab, st.symoff, st.stroff, text_vmaddr + code_file_off);
 
     return .{
         .image = image,
@@ -769,6 +852,20 @@ fn buildChainedFixups(
     return blob;
 }
 
+/// Write the nlists at `symoff` and the strings at `stroff`. `text_addr` is the
+/// runtime address of `__text`, which each symbol's offset is relative to.
+fn writeSymtab(image: []u8, symtab: Symtab, symoff: u32, stroff: u32, text_addr: u64) void {
+    var w = Writer{ .buf = image, .pos = symoff };
+    for (symtab.syms) |s| {
+        w.put32(s.strx);
+        w.put8(N_SECT);
+        w.put8(TEXT_SECT_INDEX);
+        w.put16(0);
+        w.put64(text_addr + s.text_off);
+    }
+    @memcpy(image[stroff..][0..symtab.strtab.len], symtab.strtab);
+}
+
 // Little-endian byte writer.
 
 const Writer = struct {
@@ -811,6 +908,31 @@ const Writer = struct {
         // before the current position (we are right after the head fields).
         const cmd_start = self.pos - name_off;
         self.pos = cmd_start + cmdsize;
+    }
+
+    /// LC_SYMTAB and an LC_DYSYMTAB that marks every symbol local (no exports, no
+    /// imports: dyld binds through chained fixups, not the symbol table).
+    fn symtabCmds(self: *Writer, symtab: Symtab, symoff: u32, stroff: u32) void {
+        if (symtab.isEmpty()) return;
+        const nsyms: u32 = @intCast(symtab.syms.len);
+        self.put32(LC_SYMTAB);
+        self.put32(SYMTAB_CMD_SIZE);
+        self.put32(symoff);
+        self.put32(nsyms);
+        self.put32(stroff);
+        self.put32(@intCast(symtab.strtab.len));
+
+        const start = self.pos;
+        self.put32(LC_DYSYMTAB);
+        self.put32(DYSYMTAB_CMD_SIZE);
+        self.put32(0); // ilocalsym
+        self.put32(nsyms); // nlocalsym
+        self.put32(nsyms); // iextdefsym
+        self.put32(0); // nextdefsym
+        self.put32(nsyms); // iundefsym
+        self.put32(0); // nundefsym
+        @memset(self.buf[self.pos .. start + DYSYMTAB_CMD_SIZE], 0);
+        self.pos = start + DYSYMTAB_CMD_SIZE;
     }
 
     const SegArgs = struct {
@@ -862,7 +984,7 @@ fn rd64(image: []const u8, off: usize) u64 {
 }
 
 test "header fields" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -880,7 +1002,7 @@ test "header fields" {
 }
 
 test "segments and load command order" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -907,7 +1029,7 @@ test "segments and load command order" {
 }
 
 test "__PAGEZERO / __TEXT / __LINKEDIT geometry" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -936,7 +1058,7 @@ test "__PAGEZERO / __TEXT / __LINKEDIT geometry" {
 }
 
 test "chained fixups, LC_MAIN entryoff, and sig placement" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -977,7 +1099,7 @@ test "chained fixups, LC_MAIN entryoff, and sig placement" {
 test "nonzero entry_text_off shifts LC_MAIN entryoff" {
     // When `main` is not first in __text, its resolved offset is non-zero and the
     // entryoff must be code_file_off + that offset (so the kernel jumps to main).
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 8, &.{}, &.{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 8, &.{}, &.{}, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1004,7 +1126,7 @@ test "code spanning multiple pages grows __TEXT instead of being rejected" {
     // 4-byte-aligned blob so the layout assertions hold (real code is too).
     std.mem.writeInt(u32, big[0..4], 0xD65F03C0, .little); // ret at entry
 
-    const layout = try assemble(gpa, "stub", big, 0, &.{}, &.{}, .{});
+    const layout = try assemble(gpa, "stub", big, 0, &.{}, &.{}, .{}, .{});
     defer gpa.free(layout.image);
 
     // header+cmds+PAGE bytes of code spill into a second page -> __TEXT is 2 pages.
@@ -1048,7 +1170,7 @@ test "buildChainedFixups reproduces the clang 96-byte blob" {
 }
 
 test "multi-seg: 9 commands in the expected order" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1076,7 +1198,7 @@ test "multi-seg: 9 commands in the expected order" {
 }
 
 test "multi-seg: __TEXT has __text + __cstring; __cstring carries the bytes" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1101,7 +1223,7 @@ test "multi-seg: __TEXT has __text + __cstring; __cstring carries the bytes" {
 }
 
 test "multi-seg: __DATA_CONST geometry, __got, and the seeded slot" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1145,7 +1267,7 @@ test "gotBindValue: chained-fixups bind encoding matches the clang 2-import refe
 test "multi-seg: two imports seed two chained __got slots + ordered import/symbol tables" {
     // Imports arrive in canonical (name-sorted) slot order: labs (0) before write (1).
     const two = [_]Import{ .{ .name = "_labs" }, .{ .name = "_write" } };
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &two, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &two, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1168,7 +1290,7 @@ test "multi-seg: two imports seed two chained __got slots + ordered import/symbo
 }
 
 test "multi-seg: fixups blob + sig placement, sig last" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1203,7 +1325,7 @@ test "multi-seg: user dylibs follow libSystem, rpaths after them, and imports ca
         .{ .install_name = "/opt/z/lib/libz.1.dylib", .current_version = 0x10203 },
     };
     const rpaths = [_][]const u8{"/opt/ffi/lib"};
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &imports, .{ .dylibs = &dylibs, .rpaths = &rpaths });
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &imports, .{ .dylibs = &dylibs, .rpaths = &rpaths }, .{});
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1244,7 +1366,75 @@ test "multi-seg: user dylibs follow libSystem, rpaths after them, and imports ca
 
 test "a library with no imports still takes the multi-segment path to be loaded" {
     const dylibs = [_]Dylib{.{ .install_name = "/usr/lib/libz.1.dylib" }};
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{ .dylibs = &dylibs });
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{ .dylibs = &dylibs }, .{});
     defer testing.allocator.free(layout.image);
     try testing.expectEqual(NCMDS_MULTI + 1, rd32(layout.image, 16));
+}
+
+test "a symtab adds LC_SYMTAB + LC_DYSYMTAB and its nlists before the signature" {
+    const gpa = testing.allocator;
+    const st = try Symtab.build(gpa, &.{ .{ .name = "main", .text_off = 0 }, .{ .name = "m.f", .text_off = 8 } });
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("\x00_main\x00_m.f\x00", st.strtab[0..12]);
+
+    for ([_]bool{ false, true }) |multi| {
+        const layout = if (multi)
+            try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, st)
+        else
+            try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, st);
+        defer gpa.free(layout.image);
+        const img = layout.image;
+
+        const ncmds = rd32(img, 16);
+        try testing.expectEqual(@as(u32, if (multi) NCMDS_MULTI else NCMDS) + 2, ncmds);
+        var off: usize = HEADER_SIZE;
+        var symoff: u32 = 0;
+        var nsyms: u32 = 0;
+        var stroff: u32 = 0;
+        var strsize: u32 = 0;
+        var nlocal: u32 = 0;
+        var last: u32 = 0;
+        for (0..ncmds) |_| {
+            const cmd = rd32(img, off);
+            switch (cmd) {
+                LC_SYMTAB => {
+                    symoff = rd32(img, off + 8);
+                    nsyms = rd32(img, off + 12);
+                    stroff = rd32(img, off + 16);
+                    strsize = rd32(img, off + 20);
+                },
+                LC_DYSYMTAB => nlocal = rd32(img, off + 12),
+                else => {},
+            }
+            last = cmd;
+            off += rd32(img, off + 4);
+        }
+        try testing.expectEqual(@as(usize, HEADER_SIZE + rd32(img, 20)), off);
+        try testing.expectEqual(LC_CODE_SIGNATURE, last);
+        try testing.expectEqual(@as(u32, 2), nsyms);
+        try testing.expectEqual(@as(u32, 2), nlocal);
+        try testing.expectEqual(@as(u32, 0), symoff % 8);
+        try testing.expect(stroff + strsize <= layout.sig_file_off);
+        try testing.expectEqualSlices(u8, st.strtab, img[stroff..][0..strsize]);
+
+        const text_addr = layout.text_vmaddr + layout.code_file_off;
+        for (st.syms, 0..) |s, i| {
+            const n = symoff + i * NLIST_SIZE;
+            try testing.expectEqual(s.strx, rd32(img, n));
+            try testing.expectEqual(N_SECT, img[n + 4]);
+            try testing.expectEqual(TEXT_SECT_INDEX, img[n + 5]);
+            try testing.expectEqual(text_addr + s.text_off, rd64(img, n + 8));
+        }
+    }
+}
+
+test "an empty symtab leaves the image unchanged" {
+    const gpa = testing.allocator;
+    const st = try Symtab.build(gpa, &.{});
+    defer st.deinit(gpa);
+    const a = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, st);
+    defer gpa.free(a.image);
+    const b = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    defer gpa.free(b.image);
+    try testing.expectEqualSlices(u8, b.image, a.image);
 }

@@ -1004,6 +1004,7 @@ fn emitExecutable(
         lp.cstrings,
         lp.data_relocs,
         libs.linking,
+        lp.symtab,
     );
     defer gpa.free(image);
 

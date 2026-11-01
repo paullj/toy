@@ -19,6 +19,7 @@ toy run main.toy --profile release    # the same as --release
 |---|---|---|
 | IR passes | none (as `-O0`) | all of them (as `-O1`) |
 | Integer overflow | panics | wraps |
+| Symbol table | yes | no |
 | Default output | `.toy/<stamp>/debug/<name>` | `.toy/<stamp>/release/<name>` |
 
 When a new pass is added, `release` runs it too.
@@ -60,6 +61,30 @@ panic at run time. A constant with a known width is checked when it is compiled 
 `-9223372036854775808` never panics.
 
 `try_into` is the checked narrowing conversion in both profiles; `into` only widens.
+
+## Debug info
+
+A debug build carries a symbol table (`LC_SYMTAB`) that names every function at its
+address, so `nm`, `lldb` and crash reports show toy names instead of bare addresses:
+
+```sh
+$ nm .toy/<stamp>/debug/main
+00000001000004bc t _main
+0000000100000738 t _main$l0
+0000000100000328 t _main.apply
+0000000100000810 t _panic
+00000001000006f8 t _util.ident$int
+0000000100000654 t _util.sq
+```
+
+A function is named as the panic backtrace names it: `module.fn`, with `main` bare. A
+generic instance adds its type arguments (`util.ident$int`) and a lambda its owner and
+index (`main$l0`), and a runtime function its own name (`panic`). Every symbol is local
+and carries the leading `_` of a C symbol, which `atos`, crash reports and `lldb` drop, so
+they show `util.sq`. To break on a function by name in `lldb`, use its full name with
+`-F` (`breakpoint set -F util.sq`): `lldb`'s `-n` and `b util.sq` read the dot as a
+module separator and find nothing. A release build has no symbol table. Line tables
+(DWARF) are not emitted yet.
 
 ## `-O`, `--opt` and `--no-opt`
 

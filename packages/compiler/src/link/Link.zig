@@ -36,6 +36,7 @@ const Type = @import("../layout/Type.zig").Type;
 // so every `Link.Reloc`/`Link.SymbolId`/`Link.RelocKind` callsite keeps compiling; `link`
 // keeps only the orchestration and calls `reloc.patchIntra`/`reloc.patchCross`.
 const reloc = @import("reloc.zig");
+const MachO = @import("MachO.zig");
 pub const SymbolId = reloc.SymbolId;
 pub const RelocKind = reloc.RelocKind;
 pub const Reloc = reloc.Reloc;
@@ -337,6 +338,9 @@ pub const Linked = struct {
     /// ranked; consumes only order-independent inputs), so it is `-jN` byte-identical. Owned
     /// by the caller.
     stack_map: []u8 = &.{},
+    /// The Mach-O symbol table of a debug build (empty unless `link` was asked for it):
+    /// one row per fn, by the same names and order as `sym_table`. Owned by the caller.
+    debug_symtab: MachO.Symtab = .{},
 };
 
 /// Raised when a `.call26` displacement does not fit AArch64's signed imm26
@@ -385,7 +389,7 @@ fn prefixSumTextOffsets(
 /// backward (and self/mutual) recursion a non-positive one; both encode directly
 /// via `Aarch64.bl`. Because the delta is intra-module it is fixed at link time
 /// and needs NO runtime relocation under PIE/ASLR.
-pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterner, entry: SymName, emit_symtab: bool, emit_stackmap: bool, descriptors: []const DescEntry) LinkError!Linked {
+pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterner, entry: SymName, emit_symtab: bool, emit_stackmap: bool, descriptors: []const DescEntry, emit_debug_symtab: bool) LinkError!Linked {
     // 1) LAYOUT: assign every fn a dense handle by STABLE SORT of the fn set
     //    (rank, never arrival/source order), then
     //    walk `fns` in SOURCE ORDER to give each its text offset. Layout STAYS
@@ -516,6 +520,8 @@ pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterne
     //    a pure function of the fn set.
     const sym_table: []u8 = if (emit_symtab) try buildSymTable(gpa, fns, site_h, offsets, cursor) else &.{};
     errdefer gpa.free(sym_table);
+    const debug_symtab: MachO.Symtab = if (emit_debug_symtab) try buildDebugSymtab(gpa, fns, site_h, offsets) else .{};
+    errdefer debug_symtab.deinit(gpa);
 
     // 4b) DESCRIPTORS: the per-type table the erased `descriptor_of` path reads. Built
     //     from the same `si`/`offsets`, so it is a pure function of the fn set.
@@ -536,6 +542,7 @@ pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterne
         .sym_table = sym_table,
         .desc_table = desc_table,
         .stack_map = stack_map,
+        .debug_symtab = debug_symtab,
     };
 }
 
@@ -656,7 +663,7 @@ fn buildSideTable(gpa: std.mem.Allocator, rows: []const SideRow, blob: []const u
 fn buildSymTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32) ![]u8 {
     const ents = try gpa.alloc(SymEnt, fns.len + 1);
     defer gpa.free(ents);
-    for (fns, 0..) |f, i| ents[i] = .{ .off = offsets[site_h[i]], .name = f.sym.name };
+    fnSymEnts(fns, site_h, offsets, ents);
     // An address below text_base wraps to a huge unsigned offset, so every frame
     // outside __text lands on this row: the only foreign frames a panic walks
     // before reaching `main` are the C code a callback was entered through.
@@ -678,6 +685,24 @@ fn buildSymTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u3
         cursor += e.name.len + 1;
     }
     return buildSideTable(gpa, rows, blob);
+}
+
+fn fnSymEnts(fns: []const FnCode, site_h: []const u32, offsets: []const u32, ents: []SymEnt) void {
+    for (fns, 0..) |f, i| ents[i] = .{ .off = offsets[site_h[i]], .name = f.sym.name };
+}
+
+/// The Mach-O symbol table of a debug build: every fn under the name the backtrace
+/// table prints, in the same (off, name) order, so `nm`, `lldb` and the panic
+/// backtrace agree on every frame.
+fn buildDebugSymtab(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32) !MachO.Symtab {
+    const ents = try gpa.alloc(SymEnt, fns.len);
+    defer gpa.free(ents);
+    fnSymEnts(fns, site_h, offsets, ents);
+    std.mem.sortUnstable(SymEnt, ents, {}, symEntLess);
+    const rows = try gpa.alloc(MachO.Symtab.Entry, ents.len);
+    defer gpa.free(rows);
+    for (ents, rows) |e, *r| r.* = .{ .name = e.name, .text_off = @intCast(e.off) };
+    return MachO.Symtab.build(gpa, rows);
 }
 
 /// Whether a reloc names a function whose `__text` offset the link resolves: every
@@ -1131,7 +1156,7 @@ fn linkTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry: u32) Li
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), false, false, &.{});
+    return link(threaded.io(), gpa, fns, &si, fname(entry), false, false, &.{}, false);
 }
 
 /// Like `linkTest` but requests the backtrace symbol table (`emit_symtab = true`).
@@ -1140,7 +1165,7 @@ fn linkSymTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry: u32)
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), true, false, &.{});
+    return link(threaded.io(), gpa, fns, &si, fname(entry), true, false, &.{}, false);
 }
 
 /// Like `linkTest` but requests the GC stack-map table (`emit_stackmap = true`).
@@ -1149,7 +1174,35 @@ fn linkStackMapTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry:
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), false, true, &.{});
+    return link(threaded.io(), gpa, fns, &si, fname(entry), false, true, &.{}, false);
+}
+
+test "the debug symtab names every fn at its text offset, in offset order" {
+    const gpa = testing.allocator;
+    var fns = [_]FnCode{
+        try makeFn(gpa, 0, 3, &.{}),
+        try makeFn(gpa, 1, 1, &.{}),
+        try makeFn(gpa, 2, 2, &.{}),
+    };
+    defer freeFns(gpa, &fns);
+
+    var threaded = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
+    defer threaded.deinit();
+    var si: SymInterner = .{};
+    defer si.deinit(gpa);
+    const linked = try link(threaded.io(), gpa, &fns, &si, fname(0), false, false, &.{}, true);
+    defer gpa.free(linked.text);
+    defer gpa.free(linked.data_relocs);
+    defer linked.debug_symtab.deinit(gpa);
+
+    const st = linked.debug_symtab;
+    try testing.expectEqual(@as(usize, 3), st.syms.len);
+    const want_off = [_]u32{ 0, 12, 16 };
+    for (st.syms, fns, want_off) |s, f, off| {
+        try testing.expectEqual(off, s.text_off);
+        try testing.expectEqual(@as(u8, '_'), st.strtab[s.strx]);
+        try testing.expectEqualStrings(f.sym.name, std.mem.sliceTo(st.strtab[s.strx + 1 ..], 0));
+    }
 }
 
 test "buildSideTable: count header, off rows, payload_off rebased past header into blob" {
