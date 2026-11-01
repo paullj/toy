@@ -128,6 +128,7 @@ pub fn renderSig(a: std.mem.Allocator, buf: *std.ArrayList(u8), sig: anytype, la
         if (toyc.Modes.isMut(sig.mut_mask, i)) try buf.appendSlice(a, "mut ");
         try renderType(a, buf, p, layouts, enum_layouts);
     }
+    if (sig.variadic) try buf.appendSlice(a, if (sig.params.len == 0) "..." else ", ...");
     try buf.appendSlice(a, ") -> ");
     try renderType(a, buf, sig.ret, layouts, enum_layouts);
 }

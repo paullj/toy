@@ -8,6 +8,7 @@ const symbols_res = @import("symbols/Resolution.zig");
 const Callee = @import("symbols/Callee.zig").Callee;
 const Closure = @import("symbols/Closure.zig");
 const Modes = @import("symbols/Modes.zig");
+const fixedArgs = @import("symbols/Sig.zig").fixedArgs;
 const DiagnosticSink = @import("diagnostics/Sink.zig");
 const Span = @import("diagnostics/model.zig").Span;
 const LayoutEngine = @import("layout/Engine.zig");
@@ -2688,6 +2689,8 @@ pub const BodyChecker = struct {
         mut_mask: u64 = 0,
         /// The call's receiver binds a `mut self`.
         mut_recv: bool = false,
+        /// A C variadic extern's: rendered with a trailing `...`.
+        variadic: bool = false,
 
         pub fn substituted(s: CallSig, targs: ?[]const Type) CallSig {
             var out = s;
@@ -2697,7 +2700,7 @@ pub const BodyChecker = struct {
     };
 
     pub fn fnSig(bc: *const BodyChecker, f: FnSym, name: []const u8) CallSig {
-        return .{ .params = f.params, .name = name, .decl = bc.calleeDeclSite(f), .generic_names = f.generic_params, .mut_mask = f.mut_mask };
+        return .{ .params = f.params, .name = name, .decl = bc.calleeDeclSite(f), .generic_names = f.generic_params, .mut_mask = f.mut_mask, .variadic = f.variadic };
     }
 
     pub fn methodSig(bc: *const BodyChecker, f: FnSym, name: []const u8) CallSig {
@@ -2988,6 +2991,7 @@ pub const BodyChecker = struct {
                 const raw = sig.map == .id or sig.map == .unbound;
                 try (if (raw) bc.fmtTypeNamed(p, sig.generic_names, null, 0) else bc.fmtType(bc.paramWant(sig, p))).format(w);
             }
+            if (sig.variadic) try w.writeAll(if (sig.params.len == 0) "..." else ", ...");
             try w.writeByte(')');
         }
     };
@@ -4419,11 +4423,48 @@ pub const BodyChecker = struct {
                 },
             }
         }
-        _ = try bc.checkCall(node_idx, args, bc.fnSig(f, bc.nameText(callee.main_token)));
-        if (f.kind == .import and args.len == f.params.len) for (args, f.params) |arg, p| {
+        const sig = bc.fnSig(f, bc.nameText(callee.main_token));
+        const fixed = if (f.variadic and args.len >= f.params.len) args[0..f.params.len] else args;
+        if (f.variadic and args.len < f.params.len) {
+            try bc.drainArgs(args);
+            try bc.report(.{ .span = bc.argsSpan(node_idx), .code = .T0039, .related = sig.decl }, "expected at least {d} argument(s), got {d}{f}", .{ f.params.len, args.len, bc.sigSuffix(sig) });
+            return f.ret;
+        }
+        _ = try bc.checkCall(node_idx, fixed, sig);
+        for (args[fixed.len..]) |arg| try bc.checkVararg(arg);
+        if (f.kind == .import) if (fixedArgs(Ast.Index, args, f.params.len, f.variadic)) |bound| for (bound, f.params) |arg, p| {
             if (p.isFunc()) try bc.checkCallbackArg(arg);
         };
         return f.ret;
+    }
+
+    /// An argument past a variadic extern's params goes to C in an 8-byte stack slot that
+    /// C reads as an already-promoted value, so it must be a 64-bit int, a float (C
+    /// `double`), a cstr or a rawptr (T0081). Typed with no expectation: nothing says
+    /// which C type the format wants.
+    fn checkVararg(bc: *BodyChecker, arg: Ast.Index) error{OutOfMemory}!void {
+        const ty = try bc.typeOfExpected(arg, null);
+        if (varargTypeOk(ty)) return;
+        const hint: []const u8 = if (ty.isInteger())
+            "; widen it first, as in 'w: int = n.into()'"
+        else if (ty.isF32())
+            "; convert it first, as in 'd: float = x.into()'"
+        else if (ty.kind == .bool)
+            "; pass an int, as in 'if b { 1 } else { 0 }'"
+        else if (ty.kind == .str)
+            "; pass 's.to_cstr()' (std/ffi)"
+        else
+            "";
+        try bc.report(.{ .span = bc.spanOf(arg), .code = .T0081 }, "a C variadic argument must be int, int64, uint64, float, cstr or rawptr, got '{f}'{s}", .{ bc.fmtType(ty), hint });
+    }
+
+    fn varargTypeOk(ty: Type) bool {
+        return switch (ty.kind) {
+            .int => ty.intBits() == 64,
+            .float => !ty.isF32(),
+            .cstr, .invalid, .never => true,
+            else => ty.isRawPtr(),
+        };
     }
 
     /// An argument for an extern's fn-typed param becomes a bare C function pointer, so it

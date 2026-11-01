@@ -55,7 +55,7 @@ fn classifyTag(tag: toyc.Tag) ?Class {
 
         .plus, .minus, .star, .slash, .percent, .eq, .eq_eq, .bang, .bang_eq, .lt, .lt_eq, .gt, .gt_eq, .amp_amp, .pipe_pipe, .pipe_gt, .pipe, .amp, .caret, .tilde, .lt_lt, .gt_gt, .arrow, .question, .dotdot, .colon_eq, .plus_dot, .minus_dot, .star_dot, .slash_dot, .lt_dot, .gt_dot, .le_dot, .ge_dot, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq, .pipe_eq, .amp_eq, .caret_eq, .lt_lt_eq, .gt_gt_eq, .plus_dot_eq, .minus_dot_eq, .star_dot_eq, .slash_dot_eq => .operator,
 
-        .l_paren, .r_paren, .l_brace, .r_brace, .l_bracket, .r_bracket, .comma, .colon, .dot, .at => .punctuation,
+        .l_paren, .r_paren, .l_brace, .r_brace, .l_bracket, .r_bracket, .comma, .colon, .dot, .at, .ellipsis => .punctuation,
     };
 }
 

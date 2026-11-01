@@ -632,6 +632,27 @@ pub fn isSelfParam(tree: Tree, tokens: []const Token, src: []const u8, param_idx
     return n.tag == .param and isSelfTok(tokens, src, n.main_token);
 }
 
+/// True when the `extern_fn_decl` at `decl_idx` ends its params with `...` (C varargs).
+/// Detected by token, like `mut`: the `...` sits at paren depth 1 of the param list that
+/// follows the name, so the node shape stays as it was.
+pub fn isVariadicExtern(tree: Tree, tokens: []const Token, decl_idx: Index) bool {
+    const n = tree.nodes[decl_idx.int()];
+    if (n.tag != .extern_fn_decl) return false;
+    var depth: u32 = 0;
+    var i: usize = n.main_token + 1;
+    while (i < tokens.len) : (i += 1) switch (tokens[i].tag) {
+        .l_paren => depth += 1,
+        .r_paren => {
+            if (depth <= 1) return false;
+            depth -= 1;
+        },
+        .ellipsis => if (depth == 1) return true,
+        .eof => return false,
+        else => {},
+    };
+    return false;
+}
+
 /// The library an `extern_fn_decl` names through its `extern "lib" { .. }` block (the
 /// string token rides its synthesized body's main token), or null for libSystem.
 pub fn externLibrary(tree: Tree, tokens: []const Token, src: []const u8, decl_idx: Index) ?[]const u8 {
@@ -1211,6 +1232,7 @@ fn renderNode(out: *std.Io.Writer, tree: Tree, tokens: []const Token, source: []
                 if (i != 0) try out.writeByte(' ');
                 try renderNode(out, tree, tokens, source, pidx);
             }
+            if (isVariadicExtern(tree, tokens, idx)) try out.writeAll(if (proto.params.len == 0) "..." else " ...");
             try out.writeAll(") ");
             if (proto.ret_type == none) {
                 try out.writeByte('_');

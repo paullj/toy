@@ -558,6 +558,7 @@ fn walkInner(src: Source, idx: Ast.Index, collect: bool, visitor: anytype) Visit
                 if (pty_node != Ast.none) try emit(visitor, .{ .type_ref = .{ .idx = pty_node, .ordinal = @intCast(i), .is_ret = false } });
                 try walkInner(src, p, collect, visitor);
             }
+            if (Ast.isVariadicExtern(tree, src.tokens, idx)) try emit(visitor, .{ .raw_leaf = "..." });
             try emit(visitor, .{ .flag = proto.ret_type != Ast.none });
             if (proto.ret_type != Ast.none) {
                 try emit(visitor, .{ .type_ref = .{ .idx = proto.ret_type, .ordinal = 0, .is_ret = true } });

@@ -1,0 +1,7 @@
+fn sum(a: int, ...) -> int {  #~ ERROR [P0006] '...' (C varargs) is only allowed in an extern function's parameters
+    a
+}
+
+fn main() -> int {
+    return sum(1)
+}

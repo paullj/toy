@@ -21,6 +21,10 @@ pub const Sig = struct {
     /// Bit i: `params[i]` is `mut`; a method's `self` is `params[0]`. Folded into callers'
     /// keys (#25), since it decides how each argument is passed.
     mut_mask: u64 = 0,
+    /// A C variadic extern: a call's args past `params` are C varargs. Not folded: a call
+    /// with no extra args passes them as a plain call does, and extra args already
+    /// change the caller's own walk.
+    variadic: bool = false,
 
     /// True when this sig is a generic template — some param is a bare `type_var`
     /// (flat generic) OR an `.app`/`.func` (a type-var hidden inside a container or fn
@@ -47,10 +51,29 @@ pub const Sig = struct {
     }
 };
 
+/// The args of a call that bind `n_params` params: all of them, or, past a variadic
+/// extern's params, only those before its C varargs. Null when the count does not fit.
+/// The checker and the C callback table both pair args with params through this, so they
+/// agree on which args are callbacks.
+pub fn fixedArgs(comptime T: type, args: []const T, n_params: usize, variadic: bool) ?[]const T {
+    if (args.len == n_params) return args;
+    if (variadic and args.len > n_params) return args[0..n_params];
+    return null;
+}
+
 test "a template whose only type var is inside a fn param is generic" {
     const Type = types.Type;
     const tmpl: Sig = .{ .kind = .user_fn, .name = "apply", .params = &.{ Type.func(0), Type.int }, .ret = Type.int };
     try @import("std").testing.expect(tmpl.isGenericTemplate());
     const plain: Sig = .{ .kind = .user_fn, .name = "keep", .params = &.{ Type.structT(3), Type.int }, .ret = Type.func(1) };
     try @import("std").testing.expect(!plain.isGenericTemplate());
+}
+
+test "fixedArgs drops a variadic call's extra args and rejects a count that does not fit" {
+    const testing = @import("std").testing;
+    const args = [_]u32{ 1, 2, 3 };
+    try testing.expectEqualSlices(u32, &args, fixedArgs(u32, &args, 3, false).?);
+    try testing.expectEqualSlices(u32, args[0..2], fixedArgs(u32, &args, 2, true).?);
+    try testing.expectEqual(null, fixedArgs(u32, &args, 2, false));
+    try testing.expectEqual(null, fixedArgs(u32, &args, 4, true));
 }

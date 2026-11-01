@@ -280,7 +280,7 @@ fn lexSymbol(l: *Lexer, start: u32) Token {
         ']' => .r_bracket,
         ',' => .comma,
         ':' => if (l.eat('=')) .colon_eq else .colon,
-        '.' => if (l.eat('.')) .dotdot else .dot,
+        '.' => if (l.eat('.')) (if (l.eat('.')) .ellipsis else .dotdot) else .dot,
         '@' => .at,
         '?' => .question,
         else => unreachable, // `beginsToken` already screened out non-lead bytes
@@ -631,6 +631,11 @@ test "postfix ? lexes to question and can end a statement" {
 
 test "loop keywords and dotdot" {
     try expectTags("loop for in break continue ..", &.{ .kw_loop, .kw_for, .kw_in, .kw_break, .kw_continue, .dotdot, .eof });
+}
+
+test "three dots lex as one ellipsis, two as dotdot" {
+    try expectTags("(f: cstr, ...)", &.{ .l_paren, .identifier, .colon, .identifier, .comma, .ellipsis, .r_paren, .eof });
+    try expectTags("0..n", &.{ .number, .dotdot, .identifier, .eof });
 }
 
 test "bare break and continue terminate statements" {

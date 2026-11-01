@@ -251,6 +251,7 @@ pub fn classifyRet(ty: Type, layouts: []const Layout, enum_layouts: []const Enum
 fn walkAbi(
     conv: Conv,
     types_: []const Type,
+    fixed: usize,
     out_locs: []ParamLoc,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
@@ -263,6 +264,14 @@ fn walkAbi(
     var nsrn: u32 = 0;
     var nsaa: u32 = 0;
     for (types_, 0..) |ty, i| {
+        // Apple arm64 passes every C vararg on the stack in its own 8-byte slot, never in a
+        // register, whatever registers are left (unlike standard AAPCS64).
+        if (i >= fixed) {
+            nsaa = std.mem.alignForward(u32, nsaa, 8);
+            out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = 8 } };
+            nsaa += 8;
+            continue;
+        }
         // An extern struct passed to C goes in its C layout (AAPCS64 B.2-B.4, C.2-C.4):
         // a homogeneous float aggregate in V-registers, else its C size picks a GPR run
         // or a pointer to a copy. A struct that does not fit whole goes to the stack.
@@ -422,7 +431,7 @@ pub fn planParamsConv(
 ) error{OutOfMemory}!ParamPlan {
     const locs = try gpa.alloc(ParamLoc, params.len);
     errdefer gpa.free(locs);
-    _ = walkAbi(conv, params, locs, layouts, enum_layouts);
+    _ = walkAbi(conv, params, params.len, locs, layouts, enum_layouts);
     return .{
         .sret_in_x8 = retIsSret(conv, ret, layouts, enum_layouts),
         .locs = locs,
@@ -466,21 +475,23 @@ pub fn planCall(
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) error{OutOfMemory}!CallPlan {
-    return planCallConv(gpa, .toy, args, ret, layouts, enum_layouts);
+    return planCallConv(gpa, .toy, args, args.len, ret, layouts, enum_layouts);
 }
 
-/// `planCall` under convention `conv`; an `extern` callee is `.c`.
+/// `planCall` under convention `conv`; an `extern` callee is `.c`. The args from `fixed`
+/// on are C varargs (`args.len` for a call that has none).
 pub fn planCallConv(
     gpa: std.mem.Allocator,
     conv: Conv,
     args: []const Type,
+    fixed: usize,
     ret: Type,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) error{OutOfMemory}!CallPlan {
     const locs = try gpa.alloc(ArgLoc, args.len);
     errdefer gpa.free(locs);
-    const nsaa = walkAbi(conv, args, locs, layouts, enum_layouts);
+    const nsaa = walkAbi(conv, args, fixed, locs, layouts, enum_layouts);
     return .{
         .locs = locs,
         .nsaa_bytes = nsaa,
@@ -769,7 +780,7 @@ test "planCallConv .c: stack args past x7 pack at their own size and alignment" 
     const i16_: Type = .{ .kind = .int, .int_desc = .{ .width = .w16 } };
     const i32_: Type = .{ .kind = .int, .int_desc = .{ .width = .w32 } };
     const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, i8_, i16_, i8_, i32_, Type.bool, Type.int };
-    var plan = try planCallConv(gpa, .c, &args, Type.int, ls, el);
+    var plan = try planCallConv(gpa, .c, &args, args.len, Type.int, ls, el);
     defer plan.deinit(gpa);
     const want = [_][2]u32{ .{ 0, 1 }, .{ 2, 2 }, .{ 4, 1 }, .{ 8, 4 }, .{ 12, 1 }, .{ 16, 8 } };
     for (want, 8..) |w, i| {
@@ -781,6 +792,25 @@ test "planCallConv .c: stack args past x7 pack at their own size and alignment" 
     var toy = try planCall(gpa, &args, Type.int, ls, el);
     defer toy.deinit(gpa);
     try testing.expectEqual(@as(u32, 48), toy.nsaa_bytes);
+}
+
+test "planCallConv .c: varargs each take an 8-byte stack slot, ints and floats alike, with registers left" {
+    const gpa = testing.allocator;
+    const ls: []const Layout = &.{};
+    const el: []const EnumLayout = &.{};
+    const args = [_]Type{ Type.cstr, Type.int, Type.float, Type.cstr, Type.int };
+    var plan = try planCallConv(gpa, .c, &args, 1, Type.int32, ls, el);
+    defer plan.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
+    for (1..args.len) |i| {
+        try testing.expectEqual(@as(u32, @intCast((i - 1) * 8)), plan.locs[i].stack.nsaa_off);
+        try testing.expectEqual(@as(u32, 8), plan.locs[i].stack.bytes);
+    }
+    try testing.expectEqual(@as(u32, 32), plan.nsaa_bytes);
+
+    var none = try planCallConv(gpa, .c, args[0..1], 1, Type.int32, ls, el);
+    defer none.deinit(gpa);
+    try testing.expectEqual(@as(u32, 0), none.nsaa_bytes);
 }
 
 fn cStruct(name: []const u8, fields: []const Type) Layout {
@@ -818,7 +848,7 @@ test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest w
     const el: []const EnumLayout = &.{};
     const i = Type.int;
     const args = [_]Type{ i, i, i, i, i, i, i, Type.structT(0), Type.structT(1), Type.structT(1), Type.structT(2), Type.structT(3) };
-    var plan = try planCallConv(gpa, .c, &args, Type.structT(3), &ls, el);
+    var plan = try planCallConv(gpa, .c, &args, args.len, Type.structT(3), &ls, el);
     defer plan.deinit(gpa);
     try testing.expectEqual(@as(u32, 0), plan.locs[7].stack.nsaa_off);
     try testing.expectEqual(@as(u32, 16), plan.locs[7].stack.bytes);
@@ -831,7 +861,7 @@ test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest w
     try testing.expect(plan.sret_in_x8);
 
     const fl = [_]Type{ Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32 };
-    var fp = try planCallConv(gpa, .c, &fl, Type.float32, &ls, el);
+    var fp = try planCallConv(gpa, .c, &fl, fl.len, Type.float32, &ls, el);
     defer fp.deinit(gpa);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.nsaa_off);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.bytes);
@@ -847,7 +877,7 @@ test "planParamsConv .c: a C callback's params arrive as a C call places them; i
     const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
     var c = try planParamsConv(gpa, .c, &params, Type.structT(0), &ls, el);
     defer c.deinit(gpa);
-    var call = try planCallConv(gpa, .c, &params, Type.structT(0), &ls, el);
+    var call = try planCallConv(gpa, .c, &params, params.len, Type.structT(0), &ls, el);
     defer call.deinit(gpa);
     for (c.locs, call.locs) |p, a| try testing.expectEqualDeep(a, p);
     try testing.expectEqual(@as(u32, 1), c.locs[8].stack.bytes);

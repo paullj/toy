@@ -262,7 +262,7 @@ fn collectMember(col: *Collector, an: *const Analysis, recv: u32, methods_only: 
         var buf: std.ArrayList(u8) = .empty;
         // The fn, instance or derive the method runs; its row names it as the user does.
         if (toyc.Typecheck.witnessSig(mth, tc.derives, tc.instances, tc.sigs)) |sig| {
-            try render.renderSig(col.a, &buf, .{ .name = mth.name, .params = sig.params, .ret = sig.ret, .mut_mask = sig.mut_mask }, tc.layouts, tc.enum_layouts);
+            try render.renderSig(col.a, &buf, .{ .name = mth.name, .params = sig.params, .ret = sig.ret, .mut_mask = sig.mut_mask, .variadic = false }, tc.layouts, tc.enum_layouts);
             detail = buf.items;
         }
         try col.add(render.bareName(mth.name), kind.method, detail);

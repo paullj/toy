@@ -140,6 +140,7 @@ pub const Code = enum(u16) {
     T0078, // private-field (a field without `pub` used outside its struct's module)
     T0079, // extern-call-outside-unsafe (a call to an `extern fn` outside an `unsafe` block)
     T0080, // callback-not-capture-free (a C callback argument that is no named fn or capture-free lambda or local fn)
+    T0081, // vararg-not-promoted (an extra argument of a C variadic extern that is no int64, float, cstr or rawptr)
 
     // Warning band (W####).
     W0001, // unused-variable
@@ -294,6 +295,7 @@ pub const table = [_]Entry{
     .{ .code = .T0078, .str = "T0078", .slug = "private-field" },
     .{ .code = .T0079, .str = "T0079", .slug = "extern-call-outside-unsafe" },
     .{ .code = .T0080, .str = "T0080", .slug = "callback-not-capture-free" },
+    .{ .code = .T0081, .str = "T0081", .slug = "vararg-not-promoted" },
     .{ .code = .W0001, .str = "W0001", .slug = "unused-variable", .default_severity = .warning },
     .{ .code = .W0002, .str = "W0002", .slug = "unused-parameter", .default_severity = .warning },
     .{ .code = .W0003, .str = "W0003", .slug = "unused-function", .default_severity = .warning },

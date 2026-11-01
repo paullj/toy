@@ -177,7 +177,7 @@ pub fn compute(
                         else
                             Type.unit;
                         const conv: Abi.Conv = if (c.callee.kind == .import) .c else .toy;
-                        var plan = try Abi.planCallConv(gpa, conv, arg_types.items, ret_ty, layouts, enum_layouts);
+                        var plan = try Abi.planCallConv(gpa, conv, arg_types.items, c.fixedArgs(), ret_ty, layouts, enum_layouts);
                         defer plan.deinit(gpa);
                         if (plan.nsaa_bytes > max_nsaa) max_nsaa = plan.nsaa_bytes;
                     },
@@ -284,7 +284,7 @@ pub fn compute(
 /// The C image an extern call passes argument `i` through: its extern struct type, or null
 /// for any other argument.
 pub fn cImageType(c: Ir.Call, i: usize, layouts: []const Layout) ?Type {
-    if (c.callee.kind != .import or c.params.len != c.args.len) return null;
+    if (c.callee.kind != .import or i >= c.params.len) return null;
     return if (Abi.isCStruct(c.params[i], layouts)) c.params[i] else null;
 }
 

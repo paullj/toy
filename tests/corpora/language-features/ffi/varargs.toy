@@ -1,0 +1,31 @@
+# expect: exit 0
+# expect: stdout "42 hi 2.500 -7|\nok 1.5\n1-0.25-x-2-3-4-5-6--7-9.5-dup\n29\n"
+# A C variadic extern takes extra args after its named params, each an int, float, cstr
+# or rawptr in its own 8-byte stack slot (Apple arm64). printf writes into libc's own
+# buffer, so fflush(NULL) puts its text ahead of the next io.println.
+import std/io
+import std/ffi
+
+extern {
+    fn printf(f: cstr, ...) -> int32
+    fn fflush(f: int) -> int32
+    fn snprintf(buf: cstr, n: int, f: cstr, ...) -> int32
+    fn malloc(n: int) -> cstr
+    fn strdup(s: cstr) -> rawptr
+    fn free(p: cstr)
+}
+
+fn main() -> int {
+    unsafe { printf("%lld %s %.3f %d|\n".to_cstr(), 42, "hi".to_cstr(), 2.5, -7) }
+    unsafe { printf("ok %g\n".to_cstr(), 1.5) }
+    unsafe { fflush(0) }
+    buf := unsafe { malloc(128) }
+    w: int8 = -7
+    wide: int = w.into()
+    dup := unsafe { strdup("dup".to_cstr()) }
+    n := unsafe { snprintf(buf, 128, "%d-%g-%s-%lld-%lld-%lld-%lld-%lld-%lld-%.1f-%s".to_cstr(), 1, 0.25, "x".to_cstr(), 2, 3, 4, 5, 6, wide, 9.5, dup) }
+    io.println(buf.to_str())
+    io.println(n.to_string())
+    unsafe { free(buf) }
+    0
+}

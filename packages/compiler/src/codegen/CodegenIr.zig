@@ -897,7 +897,7 @@ fn genFnAddr(g: *Gen, result: Ir.ValueId, f: Ir.SymName) error{OutOfMemory}!void
 /// drift on AAPCS64 marshalling — the single-authority the Abi header warns about.
 const PlanResult = struct { plan: Abi.CallPlan, ret_ty: Type };
 
-fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Type, by_ptr: u64, ret_slot: Ir.SlotId, result: Ir.ValueId) error{OutOfMemory}!PlanResult {
+fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Type, by_ptr: u64, fixed: usize, ret_slot: Ir.SlotId, result: Ir.ValueId) error{OutOfMemory}!PlanResult {
     var arg_types: std.ArrayList(Type) = .empty;
     defer arg_types.deinit(g.gpa);
     try arg_types.ensureTotalCapacity(g.gpa, args.len);
@@ -911,7 +911,7 @@ fn planFor(g: *Gen, conv: Abi.Conv, args: []const Ir.Operand, params: []const Ty
     else
         Type.unit;
 
-    const plan = try Abi.planCallConv(g.gpa, conv, arg_types.items, ret_ty, g.layouts, g.enum_layouts);
+    const plan = try Abi.planCallConv(g.gpa, conv, arg_types.items, fixed, ret_ty, g.layouts, g.enum_layouts);
     return .{ .plan = plan, .ret_ty = ret_ty };
 }
 
@@ -1172,7 +1172,7 @@ fn placeResult(g: *Gen, result: Ir.ValueId, ret_slot: Ir.SlotId, ret_ty: Type) e
 
 fn genCall(g: *Gen, result: Ir.ValueId, c: Ir.Call) error{OutOfMemory}!void {
     const conv: Abi.Conv = if (c.callee.kind == .import) .c else .toy;
-    var pr = try planFor(g, conv, c.args, c.params, c.by_ptr, c.ret_slot, result);
+    var pr = try planFor(g, conv, c.args, c.params, c.by_ptr, c.fixedArgs(), c.ret_slot, result);
     defer pr.plan.deinit(g.gpa);
 
     // An extern struct crosses in C layout: each argument is packed into its image in the
@@ -1255,7 +1255,7 @@ fn genCall(g: *Gen, result: Ir.ValueId, c: Ir.Call) error{OutOfMemory}!void {
 }
 
 fn genCallIndirect(g: *Gen, result: Ir.ValueId, c: Ir.CallIndirect) error{OutOfMemory}!void {
-    var pr = try planFor(g, .toy, c.args, &.{}, 0, c.ret_slot, result);
+    var pr = try planFor(g, .toy, c.args, &.{}, 0, c.args.len, c.ret_slot, result);
     defer pr.plan.deinit(g.gpa);
 
     try marshalArgs(g, c.args, pr.plan, &.{});

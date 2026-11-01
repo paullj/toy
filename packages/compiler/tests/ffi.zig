@@ -212,6 +212,58 @@ test "user dylibs: capture-free toy fns as C callbacks run at -O0 and -O1" {
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-callbacks", callbacks_src, &.{ "-L", test_lib_dir }, "ok\n");
 }
 
+const varargs_src =
+    \\import std/io
+    \\import std/ffi
+    \\
+    \\extern struct Pair {
+    \\    x: int,
+    \\    y: int32,
+    \\    z: bool,
+    \\}
+    \\
+    \\extern "toyffi" {
+    \\    fn toyffi_va_sum(scale: float, kinds: cstr, ...) -> float
+    \\    fn toyffi_va_pair(p: Pair, n: int32, ...) -> int
+    \\    fn toyffi_va_spill(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int32, ...) -> int
+    \\    fn toyffi_va_map(cb: fn(int) -> int, n: int, ...) -> int
+    \\}
+    \\
+    \\extern {
+    \\    fn snprintf(buf: cstr, n: int, f: cstr, ...) -> int32
+    \\    fn malloc(n: int) -> cstr
+    \\    fn free(p: cstr)
+    \\}
+    \\
+    \\fn sq(x: int) -> int { x * x }
+    \\
+    \\fn main() -> int {
+    \\    q := unsafe { toyffi_va_map(sq, 3, 1, 2, 3) }
+    \\    r := unsafe { toyffi_va_map(fn(x) { x + 1 }, 2, 10, 20) }
+    \\    s := unsafe { toyffi_va_sum(2.0, "ifif".to_cstr(), 1, 0.5, 3, 0.25) }
+    \\    none := unsafe { toyffi_va_sum(1.0, "".to_cstr()) }
+    \\    p := unsafe { toyffi_va_pair(Pair { x: 100, y: 20, z: true }, 3, 1, 2, 3) }
+    \\    m := unsafe { toyffi_va_spill(1, 2, 3, 4, 5, 6, 7, 8, 9, 1000, 2.5, "A".to_cstr()) }
+    \\    buf := unsafe { malloc(64) }
+    \\    n := unsafe { snprintf(buf, 64, "%s=%lld/%.2f".to_cstr(), "k".to_cstr(), -12, 0.125) }
+    \\    t := buf.to_str()
+    \\    unsafe { free(buf) }
+    \\    ok := q == 14 && r == 32 && s == 9.5 && none == 0.0 && p == 135 && m == 45 + 1000 + 25 + 65 && n == 10 && t == "k=-12/0.12"
+    \\    io.println(if ok { t } else { "bad" })
+    \\    0
+    \\}
+    \\
+;
+
+test "user dylibs: C varargs (ints, floats, cstr; a struct and stack args before them) run at -O0 and -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-varargs", varargs_src, &.{ "-L", test_lib_dir }, "k=-12/0.12\n");
+}
+
 test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -223,6 +275,8 @@ test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-sj1", structs_src, &.{ "-O1", "-L", test_lib_dir }, 0);
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-cj0", callbacks_src, &.{ "-O0", "-L", test_lib_dir }, 0);
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-cj1", callbacks_src, &.{ "-O1", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-vj0", varargs_src, &.{ "-O0", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-vj1", varargs_src, &.{ "-O1", "-L", test_lib_dir }, 0);
 }
 
 /// Run the built `toy` with `args` in `cwd_abs`, capturing its output (caller frees).

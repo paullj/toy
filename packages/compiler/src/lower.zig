@@ -2237,7 +2237,7 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
     }
 
     const target: CallTarget = if (callee.kind == .import and callee_gid < b.in.sigs.len)
-        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask | callbacks } }
+        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask | callbacks, .variadic = b.in.sigs[callee_gid].variadic } }
     else
         .{ .direct = callee };
     const result = try emitCall(b, target, args, result_ty, n.main_token);
@@ -2388,14 +2388,14 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
 /// An `extern` callee also carries its declared param types.
 pub const CallTarget = union(enum) {
     direct: Link.SymName,
-    import: struct { sym: Link.SymName, params: []const Typecheck.Type, by_ptr: u64 = 0 },
+    import: struct { sym: Link.SymName, params: []const Typecheck.Type, by_ptr: u64 = 0, variadic: bool = false },
     indirect: Ir.ValueId,
 };
 
 fn callOp(target: CallTarget, args: []Ir.Operand, ret_slot: Ir.SlotId) Ir.Op {
     return switch (target) {
         .direct => |callee| .{ .call = .{ .callee = callee, .args = args, .ret_slot = ret_slot } },
-        .import => |im| .{ .call = .{ .callee = im.sym, .args = args, .ret_slot = ret_slot, .params = im.params, .by_ptr = im.by_ptr } },
+        .import => |im| .{ .call = .{ .callee = im.sym, .args = args, .ret_slot = ret_slot, .params = im.params, .by_ptr = im.by_ptr, .variadic = im.variadic } },
         .indirect => |t| .{ .call_indirect = .{ .target = t, .args = args, .ret_slot = ret_slot } },
     };
 }

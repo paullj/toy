@@ -1750,6 +1750,9 @@ pub const FnSym = struct {
     /// `self` is params[0]. The one source of the modes: `Sig.mut_mask` and
     /// `Method.mut_self` are copies of it.
     mut_mask: u64 = 0,
+    /// A C variadic extern (`fn printf(f: cstr, ...)`): a call may pass more args than
+    /// `params`, each a C-promoted type.
+    variadic: bool = false,
 
     pub fn isGeneric(f: FnSym) bool {
         return f.generic_params.len > 0;
@@ -2487,7 +2490,7 @@ pub fn checkGraph(
     // `fns`; the sig name is the resolver's qualified/bare name for that id.
     std.debug.assert(t.fns.items.len == fns.len);
     for (t.fns.items, 0..) |f, i| {
-        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask };
+        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask, .variadic = f.variadic };
         sigs_built += 1;
     }
 
@@ -5029,7 +5032,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
         try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "{s}", .{bad_type_msg});
         ret = .invalid;
     }
-    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod, .mut_mask = Modes.ofProto(t.tree, t.tokens, proto) });
+    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod, .mut_mask = Modes.ofProto(t.tree, t.tokens, proto), .variadic = Ast.isVariadicExtern(t.tree, t.tokens, fn_idx) });
 }
 
 /// The C-ABI type set an `extern` param/return may use: any integer width, `bool`,
@@ -10671,6 +10674,32 @@ test "an associated fn is a C callback; a non-fn arg for a callback param is onl
     };
     try testing.expectEqual(@as(usize, 2), n_assoc);
     try expectOnlyDiag(decl ++ "fn main() -> int {\n return unsafe { each(2, 5) }\n}\n", .T0040);
+}
+
+test "a callback before a variadic extern's extra args gets its C adapter" {
+    const gpa = testing.allocator;
+    var c = try checkSource("extern fn map(cb: fn(int) -> int, n: int, ...) -> int\nfn sq(x: int) -> int { x * x }\nfn main() -> int {\n return unsafe { map(sq, 2, 3, 4) + map(fn(x) { x }, 1, 5) }\n}\n");
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+    var kinds: [2]usize = .{ 0, 0 };
+    for (c.result.adapters) |a| switch (a.kind) {
+        .c_fn => kinds[0] += 1,
+        .c_lambda => kinds[1] += 1,
+        else => {},
+    };
+    try testing.expectEqual([2]usize{ 1, 1 }, kinds);
+}
+
+test "a variadic extern takes extra C-promoted args; others are T0081, too few T0039" {
+    const decl = "extern fn printf(f: cstr, ...) -> int32\nextern fn mk() -> cstr\nextern fn mem() -> rawptr\nextern struct P { x: int }\n";
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount(decl ++ "fn main() -> int {\n s := unsafe { mk() }\n n: int64 = 2\n u: uint64 = 3\n p := unsafe { printf(s) }\n q := unsafe { printf(s, 1, 2.5, s, unsafe { mem() }, n, u, -7) }\n return (p + q).into()\n}\n"));
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n n: int32 = 3\n _p := unsafe { printf(mk(), n) }\n return 0\n}\n", .T0081);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n _p := unsafe { printf(mk(), \"x\") }\n return 0\n}\n", .T0081);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n _p := unsafe { printf(mk(), true) }\n return 0\n}\n", .T0081);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n x: f32 = 1.5\n _p := unsafe { printf(mk(), x) }\n return 0\n}\n", .T0081);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n _p := unsafe { printf(mk(), P { x: 1 }) }\n return 0\n}\n", .T0081);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n _p := unsafe { printf() }\n return 0\n}\n", .T0039);
+    try expectOnlyDiag("extern fn printf(f: cstr, ...) -> int32\nfn main() -> int {\n _p := printf(\"x\".to_cstr(), 1)\n return 0\n}\nimpl str {\n fn to_cstr(self) -> cstr { return unsafe { mk() } }\n}\nextern fn mk() -> cstr\n", .T0079);
 }
 
 test "a callback's params and return are C types, else T0037" {
