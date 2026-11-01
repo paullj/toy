@@ -1,11 +1,11 @@
 extern fn printf(f: cstr, ...) -> int32
-extern fn mk() -> cstr
+extern fn ctermid() -> cstr
 extern struct P { x: int }
 
 fn main() -> int {
     n: int32 = 3
     x: f32 = 1.5
-    s := unsafe { mk() }
+    s := unsafe { ctermid() }
     a := unsafe { printf(s, 1, 2.5, s) }
     b := unsafe { printf(s, n) }  #~ ERROR [T0081] a C variadic argument must be int, int64, uint64, float, cstr or rawptr, got 'int32'; widen it first, as in 'w: int = n.into()'
     c := unsafe { printf(s, x) }  #~ ERROR [T0081] a C variadic argument must be int, int64, uint64, float, cstr or rawptr, got 'f32'; convert it first, as in 'd: float = x.into()'

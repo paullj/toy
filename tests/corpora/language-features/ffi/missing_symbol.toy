@@ -1,0 +1,12 @@
+# expect: compile-error "[R0019]: C symbol 'toyffi_ad' is not exported by library 'toyffi'"
+# libdir: "@harness"
+# An extern whose library does not export its symbol is an error when the program
+# links, not a dyld abort when it launches. The harness library's export trie is read.
+extern "toyffi" {
+    fn toyffi_add(a: int, b: int) -> int
+    fn toyffi_ad(a: int, b: int) -> int
+}
+
+fn main() -> int {
+    unsafe { toyffi_add(1, 2) + toyffi_ad(3, 4) }
+}
