@@ -220,7 +220,7 @@ pub fn compute(
 
     // (4) sret save slot (8 bytes) when the return is a >16B aggregate.
     var sret_save_off: u32 = NO_SRET;
-    if (Abi.classifyRet(func.ret_type, layouts, enum_layouts) == .sret) {
+    if (Abi.retIsSret(convOf(func), func.ret_type, layouts, enum_layouts)) {
         sret_save_off = try place(&running, out_base, 8);
     }
 
@@ -232,6 +232,7 @@ pub fn compute(
             .call => |c| most = @max(most, cScratchBytes(func, c, layouts)),
             else => {},
         };
+        if (func.c_abi) most = @max(most, cAbiScratchBytes(func, layouts));
         if (most > 0) c_scratch_off = try place(&running, out_base, most);
     }
 
@@ -255,11 +256,11 @@ pub fn compute(
         defer param_types.deinit(gpa);
         try param_types.ensureTotalCapacity(gpa, func.params.len);
         for (func.params) |sid| param_types.appendAssumeCapacity(func.slots[sid].type);
-        var pplan = try Abi.planParams(gpa, param_types.items, func.ret_type, layouts, enum_layouts);
+        var pplan = try Abi.planParamsConv(gpa, convOf(func), param_types.items, func.ret_type, layouts, enum_layouts);
         defer pplan.deinit(gpa);
         for (pplan.locs) |loc| {
             const top_in: u32 = switch (loc) {
-                .stack => |s| 16 + s.nsaa_off + (if (s.bytes > 0) s.bytes - 8 else 0),
+                .stack => |s| 16 + s.nsaa_off + (s.bytes -| 8),
                 .stack_ptr => |off| 16 + off,
                 else => 0,
             };
@@ -297,6 +298,23 @@ pub fn cScratchBytes(func: *const Ir.Function, c: Ir.Call, layouts: []const Layo
     };
     if (c.callee.kind == .import and c.ret_slot != Ir.none_slot and Abi.isCStruct(func.slots[c.ret_slot].type, layouts))
         n += roundUp16(Abi.cLayout(func.slots[c.ret_slot].type, layouts).size);
+    return n;
+}
+
+/// The convention `func` is called in: C for a C callback adapter.
+pub fn convOf(func: *const Ir.Function) Abi.Conv {
+    return if (func.c_abi) .c else .toy;
+}
+
+/// The C image a C callback adapter receives an extern struct param or returns its result
+/// through: the largest one, as each is unpacked or packed on its own.
+pub fn cAbiScratchBytes(func: *const Ir.Function, layouts: []const Layout) u32 {
+    var n: u32 = 0;
+    for (func.params) |sid| {
+        const t = func.slots[sid].type;
+        if (Abi.isCStruct(t, layouts)) n = @max(n, roundUp16(Abi.cLayout(t, layouts).size));
+    }
+    if (Abi.isCStruct(func.ret_type, layouts)) n = @max(n, roundUp16(Abi.cLayout(func.ret_type, layouts).size));
     return n;
 }
 
@@ -704,6 +722,24 @@ test "frame: sret return reserves an 8-byte save slot atop the frame" {
     try testing.expectEqual(@as(u32, 0), fl.slot_off[0]);
     try testing.expectEqual(@as(u32, 8), fl.sret_save_off);
     try testing.expectEqual(@as(u32, 16), fl.frame);
+}
+
+test "frame: a C callback adapter sizes sret and its C image by the C layout" {
+    const gpa = testing.allocator;
+    // Three int32s: 24 bytes in toy layout (sret), 12 in C (x registers).
+    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
+    const ls = [_]Layout{.{ .name = "Three", .field_names = &.{}, .field_types = @constCast(&three), .offsets = &.{}, .size = 24, .@"align" = 8, .is_extern = true }};
+    var func = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 1, Type.structT(0));
+    defer func.deinit(gpa);
+    var toy = try compute(gpa, &func, &ls, &.{});
+    defer toy.deinit(gpa);
+    try testing.expect(toy.sret_save_off != NO_SRET);
+    func.c_abi = true;
+    var c = try compute(gpa, &func, &ls, &.{});
+    defer c.deinit(gpa);
+    try testing.expectEqual(NO_SRET, c.sret_save_off);
+    try testing.expectEqual(@as(u32, 24), c.c_scratch_off);
+    try testing.expectEqual(@as(u32, 48), c.frame);
 }
 
 test "frame: a frame past 4095 bytes lays out; FrameTooLarge only past MAX_FRAME" {

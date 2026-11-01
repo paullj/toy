@@ -332,7 +332,7 @@ pub fn lowerIr(
     defer param_types.deinit(gpa);
     try param_types.ensureTotalCapacity(gpa, func.params.len);
     for (func.params) |sid| param_types.appendAssumeCapacity(func.slots[sid].type);
-    const params = try Abi.planParams(gpa, param_types.items, func.ret_type, layouts, enum_layouts);
+    const params = try Abi.planParamsConv(gpa, FrameLayout.convOf(func), param_types.items, func.ret_type, layouts, enum_layouts);
 
     var g: Gen = .{
         .gpa = gpa,
@@ -414,7 +414,7 @@ fn genBody(g: *Gen) error{OutOfMemory}!void {
         try g.spMem(.str, 8, g.fl.sret_save_off);
     }
 
-    try marshalParams(g);
+    if (g.func.c_abi) try marshalCParams(g) else try marshalParams(g);
 
     // Walk blocks in BlockId order. The exit block is emitted in sequence like
     // any other (its terminator is `ret`, which owns the epilogue).
@@ -499,6 +499,67 @@ fn marshalParams(g: *Gen) error{OutOfMemory}!void {
             },
             // A zero-sized param (`()`): 0 bytes arrived, its slot is 0 bytes — store nothing.
             .zero => {},
+        }
+    }
+}
+
+/// Marshal a C callback adapter's params, which C passed in its convention, into their
+/// slot cells as toy keeps them: a narrow int or bool, whose upper bits C leaves
+/// undefined, is extended, an f32 kept zero-extended, a stack argument read at its C size,
+/// and an extern struct unpacked from its C image (in registers, on the stack or behind a
+/// pointer) into toy layout.
+fn marshalCParams(g: *Gen) error{OutOfMemory}!void {
+    const img = g.fl.c_scratch_off;
+    for (g.params.locs, 0..) |loc, i| {
+        const sid = g.func.params[i];
+        const off = g.slotOff(sid);
+        const ty = g.func.slots[sid].type;
+        if (Abi.isCStruct(ty, g.layouts)) {
+            switch (loc) {
+                .gpr => |r| {
+                    for (0..r.count) |k| try g.spMem(.str, r.first + @as(u32, @intCast(k)), img + @as(u32, @intCast(k)) * 8);
+                    try unpackC(g, ty, Aarch64.SP, img, Aarch64.SP, off);
+                },
+                .fpr_run => |r| {
+                    try g.spAddr(FA, img);
+                    const elem: u32 = if (r.single) 4 else 8;
+                    for (0..r.count) |k| {
+                        const v = r.first + @as(u32, @intCast(k));
+                        const o = @as(u32, @intCast(k)) * elem;
+                        try g.emit(if (r.single) Aarch64.strSRegUoff(v, FA, o) else Aarch64.strFpRegUoff(v, FA, o));
+                    }
+                    try unpackC(g, ty, Aarch64.SP, img, Aarch64.SP, off);
+                },
+                .gpr_ptr => |r| try unpackC(g, ty, r, 0, Aarch64.SP, off),
+                .stack => |st| try unpackC(g, ty, Aarch64.FP, 16 + st.nsaa_off, Aarch64.SP, off),
+                .stack_ptr => |nsaa_off| {
+                    try memAt(g, .ldr, FB, Aarch64.FP, 16 + nsaa_off);
+                    try unpackC(g, ty, FB, 0, Aarch64.SP, off);
+                },
+                .fpr, .zero => unreachable,
+            }
+            continue;
+        }
+        switch (loc) {
+            .gpr => |r| {
+                try g.spMem(.str, r.first, off);
+                if (Abi.cScalarSize(ty) < 8) {
+                    try loadCAt(g, S0, Aarch64.SP, off, ty);
+                    try g.spMem(.str, S0, off);
+                }
+            },
+            .fpr => |v| {
+                if (ty.isF32()) {
+                    try g.emit(Aarch64.fmovWS(S2, v));
+                    try g.spMem(.str, S2, off);
+                } else try g.spMem(.str_fp, v, off);
+            },
+            .stack => |st| {
+                try loadCAt(g, S0, Aarch64.FP, 16 + st.nsaa_off, ty);
+                try g.spMem(.str, S0, off);
+            },
+            .zero => {},
+            .gpr_ptr, .stack_ptr, .fpr_run => unreachable,
         }
     }
 }
@@ -1324,6 +1385,7 @@ fn writeOperandTo(g: *Gen, pvid: Ir.ValueId, pty: Type, arg: Ir.Operand) error{O
 /// Place the function's return value per AAPCS64 before the epilogue.
 fn placeReturn(g: *Gen, o: Ir.Operand) error{OutOfMemory}!void {
     const ret_ty = g.func.ret_type;
+    if (g.func.c_abi and Abi.isCStruct(ret_ty, g.layouts)) return placeCStructReturn(g, o, ret_ty);
     switch (Abi.classifyRet(ret_ty, g.layouts, g.enum_layouts)) {
         .none => {
             // Unit return. A unit ENTRY (main) must land x0=0 by contract.
@@ -1365,6 +1427,35 @@ fn placeReturn(g: *Gen, o: Ir.Operand) error{OutOfMemory}!void {
             };
             try g.spMem(.ldr, S0, g.fl.sret_save_off); // S0 = caller buffer
             try copyBytes(g, S0, 0, Aarch64.SP, src_off, g.typeSize(ret_ty));
+        },
+    }
+}
+
+/// A C callback's extern struct result, packed into C layout where C reads it: the buffer
+/// it passed in x8, or the C image loaded into x0/x1 or, for an HFA, v0...
+fn placeCStructReturn(g: *Gen, o: Ir.Operand, ty: Type) error{OutOfMemory}!void {
+    const src_off: u32 = switch (o) {
+        .value => |v| g.valueOff(v),
+        .slot => |s| g.slotOff(s),
+        .none => return,
+    };
+    const img = g.fl.c_scratch_off;
+    switch (Abi.cRet(ty, g.layouts)) {
+        .sret => {
+            try g.spMem(.ldr, FB, g.fl.sret_save_off);
+            try packC(g, ty, Aarch64.SP, src_off, FB, 0);
+        },
+        .regs => |n| {
+            try packC(g, ty, Aarch64.SP, src_off, Aarch64.SP, img);
+            for (0..n) |k| try g.spMem(.ldr, @intCast(k), img + @as(u32, @intCast(k)) * 8);
+        },
+        .hfa => |h| {
+            try packC(g, ty, Aarch64.SP, src_off, Aarch64.SP, img);
+            try g.spAddr(FA, img);
+            for (0..h.count) |k| {
+                const v: u32 = @intCast(k);
+                try g.emit(if (h.single) Aarch64.ldrSRegUoff(v, FA, v * 4) else Aarch64.ldrFpRegUoff(v, FA, v * 8));
+            }
         },
     }
 }

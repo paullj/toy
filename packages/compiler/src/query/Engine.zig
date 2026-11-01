@@ -664,7 +664,7 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
         };
         if (t.kind == .builtin or std.mem.eql(u8, t.name, fr.sym.name)) continue;
         if (std.mem.startsWith(u8, t.name, fr.sym.name) and std.mem.startsWith(u8, t.name[fr.sym.name.len..], "$l")) continue;
-        const base = for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref" }) |suf| {
+        const base = for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
             if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];
         } else t.name;
         if (folds(fr, sigs.items, base)) continue;

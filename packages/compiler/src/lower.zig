@@ -2215,8 +2215,16 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
         }
     }
     const arg_mut = Modes.argMask(b.in.bodyView(), b.in.programView(), node_idx);
+    // An extern's fn-typed param is a C function pointer, passed like a `mut` struct's
+    // address: one pointer word.
+    var callbacks: u64 = 0;
+    if (callee.kind == .import and callee_gid < b.in.sigs.len) for (b.in.sigs[callee_gid].params, 0..) |p, i| {
+        if (i < 64 and Closure.isFnType(p, b.in.layouts)) callbacks |= @as(u64, 1) << @intCast(i);
+    };
     for (arg_nodes, 0..) |arg, i| {
-        if (Modes.isMut(arg_mut, i)) {
+        if (Modes.isMut(callbacks, i)) {
+            args[self_n + i] = try closure.lowerCallbackAddr(b, arg);
+        } else if (Modes.isMut(arg_mut, i)) {
             // A `mut` param takes the argument's place ADDRESS, like a `mut self` receiver.
             const addr = try places.lowerMutPlaceAddr(b, arg, &wbs);
             if (addr == Ir.none_value) {
@@ -2229,7 +2237,7 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
     }
 
     const target: CallTarget = if (callee.kind == .import and callee_gid < b.in.sigs.len)
-        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask } }
+        .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask | callbacks } }
     else
         .{ .direct = callee };
     const result = try emitCall(b, target, args, result_ty, n.main_token);

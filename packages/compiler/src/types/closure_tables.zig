@@ -88,23 +88,146 @@ pub fn buildAdapters(
                 .target = .{ .kind = fns[k.key].kind, .name = fns[k.key].name },
                 .sig = .{ .params = sigs[k.key].params, .ret = sigs[k.key].ret },
             },
-            .bound_copy, .bound_box, .bound_ref, .assoc_value => {
-                const m = methods[k.key];
-                const target = Typecheck.witnessSym(m, derives, instances, fns).?;
-                const sig = Typecheck.witnessSig(m, derives, instances, sigs).?;
-                a.* = .{
-                    .kind = k.kind,
-                    .key = k.key,
-                    .name = try Mangle.adapter(gpa, target.name, k.kind),
-                    .target = target,
-                    .sig = .{ .params = if (m.is_static) sig.params else sig.params[@min(sig.params.len, 1)..], .ret = sig.ret },
-                    .recv = m.recv,
-                    .mut_self = m.mut_self,
-                };
-            },
+            .bound_copy, .bound_box, .bound_ref, .assoc_value => a.* = try methodAdapter(gpa, k.kind, k.key, methods, derives, instances, fns, sigs),
+            .c_fn, .c_lambda, .c_assoc => unreachable,
         }
         built += 1;
     }
+    return out;
+}
+
+/// The adapter of kind `kind` that calls method `mi`, through the row its witness picks.
+fn methodAdapter(
+    gpa: std.mem.Allocator,
+    kind: Closure.AdapterKind,
+    mi: u32,
+    methods: []const Typecheck.Method,
+    derives: []const DeriveRecipe,
+    instances: []const Mono.Instance,
+    fns: []const Typecheck.GraphFnInput,
+    sigs: []const Sig,
+) !Closure.Adapter {
+    const m = methods[mi];
+    const target = Typecheck.witnessSym(m, derives, instances, fns).?;
+    const sig = Typecheck.witnessSig(m, derives, instances, sigs).?;
+    return .{
+        .kind = kind,
+        .key = mi,
+        .name = try Mangle.adapter(gpa, target.name, kind),
+        .target = target,
+        .sig = .{ .params = if (m.is_static) sig.params else sig.params[@min(sig.params.len, 1)..], .ret = sig.ret },
+        .recv = m.recv,
+        .mut_self = m.mut_self,
+    };
+}
+
+/// `adapters` followed by one C callback adapter per fn a body passes
+/// to an extern's fn-typed param: `.c_fn` for a named fn, `.c_assoc` for an associated fn
+/// (keyed by its method row), `.c_lambda` for a lambda or local
+/// fn, keyed by its unit, so after the lambda units. The checker let only these through
+/// (T0080). Their kinds sort after every other, so appending keeps the table sorted. On
+/// success the old slice is freed into the new one; on failure the caller still owns it.
+pub fn appendCallbackAdapters(
+    gpa: std.mem.Allocator,
+    graph: *const Typecheck.GraphCtx,
+    bodies: Body.List,
+    instances: []const Mono.Instance,
+    fns: []const Typecheck.GraphFnInput,
+    sigs: []const Sig,
+    methods: []const Typecheck.Method,
+    derives: []const DeriveRecipe,
+    units: []const Closure.LambdaUnit,
+    layouts: []const Layout,
+    adapters: []Closure.Adapter,
+) ![]Closure.Adapter {
+    const any = for (fns, sigs) |f, sg| {
+        if (f.kind == .import and for (sg.params) |p| {
+            if (Closure.isFnType(p, layouts)) break true;
+        } else false) break true;
+    } else false;
+    if (!any) return adapters;
+    const Key = struct { kind: Closure.AdapterKind, key: u32 };
+    var keys: std.ArrayList(Key) = .empty;
+    defer keys.deinit(gpa);
+    for (bodies.items, 0..) |b, bi| {
+        const mc = &graph.mods[b.mod];
+        const V = struct {
+            gpa: std.mem.Allocator,
+            tree: Ast.Tree,
+            resolutions: []const Resolution,
+            body: Body,
+            owner: Closure.Owner,
+            fns: []const Typecheck.GraphFnInput,
+            sigs: []const Sig,
+            units: []const Closure.LambdaUnit,
+            layouts: []const Layout,
+            keys: *std.ArrayList(Key),
+            pub fn on(self: *@This(), ev: Walk.Event) error{OutOfMemory}!void {
+                const e = switch (ev) {
+                    .enter => |e| e,
+                    else => return,
+                };
+                const n = self.tree.nodes[e.idx.int()];
+                const slot = Callee.callSlot(self.tree, n) orelse return;
+                const gid = switch (self.body.nodes.callee(slot).view()) {
+                    .direct => |g| g,
+                    else => return,
+                };
+                if (self.fns[gid].kind != .import) return;
+                const params = self.sigs[gid].params;
+                const args = Ast.rangeSlice(self.tree, n.rhs.int());
+                if (args.len != params.len) return;
+                for (args, params) |arg, p| {
+                    if (!Closure.isFnType(p, self.layouts)) continue;
+                    if (Closure.callbackKey(self.tree, self.resolutions, self.body.nodes, self.owner, self.units, arg)) |k|
+                        try self.keys.append(self.gpa, .{ .kind = k.kind, .key = k.key });
+                }
+            }
+        };
+        var v: V = .{ .gpa = gpa, .tree = mc.tree, .resolutions = mc.resolutions, .body = b, .owner = @intCast(bi), .fns = fns, .sigs = sigs, .units = units, .layouts = layouts, .keys = &keys };
+        try Walk.walk(.{ .tree = mc.tree, .tokens = mc.tokens, .source = mc.source }, b.decl, &v);
+    }
+    std.mem.sort(Key, keys.items, {}, struct {
+        fn lt(_: void, a: Key, b: Key) bool {
+            if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+            return a.key < b.key;
+        }
+    }.lt);
+    var n: usize = 0;
+    for (keys.items) |k| {
+        if (n > 0 and std.meta.eql(keys.items[n - 1], k)) continue;
+        keys.items[n] = k;
+        n += 1;
+    }
+    const out = try gpa.alloc(Closure.Adapter, adapters.len + n);
+    var built: usize = 0;
+    errdefer {
+        for (out[adapters.len..][0..built]) |a| gpa.free(a.name);
+        gpa.free(out);
+    }
+    for (keys.items[0..n], out[adapters.len..]) |k, *a| {
+        a.* = switch (k.kind) {
+            .c_fn => .{
+                .kind = .c_fn,
+                .key = k.key,
+                .name = try Mangle.adapter(gpa, fns[k.key].name, .c_fn),
+                .target = .{ .kind = fns[k.key].kind, .name = fns[k.key].name },
+                .sig = .{ .params = sigs[k.key].params, .ret = sigs[k.key].ret },
+            },
+            .c_lambda => .{
+                .kind = .c_lambda,
+                .key = k.key,
+                .name = try Mangle.adapter(gpa, units[k.key].name, .c_lambda),
+                .target = .{ .kind = .user_fn, .name = units[k.key].name },
+                .sig = units[k.key].sig,
+            },
+            .c_assoc => try methodAdapter(gpa, .c_assoc, k.key, methods, derives, instances, fns, sigs),
+            else => unreachable,
+        };
+        built += 1;
+    }
+    @memcpy(out[0..adapters.len], adapters);
+    gpa.free(adapters);
     return out;
 }
 

@@ -1,0 +1,93 @@
+# expect: exit 0
+# expect: stdout "each 14 60 36 3\nnarrow -3 65535 -100000 true 1.5\n-100001\nstack -955\nfloats 126.0\nsmall 30096017\nvec4d 2160.5\nbig -7358\ntoy got from C\nvec2f 654.0\nspill 62.5\nchurn 11225 alive!\n"
+# libdir: "@harness"
+# A toy fn with no captures passes to C as a plain function pointer: a named fn, a
+# lambda or a local fn. C calls it in the C convention (narrow ints with only their low
+# bits set, f32 in s registers, stack arguments packed, extern structs in C layout), and
+# a collection inside the callback keeps what the toy frames under the C frame hold.
+import std/io
+import std/ffi
+import std/gc
+import std/vec
+
+extern struct Small { a: int32, b: int8, c: int16 }
+extern struct Vec4d { x: float, y: float, z: float, w: float }
+extern struct Big { a: int, b: int, c: int, d: int8 }
+extern struct Vec2f { x: f32, y: f32 }
+extern struct Pair { x: int, y: int32, z: bool }
+
+extern "toyffi" {
+    fn toyffi_each(n: int, cb: fn(int) -> int) -> int
+    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, f32) -> int32) -> int
+    fn toyffi_cb_stack(cb: fn(int, int, int, int, int, int, int, int, int, int8) -> int) -> int
+    fn toyffi_cb_floats(cb: fn(f32, f32, f32, f32, f32, f32, f32, f32, f32) -> f32) -> float
+    fn toyffi_cb_small(cb: fn(Small, int32) -> Small) -> int
+    fn toyffi_cb_vec4d(cb: fn(Vec4d, float) -> Vec4d) -> float
+    fn toyffi_cb_big(cb: fn(Big) -> Big) -> int
+    fn toyffi_cb_str(cb: fn(cstr) -> cstr) -> cstr
+    fn toyffi_cb_vec2f(cb: fn(Vec2f, Vec2f) -> Vec2f) -> float
+    fn toyffi_cb_spill(cb: fn(int, int, int, int, int, int, int, Pair, Vec4d, Vec4d, Vec2f) -> float) -> float
+}
+
+fn square(i: int) -> int { i * i }
+
+fn narrow(a: int8, b: uint16, c: int32, d: bool, e: f32) -> int32 {
+    io.println("narrow ".concat(a.to_string()).concat(" ").concat(b.to_string()).concat(" ").concat(c.to_string()).concat(" ").concat(d.to_string()).concat(" ").concat(e.to_string()))
+    c - 1
+}
+
+fn stack(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int8) -> int {
+    a + b + c + d + e + f + g + h + i + if j == -10 { -1000 } else { 0 }
+}
+
+fn floats(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32, i: f32) -> f32 {
+    a +. b +. c +. d +. e +. f +. g +. h +. i *. 10.0
+}
+
+fn spill(a: int, b: int, c: int, d: int, e: int, f: int, g: int, p: Pair, v: Vec4d, w: Vec4d, q: Vec2f) -> float {
+    y: int = p.y.into()
+    n := a + b + c + d + e + f + g + p.x + y + if p.z { 1 } else { 0 }
+    m: float = (q.x *. q.y).into()
+    nf: float = n.into()
+    nf +. v.x +. w.w +. m
+}
+
+fn churn(i: int) -> int {
+    junk: Vec[str] = []
+    k := 0
+    while k < 200 {
+        junk.push("x".concat(k.to_string()))
+        k += 1
+    }
+    gc.collect()
+    junk.len() + i
+}
+
+fn in_generic[T](_x: T) -> int {
+    unsafe { toyffi_each(2, fn(i) { i + 1 }) }
+}
+
+fn main() -> int {
+    fn cube(i: int) -> int { i * i * i }
+    a := unsafe { toyffi_each(4, square) }
+    b := unsafe { toyffi_each(4, fn(i) { i * 10 }) }
+    c := unsafe { toyffi_each(4, cube) }
+    io.println("each ".concat(a.to_string()).concat(" ").concat(b.to_string()).concat(" ").concat(c.to_string()).concat(" ").concat(in_generic("t").to_string()))
+    io.println(unsafe { toyffi_cb_narrow(narrow) }.to_string())
+    io.println("stack ".concat(unsafe { toyffi_cb_stack(stack) }.to_string()))
+    io.println("floats ".concat(unsafe { toyffi_cb_floats(floats) }.to_string()))
+    s := unsafe { toyffi_cb_small(fn(sm, k) { Small { a: sm.a + k, b: sm.b * 2, c: sm.c + 1 } }) }
+    io.println("small ".concat(s.to_string()))
+    v := unsafe { toyffi_cb_vec4d(fn(v, k) { Vec4d { x: v.x *. k, y: v.y *. k, z: v.z *. k, w: v.w *. k } }) }
+    io.println("vec4d ".concat(v.to_string()))
+    g := unsafe { toyffi_cb_big(fn(bg) { Big { a: bg.a * 2, b: bg.b * 2, c: bg.c * 2, d: bg.d * 2 } }) }
+    io.println("big ".concat(g.to_string()))
+    io.println(unsafe { toyffi_cb_str(fn(cs) { "toy got ".concat(cs.to_str()).to_cstr() }) }.to_str())
+    io.println("vec2f ".concat(unsafe { toyffi_cb_vec2f(fn(p, q) { Vec2f { x: p.x +. q.x, y: p.y +. q.y } }) }.to_string()))
+    io.println("spill ".concat(unsafe { toyffi_cb_spill(spill) }.to_string()))
+    keep: Vec[str] = []
+    keep.push("alive".concat("!"))
+    total := unsafe { toyffi_each(50, churn) }
+    io.println("churn ".concat(total.to_string()).concat(" ").concat(keep[0]))
+    return 0
+}

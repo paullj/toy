@@ -443,7 +443,7 @@ test "in a bounded template a '_' or an untyped lambda param takes the template'
 }
 
 test "a lambda passed where the param type was rejected adds no second error" {
-    try Typecheck.expectDiagCodes("extern fn f(cb: fn(int) -> int) -> int\nfn main() -> int { return unsafe { f(fn(x) { x }) } }\n", &.{.T0037});
+    try Typecheck.expectDiagCodes("extern fn f(cb: fn(str) -> int) -> int\nfn main() -> int { return unsafe { f(fn(x) { x }) } }\n", &.{.T0037});
 }
 
 const then_impls =

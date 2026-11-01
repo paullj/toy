@@ -1,0 +1,19 @@
+# expect: exit 1
+# expect: stderr "panic in a C callback"
+# A panic inside a callback ends the program as any panic does, with C frames still on
+# the stack: the message and backtrace go to stderr and the process exits with 1.
+extern struct Two { a: int, b: int }
+
+extern {
+    fn qsort(mut base: Two, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+}
+
+fn boom(_a: rawptr, _b: rawptr) -> int32 {
+    panic("panic in a C callback")
+}
+
+fn main() -> int {
+    t := Two { a: 2, b: 1 }
+    unsafe { qsort(t, 2, 8, boom) }
+    return 0
+}

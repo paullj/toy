@@ -302,6 +302,22 @@ fn emitFnPair(b: *Builder, code_sym: []const u8, ty: Typecheck.Type, env: ?Ir.Va
     return .{ .slot = slot };
 }
 
+/// An argument for an extern's fn-typed param: the address of the C callback adapter of
+/// the named fn, lambda or local fn it is (the checker let nothing else through, T0080).
+pub fn lowerCallbackAddr(b: *Builder, arg: Ast.Index) error{OutOfMemory}!Ir.Operand {
+    const tok = b.in.tree.nodes[arg.int()].main_token;
+    const owner = b.in.closure.owner orelse std.math.maxInt(Closure.Owner);
+    const k = Closure.callbackKey(b.in.tree, b.in.resolutions, b.in.nodes, owner, b.in.closure.lambda_units, arg) orelse {
+        try b.note(tok, "C callback is not a capture-free fn in lower");
+        return .none;
+    };
+    const ai = Closure.findAdapter(b.in.closure.adapters, k.kind, k.key) orelse {
+        try b.note(tok, "C callback has no adapter in lower");
+        return .none;
+    };
+    return .{ .value = try b.emit(.{ .fn_addr = .{ .kind = .user_fn, .name = b.in.closure.adapters[ai].name } }, Typecheck.Type.int) };
+}
+
 /// The fn a value-position name refers to, when the checker typed it as a fn value.
 pub fn fnValueRef(b: *const Builder, node_idx: Ast.Index) ?u32 {
     if (b.in.resolutions[(node_idx).int()] != .func) return null;
@@ -371,7 +387,7 @@ pub fn lowerBoundValue(b: *Builder, node_idx: Ast.Index, mi: u32, ty: Typecheck.
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },
         .assoc_value => return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, null),
-        .fn_value => unreachable,
+        .fn_value, .c_fn, .c_lambda, .c_assoc => unreachable,
     }
 }
 
