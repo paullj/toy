@@ -30,9 +30,10 @@ pub fn trapsOverflow(p: Profile) bool {
     return p.name == .debug;
 }
 
-/// Whether the image carries an LC_SYMTAB naming every function. Release ships without
-/// it, as "debug info for debug builds" rules, so its binary stays minimal.
-pub fn debugSymtab(p: Profile) bool {
+/// Whether the image carries debug info: an LC_SYMTAB naming every function and DWARF
+/// line tables. Release ships without it, as "debug info for debug builds" rules, so its
+/// binary stays minimal.
+pub fn debugInfo(p: Profile) bool {
     return p.name == .debug;
 }
 

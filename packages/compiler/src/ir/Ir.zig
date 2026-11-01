@@ -34,6 +34,8 @@ pub const BlockId = u32;
 pub const none_value: ValueId = std.math.maxInt(u32);
 pub const none_slot: SlotId = std.math.maxInt(u32);
 pub const none_block: BlockId = std.math.maxInt(u32);
+/// No source line: a release build, a unit with no source, or code no statement owns.
+pub const no_line: u32 = std.math.maxInt(u32);
 
 /// Target-independent comparison condition. Signedness is carried BY the cond
 /// (the `u*` variants are unsigned), baked at lower-time from the operand type, so
@@ -231,6 +233,10 @@ pub const Op = union(enum) {
 pub const Instr = struct {
     result: ValueId,
     op: Op,
+    /// The line of the statement this instruction belongs to, relative to the unit's
+    /// declaration (a debug build's line table), or `no_line`. Not rendered: it is debug
+    /// info, not semantics.
+    line: u32 = no_line,
 };
 
 /// How a block ends.
@@ -258,6 +264,10 @@ pub const Block = struct {
     params: []ValueId,
     instrs: []Instr,
     term: Terminator,
+    /// The line the terminator is charged to, like `Instr.line`. A block can hold no
+    /// instructions (the exit block's epilogue), and its code must not take the line of
+    /// whatever block precedes it in layout.
+    term_line: u32 = no_line,
 
     /// Free this block's nested owned slices (each `.call`'s args, then `instrs`,
     /// `params`, and a `br`'s args) exactly once. The SINGLE definition of a
@@ -298,6 +308,8 @@ pub const Function = struct {
     /// C calls this function through a function pointer, so its params arrive and its
     /// result leaves in the C convention (a C callback adapter).
     c_abi: bool = false,
+    /// The line its prologue is charged to, relative like `Instr.line`.
+    line: u32 = no_line,
 
     /// Free every owned slice. `name.name` is borrowed from the names table
     /// (owned by the caller), so it is NOT freed here.

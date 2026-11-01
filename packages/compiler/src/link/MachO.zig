@@ -25,7 +25,9 @@
 //! A user library also forces this path, even with no import, so dyld loads it.
 //! A debug build adds LC_SYMTAB + LC_DYSYMTAB to either layout (`Symtab`), right after
 //! LC_DYLD_CHAINED_FIXUPS, with the nlists and strings in __LINKEDIT between the fixups
-//! blob and the signature.
+//! blob and the signature. Its DWARF (`Dwarf.Sections`) takes the multi-segment path and
+//! sits in a `__DWARF` segment just before __LINKEDIT, laid out as Go's linker does:
+//! file-backed, zero vmsize, never mapped, so lldb reads it from the executable itself.
 //! The `__got` slot is seeded with the chained-fixups bind sentinel
 //! (0x8000000000000000), and `LC_DYLD_CHAINED_FIXUPS` names `_write` against
 //! libSystem so dyld binds the slot at load. `assemble` reports every segment's
@@ -46,6 +48,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const CodeSign = @import("CodeSign.zig");
+const Dwarf = @import("Dwarf.zig");
 
 const Self = @This();
 
@@ -82,6 +85,7 @@ const S_CSTRING_LITERALS: u32 = 0x2;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 0x6;
 // __DATA_CONST is read-only after dyld binds it.
 const SG_READ_ONLY: u32 = 0x10;
+const S_ATTR_DEBUG: u32 = 0x02000000;
 
 /// One dyld-imported external symbol, named by its dyld-facing linkage name (with
 /// the leading `_`, e.g. `_write`/`_labs`), and the 1-based ordinal of the
@@ -187,6 +191,32 @@ pub const Symtab = struct {
         const symoff = std.mem.alignForward(u32, after_fixups, 8);
         const stroff = symoff + @as(u32, @intCast(self.syms.len)) * NLIST_SIZE;
         return .{ .symoff = symoff, .stroff = stroff, .end = stroff + @as(u32, @intCast(self.strtab.len)) };
+    }
+};
+
+/// A debug build's debug info: the symbol table and the DWARF line tables. Empty (the
+/// default) leaves the image byte-identical to a build without it.
+pub const Debug = struct {
+    symtab: Symtab = .{},
+    dwarf: Dwarf.Sections = .{},
+
+    pub fn deinit(self: Debug, gpa: std.mem.Allocator) void {
+        self.symtab.deinit(gpa);
+        self.dwarf.deinit(gpa);
+    }
+
+    fn dwarfCmdsCount(self: Debug) u32 {
+        return if (self.dwarf.isEmpty()) 0 else 1;
+    }
+
+    fn dwarfCmdsSize(self: Debug) u32 {
+        return if (self.dwarf.isEmpty()) 0 else SEG_CMD_SIZE + 4 * SECT_SIZE;
+    }
+
+    fn dwarfSize(self: Debug) u32 {
+        var n: u32 = 0;
+        for (self.dwarf.parts()) |p| n += @intCast(p.bytes.len);
+        return n;
     }
 };
 
@@ -316,12 +346,12 @@ pub fn assemble(
     cstrings: []const u8,
     imports: []const Import,
     libs: Libraries,
-    symtab: Symtab,
+    debug: Debug,
 ) !Layout {
-    if (cstrings.len == 0 and imports.len == 0 and libs.isEmpty()) {
-        return assembleEmpty(gpa, identifier, code, entry_text_off, symtab);
+    if (cstrings.len == 0 and imports.len == 0 and libs.isEmpty() and debug.dwarf.isEmpty()) {
+        return assembleEmpty(gpa, identifier, code, entry_text_off, debug.symtab);
     }
-    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs, symtab);
+    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs, debug);
 }
 
 /// The unchanged single-segment layout (no __cstring, no imports). Kept
@@ -509,11 +539,12 @@ fn assembleMulti(
     cstrings: []const u8,
     imports: []const Import,
     libs: Libraries,
-    symtab: Symtab,
+    debug: Debug,
 ) !Layout {
     std.debug.assert(libs.dylibs.len <= Libraries.max_dylibs);
-    const ncmds: u32 = NCMDS_MULTI + libs.cmdsCount() + symtab.cmdsCount();
-    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + libs.cmdsSize() + symtab.cmdsSize();
+    const symtab = debug.symtab;
+    const ncmds: u32 = NCMDS_MULTI + libs.cmdsCount() + symtab.cmdsCount() + debug.dwarfCmdsCount();
+    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + libs.cmdsSize() + symtab.cmdsSize() + debug.dwarfCmdsSize();
     const code_file_off: u32 = std.mem.alignForward(u32, HEADER_SIZE + sizeofcmds, 4);
     const text_size: u32 = @intCast(code.len);
 
@@ -534,11 +565,14 @@ fn assembleMulti(
     const got_size: u32 = @intCast(imports.len * 8);
     std.debug.assert(got_size <= PAGE);
 
-    // __LINKEDIT is the page after that: the fixups blob first, then the sig.
-    const linkedit_off: u32 = text_seg_size + @as(u32, @intCast(PAGE));
+    // __DWARF (when present) is the page after that, and __LINKEDIT follows it: the
+    // fixups blob first, then the sig.
+    const dwarf_off: u32 = text_seg_size + @as(u32, @intCast(PAGE));
+    const dwarf_size: u32 = debug.dwarfSize();
+    const linkedit_off: u32 = dwarf_off + @as(u32, @intCast(std.mem.alignForward(u64, dwarf_size, PAGE)));
     const fixups_off: u32 = linkedit_off;
 
-    const fixups_blob = try buildChainedFixups(gpa, imports, datac_file_off, NSEGS_MULTI, DATAC_SEG_INDEX);
+    const fixups_blob = try buildChainedFixups(gpa, imports, datac_file_off, NSEGS_MULTI + debug.dwarfCmdsCount(), DATAC_SEG_INDEX);
     defer gpa.free(fixups_blob);
 
     const after_fixups: u32 = fixups_off + @as(u32, @intCast(fixups_blob.len));
@@ -648,7 +682,38 @@ fn assembleMulti(
     w.put32(0);
     w.put32(0);
 
-    // [3] __LINKEDIT
+    // [3] __DWARF, when present.
+    if (!debug.dwarf.isEmpty()) {
+        w.put32(LC_SEGMENT_64);
+        w.put32(debug.dwarfCmdsSize());
+        w.name16("__DWARF");
+        w.put64(BASE + dwarf_off);
+        w.put64(0); // vmsize: dyld maps none of it
+        w.put64(dwarf_off);
+        w.put64(dwarf_size);
+        w.put32(0);
+        w.put32(0);
+        w.put32(4);
+        w.put32(0);
+        var at = dwarf_off;
+        for (debug.dwarf.parts()) |p| {
+            w.name16(p.name);
+            w.name16("__DWARF");
+            w.put64(BASE + at);
+            w.put64(p.bytes.len);
+            w.put32(at);
+            w.put32(0); // align 2^0
+            w.put32(0);
+            w.put32(0);
+            w.put32(S_REGULAR | S_ATTR_DEBUG);
+            w.put32(0);
+            w.put32(0);
+            w.put32(0);
+            at += @intCast(p.bytes.len);
+        }
+    }
+
+    // [3] or [4] __LINKEDIT
     w.segment("__LINKEDIT", .{
         .vmaddr = linkedit_vmaddr,
         // vmsize must cover filesize; round up so it can never be smaller.
@@ -723,6 +788,14 @@ fn assembleMulti(
     var i: usize = 0;
     while (i < imports.len) : (i += 1) {
         std.mem.writeInt(u64, image[datac_file_off + i * 8 ..][0..8], gotBindValue(i, imports.len), .little);
+    }
+
+    if (!debug.dwarf.isEmpty()) {
+        const d = debug.dwarf;
+        const line_off = dwarf_off + d.info.len + d.abbrev.len;
+        d.relocate(image[dwarf_off..][0..d.info.len], image[line_off..][0..d.line.len], text_vmaddr + code_file_off);
+        @memcpy(image[dwarf_off + d.info.len ..][0..d.abbrev.len], d.abbrev);
+        @memcpy(image[line_off + d.line.len ..][0..d.str.len], d.str);
     }
 
     // __LINKEDIT: the chained-fixups blob (sig region stays zeroed).
@@ -1379,9 +1452,9 @@ test "a symtab adds LC_SYMTAB + LC_DYSYMTAB and its nlists before the signature"
 
     for ([_]bool{ false, true }) |multi| {
         const layout = if (multi)
-            try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, st)
+            try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st })
         else
-            try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, st);
+            try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .symtab = st });
         defer gpa.free(layout.image);
         const img = layout.image;
 
@@ -1432,9 +1505,64 @@ test "an empty symtab leaves the image unchanged" {
     const gpa = testing.allocator;
     const st = try Symtab.build(gpa, &.{});
     defer st.deinit(gpa);
-    const a = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, st);
+    const a = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st });
     defer gpa.free(a.image);
     const b = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
     defer gpa.free(b.image);
     try testing.expectEqualSlices(u8, b.image, a.image);
+}
+
+test "DWARF rides in a zero-vmsize __DWARF segment before __LINKEDIT, addresses at __text" {
+    const gpa = testing.allocator;
+    const files = [_][]const u8{"main.toy"};
+    const fns = [_]Dwarf.Fn{.{ .name = "main", .text_off = 0, .size = stub_code.len, .file = 0, .rows = &.{.{ .off = 0, .line = 1 }} }};
+    const dw = try Dwarf.build(gpa, .{ .files = &files, .cu_file = 0, .comp_dir = "/", .fns = &fns, .text_size = stub_code.len });
+    defer dw.deinit(gpa);
+
+    // A code-only program takes the multi-segment path once it carries DWARF.
+    const layout = try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .dwarf = dw });
+    defer gpa.free(layout.image);
+    const img = layout.image;
+    try testing.expectEqual(NCMDS_MULTI + 1, rd32(img, 16));
+
+    var off: usize = HEADER_SIZE;
+    var segs: [8][16]u8 = undefined;
+    var nseg: usize = 0;
+    var dwarf_cmd: usize = 0;
+    var last: u32 = 0;
+    for (0..rd32(img, 16)) |_| {
+        const cmd = rd32(img, off);
+        if (cmd == LC_SEGMENT_64) {
+            @memcpy(&segs[nseg], img[off + 8 ..][0..16]);
+            if (std.mem.eql(u8, std.mem.sliceTo(&segs[nseg], 0), "__DWARF")) dwarf_cmd = off;
+            nseg += 1;
+        }
+        last = cmd;
+        off += rd32(img, off + 4);
+    }
+    try testing.expectEqual(LC_CODE_SIGNATURE, last);
+    try testing.expectEqual(@as(usize, 5), nseg);
+    try testing.expectEqualStrings("__DWARF", std.mem.sliceTo(&segs[3], 0));
+    try testing.expectEqualStrings("__LINKEDIT", std.mem.sliceTo(&segs[4], 0));
+
+    const seg_fileoff = rd64(img, dwarf_cmd + 40);
+    try testing.expectEqual(@as(u64, 0), rd64(img, dwarf_cmd + 32)); // vmsize
+    try testing.expectEqual(@as(u64, 0), seg_fileoff % PAGE);
+    try testing.expectEqual(@as(u32, 4), rd32(img, dwarf_cmd + 64));
+    const names = [_][]const u8{ "__debug_info", "__debug_abbrev", "__debug_line", "__debug_str" };
+    var sect = dwarf_cmd + SEG_CMD_SIZE;
+    var info_off: u32 = 0;
+    for (names, dw.parts()) |n, p| {
+        try testing.expectEqualStrings(n, std.mem.sliceTo(img[sect..][0..16], 0));
+        try testing.expectEqual(@as(u64, p.bytes.len), rd64(img, sect + 40));
+        const at = rd32(img, sect + 48);
+        try testing.expect(at + p.bytes.len <= layout.sig_file_off);
+        try testing.expectEqual(S_ATTR_DEBUG, rd32(img, sect + 64));
+        if (std.mem.eql(u8, n, "__debug_info")) info_off = at;
+        if (std.mem.eql(u8, n, "__debug_abbrev") or std.mem.eql(u8, n, "__debug_str"))
+            try testing.expectEqualSlices(u8, p.bytes, img[at..][0..p.bytes.len]);
+        sect += SECT_SIZE;
+    }
+    // The compile unit's low_pc is the runtime address of __text.
+    try testing.expectEqual(layout.text_vmaddr + layout.code_file_off, rd64(img, info_off + dw.info_addrs[0]));
 }

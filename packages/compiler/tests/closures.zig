@@ -155,7 +155,7 @@ test "specialized binaries are identical at -j1 and -j8" {
     }
 }
 
-test "a _ capture builds the same binary as the lambda it means" {
+test "a _ capture builds the same code as the lambda it means" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -200,7 +200,7 @@ test "a _ capture builds the same binary as the lambda it means" {
         defer gpa.free(a);
         const b = try Io.Dir.cwd().readFileAlloc(io, lam, gpa, .unlimited);
         defer gpa.free(b);
-        if (!std.mem.eql(u8, a, b)) {
+        if (!harness.sameCode(a, b)) {
             std.debug.print("'{s}' differs from '{s}' at {s}\n", .{ pair.capture, pair.lambda, opt });
             return error.TestExpectedEqual;
         }

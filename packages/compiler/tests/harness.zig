@@ -29,14 +29,21 @@ pub fn skipUnlessBackend(io: Io) !void {
 /// binary's absolute path (owned by `gpa`). Keeping the `main.toy`/`prog` basenames fixed
 /// matters: the binary embeds them, so two builds only compare equal with the same names.
 pub fn compile(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, entry_src: []const u8, flags: []const []const u8) ![:0]u8 {
+    return compileTo(gpa, io, dir_name, dir_name, entry_src, flags);
+}
+
+/// `compile` with the binary in `out_dir`. A debug build embeds its source paths, so two
+/// builds compare equal only from the same `src_dir`.
+fn compileTo(gpa: std.mem.Allocator, io: Io, src_dir: []const u8, out_dir: []const u8, entry_src: []const u8, flags: []const []const u8) ![:0]u8 {
     const bin_abs = toy_exe;
 
-    try Io.Dir.cwd().createDirPath(io, dir_name);
-    const main_path = try std.fmt.allocPrint(gpa, "{s}/main.toy", .{dir_name});
+    try Io.Dir.cwd().createDirPath(io, src_dir);
+    try Io.Dir.cwd().createDirPath(io, out_dir);
+    const main_path = try std.fmt.allocPrint(gpa, "{s}/main.toy", .{src_dir});
     defer gpa.free(main_path);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = main_path, .data = entry_src });
 
-    const out_bin = try std.fmt.allocPrint(gpa, "{s}/prog", .{dir_name});
+    const out_bin = try std.fmt.allocPrint(gpa, "{s}/prog", .{out_dir});
     defer gpa.free(out_bin);
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -55,8 +62,8 @@ pub fn compile(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, entry_src: 
     return Io.Dir.cwd().realPathFileAlloc(io, out_bin, gpa);
 }
 
-/// Build `src` with `flags` at -j1 and at -j8 (each `--no-cache`, in fresh subdirs of
-/// `dir_name`) and expect the two images to be identical; with `exit` set, also expect the
+/// Build `src` with `flags` at -j1 and at -j8 (each `--no-cache`, from `dir_name` into
+/// fresh subdirs of it) and expect the two images to be identical; with `exit` set, also expect the
 /// -j1 binary to exit with it. Every byte must match: the code signature has no nonce, only
 /// the `-o` basename (which `compile` keeps fixed), so any difference is a -jN leak.
 pub fn expectDeterministicBuild(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, src: []const u8, flags: []const []const u8, exit: ?u8) !void {
@@ -85,13 +92,13 @@ const Image = struct {
     }
 };
 
-/// `compile` at `jobs` (`-jN`) into `dir_name/jN`, with the image read back.
+/// `compile` at `jobs` (`-jN`) from `dir_name` into `dir_name/jN`, with the image read back.
 fn buildImage(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, jobs: []const u8, src: []const u8, flags: []const []const u8) !Image {
     const sub = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_name, jobs[1..] });
     defer gpa.free(sub);
     const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "--no-cache", jobs }, flags });
     defer gpa.free(args);
-    const prog = try compile(gpa, io, sub, src, args);
+    const prog = try compileTo(gpa, io, dir_name, sub, src, args);
     errdefer gpa.free(prog);
     return .{ .prog = prog, .bytes = try Io.Dir.cwd().readFileAlloc(io, prog, gpa, .unlimited) };
 }
@@ -126,6 +133,77 @@ pub fn runExit(gpa: std.mem.Allocator, io: Io, prog: []const u8) !u8 {
         .exited => |c| c,
         else => error.ChildCrashed,
     };
+}
+
+/// Whether two Mach-O images are the same program: every section outside `__DWARF` at the
+/// same address with the same bytes, the same `__LINKEDIT` up to the code signature (the
+/// dyld fixups and imports, the symbol table), the same dylibs and rpaths, and the same
+/// entry point. A debug build's line table and source paths live in `__DWARF`, and the
+/// signature hashes them, so two sources that are the same program written on other lines
+/// differ only there.
+pub fn sameCode(a: []const u8, b: []const u8) bool {
+    const lc_segment_64 = 0x19;
+    const lc_main = 0x80000028;
+    const lc_code_signature = 0x1d;
+    const lc_load_dylib = 0xc;
+    const lc_load_weak_dylib = 0x80000018;
+    const lc_rpath = 0x8000001c;
+    const rd32 = struct {
+        fn f(img: []const u8, off: usize) u32 {
+            return std.mem.readInt(u32, img[off..][0..4], .little);
+        }
+    }.f;
+    const rd64 = struct {
+        fn f(img: []const u8, off: usize) u64 {
+            return std.mem.readInt(u64, img[off..][0..8], .little);
+        }
+    }.f;
+    const sigOff = struct {
+        fn f(img: []const u8) usize {
+            var o: usize = 32;
+            for (0..rd32(img, 16)) |_| {
+                if (rd32(img, o) == lc_code_signature) return rd32(img, o + 8);
+                o += rd32(img, o + 4);
+            }
+            return img.len;
+        }
+    }.f;
+    if (a.len < 32 or b.len < 32 or rd32(a, 16) != rd32(b, 16)) return false;
+    var oa: usize = 32;
+    var ob: usize = 32;
+    for (0..rd32(a, 16)) |_| {
+        const cmd = rd32(a, oa);
+        if (cmd != rd32(b, ob)) return false;
+        const size_a = rd32(a, oa + 4);
+        switch (cmd) {
+            lc_segment_64 => {
+                const seg = a[oa + 8 ..][0..16];
+                if (!std.mem.eql(u8, seg, b[ob + 8 ..][0..16])) return false;
+                const name = std.mem.sliceTo(seg, 0);
+                const nsects = rd32(a, oa + 64);
+                if (nsects != rd32(b, ob + 64)) return false;
+                if (std.mem.eql(u8, name, "__LINKEDIT")) {
+                    const la = a[@intCast(rd64(a, oa + 40))..sigOff(a)];
+                    const lb = b[@intCast(rd64(b, ob + 40))..sigOff(b)];
+                    if (!std.mem.eql(u8, la, lb)) return false;
+                }
+                if (!std.mem.eql(u8, name, "__DWARF")) for (0..nsects) |i| {
+                    const sa = oa + 72 + i * 80;
+                    const sb = ob + 72 + i * 80;
+                    // name, segment, addr and size
+                    if (!std.mem.eql(u8, a[sa..][0..48], b[sb..][0..48])) return false;
+                    const size = rd64(a, sa + 40);
+                    if (!std.mem.eql(u8, a[rd32(a, sa + 48)..][0..size], b[rd32(b, sb + 48)..][0..size])) return false;
+                };
+            },
+            lc_main => if (rd64(a, oa + 8) != rd64(b, ob + 8)) return false,
+            lc_load_dylib, lc_load_weak_dylib, lc_rpath => if (!std.mem.eql(u8, a[oa..][0..size_a], b[ob..][0..rd32(b, ob + 4)])) return false,
+            else => {},
+        }
+        oa += size_a;
+        ob += rd32(b, ob + 4);
+    }
+    return true;
 }
 
 /// The stdout of `prog`, which must exit 0.
@@ -176,7 +254,8 @@ pub fn expectStdoutAtBothLevelsWith(gpa: std.mem.Allocator, io: Io, dir: []const
 
 /// A syntax feature proven to be pure sugar: each case in `cases_dir` whose name starts
 /// with `prefix` must build, at every level in `levels`, to the same binary as its
-/// hand-desugared twin at the same path under `twins_dir`, and every twin must have a case.
+/// hand-desugared twin at the same path under `twins_dir` (`sameCode`), and every twin must
+/// have a case.
 pub const Twins = struct {
     cases_dir: []const u8,
     twins_dir: []const u8,
@@ -219,7 +298,7 @@ pub fn expectTwins(gpa: std.mem.Allocator, io: Io, t: Twins) !void {
             defer gpa.free(a);
             const b = try buildBytes(gpa, io, t.tmp, entry.path, "twin", level, twin_src, twin_path);
             defer gpa.free(b);
-            if (!std.mem.eql(u8, a, b)) {
+            if (!sameCode(a, b)) {
                 std.debug.print("case {s} differs from its twin at {s} ({d} vs {d} bytes)\n", .{ case_path, level, a.len, b.len });
                 return error.TestExpectedEqual;
             }

@@ -1,5 +1,5 @@
 //! Proof that `|>` is pure syntax: every run case in
-//! `tests/corpora/language-features/pipe/` compiles to the same binary as its
+//! `tests/corpora/language-features/pipe/` compiles to the same code as its
 //! hand-desugared twin in `pipe_twins/`. The corpus harness already checks that each
 //! case runs correctly; this checks that it is the SAME program as the call form.
 //!
@@ -16,7 +16,7 @@ const twins_dir = "packages/compiler/tests/pipe_twins";
 
 const skipUnlessBackend = harness.skipUnlessBackend;
 
-test "pipe: every pipe run case is byte-identical to its hand-desugared twin" {
+test "pipe: every pipe run case compiles to the same code as its hand-desugared twin" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

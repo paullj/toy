@@ -84,6 +84,8 @@ const Gen = struct {
     code: std.ArrayList(u8) = .empty,
     relocs: std.ArrayList(Link.Reloc) = .empty,
     literals: std.ArrayList(Link.Literal) = .empty,
+    /// The line table: a row where an instruction starts a new line.
+    lines: std.ArrayList(Link.LineRow) = .empty,
 
     labels: std.ArrayList(u32) = .empty,
     fixups: std.ArrayList(Fixup) = .empty,
@@ -358,6 +360,7 @@ pub fn lowerIr(
         g.relocs.deinit(gpa);
         for (g.literals.items) |l| gpa.free(l.bytes);
         g.literals.deinit(gpa);
+        g.lines.deinit(gpa);
     }
 
     // The precise GC root map, a byproduct of the (still-live) frame layout, which the
@@ -379,7 +382,25 @@ pub fn lowerIr(
         .relocs = try g.relocs.toOwnedSlice(gpa),
         .literals = try g.literals.toOwnedSlice(gpa),
         .root_bitmap = rb,
+        .lines = try g.lines.toOwnedSlice(gpa),
     };
+}
+
+/// Start a line-table row at the current code offset, unless the line is unchanged. A
+/// row an earlier instruction opened without emitting code takes the newer line.
+fn markLine(g: *Gen, line: u32) error{OutOfMemory}!void {
+    if (line == Ir.no_line) return;
+    const off: u32 = @intCast(g.code.items.len);
+    if (g.lines.items.len > 0) {
+        const last = &g.lines.items[g.lines.items.len - 1];
+        if (last.line == line) return;
+        if (last.off == off) {
+            last.line = line;
+            if (g.lines.items.len > 1 and g.lines.items[g.lines.items.len - 2].line == line) _ = g.lines.pop();
+            return;
+        }
+    }
+    try g.lines.append(g.gpa, .{ .off = off, .line = line });
 }
 
 fn emptyFn(gpa: std.mem.Allocator, sym: Ir.SymName) error{OutOfMemory}!Link.FnCode {
@@ -404,6 +425,7 @@ fn genBody(g: *Gen) error{OutOfMemory}!void {
         try addLiteral(g, lit.hash, bytes);
     }
 
+    try markLine(g, g.func.line);
     try g.emit(Aarch64.stpFpLrPre); // stp x29,x30,[sp,#-16]!
     try g.emit(Aarch64.movFpSp); // mov x29, sp
     try openFrame(g);
@@ -420,7 +442,11 @@ fn genBody(g: *Gen) error{OutOfMemory}!void {
     // any other (its terminator is `ret`, which owns the epilogue).
     for (g.func.blocks, 0..) |*blk, bid| {
         g.placeLabel(g.block_labels[bid]);
-        for (blk.instrs) |ins| try genInstr(g, ins);
+        for (blk.instrs) |ins| {
+            try markLine(g, ins.line);
+            try genInstr(g, ins);
+        }
+        try markLine(g, blk.term_line);
         try genTerm(g, blk.term);
     }
 

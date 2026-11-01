@@ -74,6 +74,27 @@ pub const HashVisitor = struct {
     }
 };
 
+/// Folds the line of every node in a body, and of every block's closing brace, relative to
+/// the unit's anchor (`lower.Lines`), so a debug build's cached line table is reused only
+/// while each statement keeps its line within the function: an edit that only moves the
+/// whole function still hits.
+pub const LineVisitor = struct {
+    h: *std.hash.Wyhash,
+    in: *const lower.Inputs,
+
+    pub fn on(self: *LineVisitor, ev: Walk.Event) void {
+        switch (ev) {
+            .enter => |e| {
+                const n = self.in.tree.nodes[e.idx.int()];
+                updateU32(self.h, self.in.lines.rel(self.in.tokens, n.main_token));
+                // A body's epilogue sits on its closing brace, which is no node's token.
+                if (n.tag == .block) updateU32(self.h, self.in.lines.rel(self.in.tokens, lower.Lines.endToken(self.in.tree, self.in.tokens, e.idx)));
+            },
+            else => {},
+        }
+    }
+};
+
 /// Records each callee's identity-and-signature in body-walk order, so the
 /// fingerprint's (b) component lines up positionally with this stream. It reads the
 /// unit's own lowering inputs, so the identity it folds is the one lower relocates to.

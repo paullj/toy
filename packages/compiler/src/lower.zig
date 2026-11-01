@@ -113,6 +113,9 @@ pub const Inputs = struct {
     /// A source `+`, `-`, `*` or unary `-` on integers panics when it overflows (a debug
     /// build); otherwise it wraps, as the `+%` family always does.
     trap_overflow: bool = false,
+    /// A debug build tags each instruction with its statement's line; empty `starts`
+    /// tags none.
+    lines: Lines = .{},
 
     pub fn bodyView(in: *const Inputs) Body.BodyView {
         return .{ .tree = in.tree, .resolutions = in.resolutions, .nodes = in.nodes };
@@ -120,6 +123,61 @@ pub const Inputs = struct {
 
     pub fn programView(in: *const Inputs) Body.ProgramView {
         return .{ .sigs = in.sigs, .methods = in.methods, .instances = in.instances, .names = in.names, .layouts = in.layouts };
+    }
+};
+
+/// The source lines of a debug build's unit: its module's line starts and the line of the
+/// declaration every line is taken relative to (its owner's, for a lambda unit).
+pub const Lines = struct {
+    /// The byte offset each line of the module starts at; `starts[0]` is 0.
+    starts: []const u32 = &.{},
+    anchor: u32 = 0,
+
+    pub fn tracked(l: Lines) bool {
+        return l.starts.len != 0;
+    }
+
+    /// The 1-based line holding byte `off`.
+    pub fn lineOf(starts: []const u32, off: u32) u32 {
+        return @intCast(std.sort.upperBound(u32, starts, off, struct {
+            fn order(a: u32, b: u32) std.math.Order {
+                return std.math.order(a, b);
+            }
+        }.order));
+    }
+
+    /// The line of token `tok` relative to `anchor`.
+    pub fn rel(l: Lines, tokens: []const Token, tok: u32) u32 {
+        return lineOf(l.starts, tokens[tok].start) -% l.anchor;
+    }
+
+    /// The token a unit body ends on: a block's closing brace, else the body's own token.
+    pub fn endToken(tree: Ast.Tree, tokens: []const Token, body: Ast.Index) u32 {
+        const n = tree.nodes[body.int()];
+        // The parser also builds braceless blocks (a desugared lambda body sits on its
+        // expression's token).
+        if (n.tag != .block or tokens[n.main_token].tag != .l_brace) return n.main_token;
+        var depth: u32 = 0;
+        var i = n.main_token;
+        while (i < tokens.len) : (i += 1) switch (tokens[i].tag) {
+            .l_brace => depth += 1,
+            .r_brace => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            .eof => return i,
+            else => {},
+        };
+        return n.main_token;
+    }
+
+    /// Each line's start offset in `source`. Caller owns the result.
+    pub fn compute(gpa: std.mem.Allocator, source: []const u8) error{OutOfMemory}![]u32 {
+        var starts: std.ArrayList(u32) = .empty;
+        errdefer starts.deinit(gpa);
+        try starts.append(gpa, 0);
+        for (source, 0..) |c, i| if (c == '\n') try starts.append(gpa, @intCast(i + 1));
+        return starts.toOwnedSlice(gpa);
     }
 };
 
@@ -203,6 +261,11 @@ pub const Builder = struct {
 
     diags: *std.ArrayList(Diagnostic),
     had_error: bool = false,
+    /// The relative line `emit` tags instructions with (`Inputs.lines`).
+    cur_line: u32 = Ir.no_line,
+    fn_line: u32 = Ir.no_line,
+    /// The line the exit block's epilogue is charged to: the body's closing brace.
+    end_line: u32 = Ir.no_line,
 
     /// A block under construction: a growable instruction list + (once set) a
     /// terminator. `term_set` guards against emitting two terminators into one
@@ -213,6 +276,7 @@ pub const Builder = struct {
         instrs: std.ArrayList(Ir.Instr) = .empty,
         term: Ir.Terminator = .@"unreachable",
         term_set: bool = false,
+        term_line: u32 = Ir.no_line,
     };
 
     pub fn deinit(b: *Builder) void {
@@ -301,8 +365,25 @@ pub const Builder = struct {
             }
             return result;
         }
-        try b.blocks.items[b.cur].instrs.append(b.gpa, .{ .result = result, .op = op });
+        try b.blocks.items[b.cur].instrs.append(b.gpa, .{ .result = result, .op = op, .line = b.cur_line });
         return result;
+    }
+
+    /// Charge what is emitted from here on to statement `node`'s line; returns the line
+    /// to restore once the statement is lowered, so code an enclosing statement emits
+    /// after a nested block stays on its own line.
+    pub fn markLine(b: *Builder, node: Ast.Index) u32 {
+        const prev = b.cur_line;
+        if (b.in.lines.tracked()) b.cur_line = b.in.lines.rel(b.in.tokens, b.in.tree.nodes[node.int()].main_token);
+        return prev;
+    }
+
+    /// The lines a unit's prologue and epilogue are charged to: token `tok`'s and the
+    /// end of `body`'s.
+    pub fn markFnLines(b: *Builder, tok: u32, body: Ast.Index) void {
+        if (!b.in.lines.tracked()) return;
+        b.fn_line = b.in.lines.rel(b.in.tokens, tok);
+        b.end_line = b.in.lines.rel(b.in.tokens, Lines.endToken(b.in.tree, b.in.tokens, body));
     }
 
     /// Set the current block's terminator (idempotent guard: the FIRST terminator
@@ -321,6 +402,7 @@ pub const Builder = struct {
         }
         bb.term = term;
         bb.term_set = true;
+        bb.term_line = b.cur_line;
     }
 
     pub const Prelowered = struct { node: Ast.Index, op: Ir.Operand };
@@ -398,6 +480,7 @@ pub fn lowerFn(
 
     var b: Builder = .{ .gpa = gpa, .in = in, .ret_type = ret_type, .diags = out_diags };
     errdefer b.deinit();
+    b.markFnLines(decl.main_token, decl.rhs);
 
     // Params become slots in source order. Bind each param's resolution-local
     // index to its slot so an identifier reading the param finds the same slot.
@@ -462,6 +545,7 @@ pub fn openBodyBlocks(b: *Builder, ret_type: Typecheck.Type) error{OutOfMemory}!
     else
         .{ .ret = .{ .value = b.ret_param } };
     b.blocks.items[exit].term_set = true;
+    b.blocks.items[exit].term_line = b.end_line;
     return .{ .entry = entry, .exit = exit };
 }
 
@@ -509,6 +593,7 @@ pub fn finishFn(
             .params = try bb.params.toOwnedSlice(gpa),
             .instrs = try bb.instrs.toOwnedSlice(gpa),
             .term = bb.term,
+            .term_line = bb.term_line,
         };
         // The terminator's args slice (if any) is now owned by `blocks[i]`; clear
         // the builder copy so deinit doesn't double-free it.
@@ -545,6 +630,7 @@ pub fn finishFn(
         .entry = entry,
         .exit = exit,
         .literals = literals,
+        .line = b.fn_line,
     };
 }
 
@@ -558,6 +644,8 @@ fn lowerBlockStmts(b: *Builder, block_idx: Ast.Index) error{OutOfMemory}!void {
 }
 
 fn lowerStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
+    const prev_line = b.markLine(stmt_idx);
+    defer b.cur_line = prev_line;
     const stmt = b.in.tree.nodes[(stmt_idx).int()];
     switch (stmt.tag) {
         .var_decl => {
@@ -3611,6 +3699,8 @@ fn lowerMatchInto(b: *Builder, node_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: Typ
         const arm = b.in.tree.nodes[(arm_idx).int()];
         const h = Ast.armHeaderAt(b.in.tree, (arm.rhs).int());
         const next = try b.addBlock();
+        const prev_line = b.markLine(arm_idx);
+        defer b.cur_line = prev_line;
         // Structural test: a mismatch branches to `next`. Bindings are stored as a
         // side effect of a successful (sub)match.
         try testPattern(b, arm.lhs, scrut_slot, 0, scrut_ty, next);
@@ -3975,6 +4065,14 @@ fn slotFieldAddr(b: *Builder, base: Ir.SlotId, off: u32, ty: Typecheck.Type) err
     return try b.emit(.{ .field_addr = .{ .base = ptr, .off = off, .ty = ty } }, Typecheck.Type.int);
 }
 
+/// `genCond` charged to the condition's own line, so an `else if` stops on its line rather
+/// than on the first `if`'s.
+fn genCondOnLine(b: *Builder, cond: Ast.Index, t: Ir.BlockId, f: Ir.BlockId) error{OutOfMemory}!void {
+    const prev_line = b.markLine(cond);
+    defer b.cur_line = prev_line;
+    try genCond(b, cond, t, f);
+}
+
 /// `if cond { then } [else ...]` as a STATEMENT (value discarded). cond lowers in
 /// CONTROL context to a cond_br; the arms run for effect; a `join` block collects
 /// fall-through. An else-less if jumps straight to join on false. A divergent arm
@@ -3986,7 +4084,7 @@ fn lowerIfStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
     const join = try b.addBlock();
     const else_bb = if (h.else_node == Ast.none) join else try b.addBlock();
 
-    try genCond(b, stmt.lhs, then_bb, else_bb);
+    try genCondOnLine(b, stmt.lhs, then_bb, else_bb);
 
     b.switchTo(then_bb);
     try lowerBlockStmts(b, h.then_block);
@@ -4019,7 +4117,7 @@ fn lowerIfValue(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutO
     const join = try b.addBlock();
     const merge = try b.addParam(join, ty);
 
-    try genCond(b, stmt.lhs, then_bb, else_bb);
+    try genCondOnLine(b, stmt.lhs, then_bb, else_bb);
 
     b.switchTo(then_bb);
     const tv = try lowerBlockValue(b, h.then_block, ty);
@@ -4067,6 +4165,8 @@ fn lowerBlockValue(b: *Builder, block_idx: Ast.Index, ty: Typecheck.Type) error{
     if (b.termSet()) return .none;
     const last = stmts[stmts.len - 1];
     if (trailingValueExpr(b, last)) |expr| {
+        const prev_line = b.markLine(last);
+        defer b.cur_line = prev_line;
         return try lowerExpr(b, expr);
     }
     _ = ty;
@@ -4458,7 +4558,7 @@ fn lowerIfValueInto(b: *Builder, node_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: T
     const else_bb = try b.addBlock();
     const join = try b.addBlock();
 
-    try genCond(b, stmt.lhs, then_bb, else_bb);
+    try genCondOnLine(b, stmt.lhs, then_bb, else_bb);
 
     b.switchTo(then_bb);
     try lowerBlockValueInto(b, h.then_block, dst_ptr, ty);
@@ -4484,6 +4584,8 @@ fn lowerBlockValueInto(b: *Builder, block_idx: Ast.Index, dst_ptr: Ir.ValueId, t
     if (b.termSet()) return;
     const last = stmts[stmts.len - 1];
     if (trailingValueExpr(b, last)) |expr| {
+        const prev_line = b.markLine(last);
+        defer b.cur_line = prev_line;
         try lowerExprInto(b, expr, dst_ptr, ty);
     } else {
         try lowerStmt(b, last); // a trailing stmt (return/divergent) → no value
@@ -7462,4 +7564,16 @@ test "Escape.callTarget names the unit lowerCall calls" {
         try got.print(gpa, "{s}/{d} ", .{ sym, target.self_n });
     }
     try testing.expectEqualStrings("main.run/0 main.each$int/0 main.apply$int/0 main.C.run/1 main.Bag.make$int/0 main.Bag.each$int/1 ", got.items);
+}
+
+test "Lines maps a byte offset to its 1-based line" {
+    const gpa = testing.allocator;
+    const starts = try Lines.compute(gpa, "fn f() {\n    x := 1\n\n    x\n}\n");
+    defer gpa.free(starts);
+    try testing.expectEqualSlices(u32, &.{ 0, 9, 20, 21, 27, 29 }, starts);
+    try testing.expectEqual(@as(u32, 1), Lines.lineOf(starts, 0));
+    try testing.expectEqual(@as(u32, 1), Lines.lineOf(starts, 8));
+    try testing.expectEqual(@as(u32, 2), Lines.lineOf(starts, 9));
+    try testing.expectEqual(@as(u32, 4), Lines.lineOf(starts, 25));
+    try testing.expectEqual(@as(u32, 5), Lines.lineOf(starts, 27));
 }
