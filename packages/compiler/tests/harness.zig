@@ -217,6 +217,40 @@ pub fn runStdout(gpa: std.mem.Allocator, io: Io, prog: []const u8) ![]u8 {
     return out;
 }
 
+pub const ToolOutput = struct {
+    out: []u8,
+    err: []u8,
+    term: std.process.Child.Term,
+
+    pub fn deinit(o: ToolOutput, gpa: std.mem.Allocator) void {
+        gpa.free(o.out);
+        gpa.free(o.err);
+    }
+};
+
+/// `argv` run in `cwd_abs` (the test's cwd when null) with both streams captured, or
+/// null when the tool is not installed, so a test can skip on a host without it.
+pub fn runTool(gpa: std.mem.Allocator, io: Io, cwd_abs: ?[]const u8, argv: []const []const u8) !?ToolOutput {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = if (cwd_abs) |c| .{ .path = c } else .inherit,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    }) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    errdefer child.kill(io);
+    var rdr = child.stdout.?.readerStreaming(io, &.{});
+    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 22));
+    errdefer gpa.free(out);
+    var erdr = child.stderr.?.readerStreaming(io, &.{});
+    const err = try erdr.interface.allocRemaining(gpa, .limited(1 << 22));
+    errdefer gpa.free(err);
+    return .{ .out = out, .err = err, .term = try child.wait(io) };
+}
+
 /// What `prog` wrote to stderr, and how it ended.
 pub fn runStderr(gpa: std.mem.Allocator, io: Io, prog: []const u8) !struct { err: []u8, term: std.process.Child.Term } {
     var child = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .ignore, .stderr = .pipe });

@@ -394,3 +394,83 @@ fn readIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, rel: []const u8) 
     defer gpa.free(path);
     return Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
 }
+
+/// A load command as `otool -L` prints it: `<install name> (compatibility version
+/// <compat>, current version <current>)`.
+const LoadLine = struct {
+    install_name: []const u8,
+    compat: []const u8,
+    current: u32,
+
+    fn parse(line: []const u8) ?LoadLine {
+        const open = std.mem.indexOf(u8, line, " (compatibility version ") orelse return null;
+        const rest = line[open + " (compatibility version ".len ..];
+        const comma = std.mem.indexOf(u8, rest, ", current version ") orelse return null;
+        const cur = std.mem.trimEnd(u8, rest[comma + ", current version ".len ..], ")");
+        return .{ .install_name = line[0..open], .compat = rest[0..comma], .current = packVersion(cur) orelse return null };
+    }
+
+    /// `x.y.z` packed as LC_ID_DYLIB packs it, so versions compare as integers.
+    fn packVersion(v: []const u8) ?u32 {
+        var parts = std.mem.splitScalar(u8, v, '.');
+        var packed_v: u32 = 0;
+        for ([_]u5{ 16, 8, 0 }) |shift| {
+            const part = parts.next() orelse "0";
+            packed_v |= (std.fmt.parseInt(u32, part, 10) catch return null) << shift;
+        }
+        return packed_v;
+    }
+};
+
+/// The `otool -L` line of `binary` that names `lib`, trimmed (caller frees).
+fn otoolLine(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, binary: []const u8, lib: []const u8) !?[]u8 {
+    const res = (try harness.runTool(gpa, io, cwd_abs, &.{ "otool", "-L", binary })) orelse return null;
+    defer res.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, res.out, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, lib) != null) return try gpa.dupe(u8, std.mem.trim(u8, line, " \t"));
+    }
+    return null;
+}
+
+test "otool -L load lines parse into install name and versions" {
+    const l = LoadLine.parse("/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)").?;
+    try std.testing.expectEqualStrings("/usr/lib/libz.1.dylib", l.install_name);
+    try std.testing.expectEqualStrings("1.0.0", l.compat);
+    try std.testing.expectEqual(@as(u32, 0x1020c), l.current);
+    try std.testing.expectEqual(@as(u32, 0x1960000), LoadLine.parse("/a (compatibility version 1.0.0, current version 406)").?.current);
+    try std.testing.expect(LoadLine.parse("/usr/lib/libz.1.dylib") == null);
+}
+
+// The system linker reads a shared-cache library's versions from the SDK, toy from the
+// running system's cache, so only the install name and compatibility version must
+// agree; the current version may be newer on a host whose macOS is newer than its SDK.
+test "a shared-cache library records the versions the system linker does" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const root = ".toy-test-ffi-versions";
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    const w = try project(gpa, io, root, &.{
+        .{ "main.toy", "fn main() -> int { 0 }\n" },
+        .{ "main.c", "int main(void) { return 0; }\n" },
+    });
+    defer gpa.free(w);
+
+    const clang = (try harness.runTool(gpa, io, w, &.{ "clang", "main.c", "-lz", "-o", "c" })) orelse return error.SkipZigTest;
+    clang.deinit(gpa);
+    if (!std.meta.eql(clang.term, std.process.Child.Term{ .exited = 0 })) return error.SkipZigTest;
+    try harness.buildIn(gpa, io, w, &.{ "build", "main.toy", "-l", "z", "-o", "t" });
+    try std.testing.expectEqual(@as(u8, 0), try harness.runExitIn(gpa, io, w, "t"));
+    const want_line = (try otoolLine(gpa, io, w, "c", "libz")) orelse return error.SkipZigTest;
+    defer gpa.free(want_line);
+    const got_line = (try otoolLine(gpa, io, w, "t", "libz")) orelse return error.TestExpectedLibz;
+    defer gpa.free(got_line);
+    const want = LoadLine.parse(want_line) orelse return error.SkipZigTest;
+    const got = LoadLine.parse(got_line) orelse return error.TestUnexpectedOtoolLine;
+    try std.testing.expectEqualStrings(want.install_name, got.install_name);
+    try std.testing.expectEqualStrings(want.compat, got.compat);
+    try std.testing.expect(got.current >= want.current);
+}
