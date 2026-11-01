@@ -427,6 +427,28 @@ pub fn receiverApp(bc: *BodyChecker, mf: FnSym, targs: []const Type) error{OutOf
     return Type.app(bc.composite.intern(bc.gpa, self_app.ctor, app_args, self_app.ctor_is_enum) catch return error.OutOfMemory);
 }
 
+/// Bind each impl param of associated fn `mf` that the args left open (`.invalid` in
+/// `targs`) from the call's expected type matched against its return type, as
+/// `v: Vec[int] = Vec.new()` fixes `T`. Returns the first param still open. The fn's own
+/// params stay with the args: discovery infers those from the args alone, while it
+/// reads the impl's off the receiver this call records. A receiver's soft hint is the
+/// type of the outer call's result, not of this one, so it binds nothing.
+fn bindImplFromExpected(bc: *BodyChecker, mf: FnSym, targs: []Type) error{OutOfMemory}!?u32 {
+    const n_impl = Typecheck.implParamCount(bc.composite, mf);
+    const hard = if (bc.body.expected) |e| !e.soft else false;
+    const exp_opt = if (hard) try retBindings(bc, mf.ret, @intCast(targs.len)) else null;
+    if (exp_opt) |exp| {
+        defer bc.gpa.free(exp);
+        const base = bc.openOrdBase();
+        for (targs[0..n_impl], exp[0..n_impl], 0..) |*t, e, ord| {
+            const open = e.isTypeVar() and e.typeVarOrd() == base + ord;
+            if (t.kind == .invalid and !open and bc.givesType(e)) t.* = e;
+        }
+    }
+    for (targs, 0..) |t, ord| if (t.kind == .invalid) return @intCast(ord);
+    return null;
+}
+
 /// Type a bare `Box.new(5)`: bind the impl's type params from the value args alone,
 /// then check the call as `Box[int].new(5)` would be. Returns null, with no arg typed,
 /// when the member takes `self`.
@@ -448,7 +470,7 @@ pub fn inferAssociatedCall(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, c
     const recv = bc.tree.nodes[(callee.lhs).int()];
     switch (try inferArgs(bc, .{ .call = node_idx, .sig = bc.fnSig(mf, bc.nameText(callee.main_token)) }, args, mf.params, mf.generic_params, null, .none, arg_types, out)) {
         .failed => return .invalid,
-        .unbound => |ord| {
+        .unbound => if (try bindImplFromExpected(bc, mf, out)) |ord| {
             const self_app = bc.composite.at(mf.self_type.appIdx());
             try reportUninferableAssociated(bc, recv, bc.nameText(callee.main_token), .{ .ctor = self_app.ctor, .is_enum = self_app.ctor_is_enum }, mf, out, ord);
             return .invalid;

@@ -1,0 +1,33 @@
+# Feature: the expected type binds the type params of a generic associated fn whose
+# args do not fix them: a typed binding, a return position and a typed fn arg each make
+# `Vec.new()`, `Map.new()`, `Set.new()` and a user `S.mk()` an instance.
+# expect: exit 42
+import std/vec
+import std/map
+import std/set
+
+struct S[T] { n: int }
+impl S[T] {
+    fn mk() -> S[T] { S[T] { n: 4 } }
+    fn of(n: int) -> S[T] { S[T] { n: n } }
+}
+
+fn fresh() -> Vec[int] { Vec.new() }
+fn total(v: Vec[int]) -> int { v.len() }
+fn width(s: S[bool]) -> int { s.n }
+
+fn main() -> int {
+    v: Vec[int] = Vec.new()
+    v.push(3)
+    v.push(4)
+    m: Map[str, int] = Map.new()
+    m.set("a", 1)
+    s: Set[int] = Set.new()
+    s.add(7)
+    s.add(7)
+    k: S[str] = S.mk()
+    w := fresh()
+    w.push(1)
+    o: S[int] = S.of(20)
+    v.len() + m.len() + s.len() + k.n + w.len() + total(Vec.new()) + width(S.mk()) + o.n + 9
+}
