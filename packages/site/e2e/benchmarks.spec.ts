@@ -45,8 +45,9 @@ test('hovering a point shows its commit, and a click selects it', async ({ page 
 });
 
 test('the metric, x axis and machine controls redraw the charts', async ({ page }) => {
-	await page.getByRole('button', { name: 'Wall time' }).click();
-	await expect(page.getByRole('button', { name: 'Wall time' })).toHaveAttribute('aria-pressed', 'true');
+	const wall = page.getByRole('group', { name: 'Metric', exact: true }).getByRole('button', { name: 'Wall time' });
+	await wall.click();
+	await expect(wall).toHaveAttribute('aria-pressed', 'true');
 	await expect(page.getByTestId('bench-summary')).toContainText(' ms');
 	await page.getByRole('button', { name: 'By date' }).click();
 	await expect(page.locator('figure[data-bench="loops"] svg').first()).toContainText('2026-11-0');

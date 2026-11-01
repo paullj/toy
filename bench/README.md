@@ -108,7 +108,8 @@ toolchain's version and flags, and one result per benchmark and language (`name`
 `source`, the program's path from the repo root, `metrics` as in the history,
 `checksum`). A run with a FILTER or a wrong checksum writes a temp file instead. Commit
 `results/peers.json` yourself after a run on the reference Mac. CI neither builds nor runs
-the peers.
+the peers. The bottom of the site's `/benchmarks` page draws the committed file, one bar
+chart per benchmark, and hides that view when the file is absent.
 
 To add a peer, write `peers/<lang>/<name>.<ext>` for a runtime benchmark `<name>`. A
 benchmark with no peer in a language, where a peer would mean nothing, is skipped for it.

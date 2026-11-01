@@ -2,6 +2,7 @@
 	import { resolve } from '$app/paths';
 	import { BarChart, LineChart } from 'layerchart';
 	import BenchLine from '$lib/components/BenchLine.svelte';
+	import PeerBars from '$lib/components/PeerBars.svelte';
 	import {
 		benchmarks,
 		changesAt,
@@ -10,6 +11,7 @@
 		formatChange,
 		machines,
 		METRICS,
+		peerCharts,
 		REPO_URL,
 		series,
 		summary,
@@ -44,6 +46,12 @@
 	const select = (sha: string) => (selectedChoice = sha);
 	const index = (v: number) => v.toFixed(1);
 
+	const PEER_METRICS = METRICS.filter((m) => m.key !== 'instructions');
+	let peerMetricKey = $state<MetricKey>('wall_median_s');
+	const peerMetric = $derived(PEER_METRICS.find((m) => m.key === peerMetricKey)!);
+	let peerLog = $state(false);
+	const peerRows = $derived(data.peers ? peerCharts(data.peers, peerMetricKey) : []);
+
 	// Lower is better for every metric, so a rise is the regression colour.
 	const tone = (pct: number | undefined) => (pct === undefined || Math.abs(pct) < 0.05 ? '' : pct > 0 ? 'worse' : 'better');
 </script>
@@ -67,6 +75,8 @@
 			<code class="code">mise run bench</code> and commit <code class="code">bench/history.jsonl</code>.
 		</p>
 	{:else}
+		<!-- The wrapper ends the sticky controls' reach with the history: they do not drive the peer view. -->
+		<div>
 		<div class="sticky top-0 z-10 mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 border-b py-3 text-[0.8rem]" style="border-color: var(--border); background: var(--bg)">
 			<div class="seg" role="group" aria-label="Metric">
 				{#each METRICS as m (m.key)}
@@ -171,6 +181,65 @@
 				</div>
 			{/if}
 		{/each}
+		</div>
+	{/if}
+
+	{#if data.peers}
+		{@const run = data.peers}
+		<section data-testid="peers">
+			<h2 class="section">Against other languages</h2>
+			<p class="caveat note" role="note">
+				Take these with a pinch of salt. They are a rough indication from one run of the suite on one machine, not a
+				ranking: each program is small and written by us.
+			</p>
+			<p class="note">
+				The same algorithm in each language, single-threaded, standard library only, each printing the same checksum. Toy
+				leads each chart. Sources:
+				<a class="link" href="{REPO_URL}/tree/main/bench/peers">bench/peers</a>.
+			</p>
+			<dl class="peer-meta text-[0.75rem]" data-testid="peers-meta">
+				<dt>Machine</dt>
+				<dd>{describeMachine(run.machine)}, {run.machine.power}, load {run.machine.load_avg_1m}</dd>
+				<dt>Date</dt>
+				<dd>{run.date.slice(0, 10)}, median of {run.runs} runs</dd>
+				<dt>Toy commit</dt>
+				<dd>
+					<a class="link font-mono" href="{REPO_URL}/commit/{run.toy_commit}">{run.toy_commit.slice(0, 7)}</a>{run.toy_dirty ? ' (dirty tree)' : ''}
+				</dd>
+				<dt>Toolchains</dt>
+				<dd>
+					<ul>
+						{#each Object.entries(run.toolchains) as [lang, t] (lang)}
+							<li><span class="font-mono">{lang}</span>: {t.version} · <code class="code">{t.flags}</code></li>
+						{/each}
+					</ul>
+				</dd>
+			</dl>
+			<div class="mt-6 flex flex-wrap items-center gap-x-6 gap-y-3 text-[0.8rem]">
+				<div class="seg" role="group" aria-label="Peer metric">
+					{#each PEER_METRICS as m (m.key)}
+						<button type="button" aria-pressed={peerMetricKey === m.key} onclick={() => (peerMetricKey = m.key)}>{m.label}</button>
+					{/each}
+				</div>
+				<div class="seg" role="group" aria-label="Peer scale">
+					<button type="button" aria-pressed={!peerLog} onclick={() => (peerLog = false)}>Linear</button>
+					<button type="button" aria-pressed={peerLog} onclick={() => (peerLog = true)}>Log</button>
+				</div>
+			</div>
+			<div class="mt-6 grid gap-x-8 gap-y-10 md:grid-cols-2">
+				{#each peerRows as c (c.name)}
+					<figure data-peer={c.name}>
+						<figcaption class="caption font-mono">{c.name}</figcaption>
+						<PeerBars bars={c.bars} metric={peerMetricKey} format={peerMetric.format} log={peerLog} toolchains={run.toolchains} />
+						<p class="sources">
+							{#each c.bars as b (b.lang)}
+								<a class="link" href="{REPO_URL}/blob/main/{b.result.source}">{b.lang}</a>
+							{/each}
+						</p>
+					</figure>
+				{/each}
+			</div>
+		</section>
 	{/if}
 </div>
 
@@ -186,6 +255,32 @@
 	.bench-page {
 		--bench-worse: var(--toy-red);
 		--bench-better: var(--tok-fn);
+		--peer-bar: var(--fg-muted);
+	}
+	.caveat {
+		border-left: 3px solid var(--toy-red);
+		padding-left: 0.75rem;
+		color: var(--fg);
+	}
+	.peer-meta {
+		display: grid;
+		grid-template-columns: max-content minmax(0, 1fr);
+		gap: 0.25rem 1rem;
+		color: var(--fg-muted);
+	}
+	.peer-meta dd {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.peer-meta code {
+		white-space: normal;
+	}
+	.sources {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-top: 0.25rem;
+		font-size: 0.75rem;
 	}
 	.section {
 		margin-top: 3.5rem;
