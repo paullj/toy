@@ -19,6 +19,7 @@ const ResolveGraph = @import("../resolve_graph.zig");
 const CodegenIr = @import("../codegen/CodegenIr.zig");
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
+const Profile = @import("Profile.zig");
 const lower = @import("../lower.zig");
 const Closure = @import("../symbols/Closure.zig");
 const Spec = @import("../symbols/Spec.zig");
@@ -209,9 +210,9 @@ const Unit = union(enum) {
     spec: u32,
 };
 
-/// How `Plan.init` lowers: the opt passes, whether generic calls with a known fn argument
+/// How `Plan.init` lowers: the build profile, whether generic calls with a known fn argument
 /// get spec units, and frame storage (see `frameStorage`).
-pub const Options = struct { opt: Opt.Config, specialize: bool = true, frame: bool };
+pub const Options = struct { profile: Profile, specialize: bool = true, frame: bool };
 
 /// The whole-graph codegen plan: every unit in canonical order, and the program-wide
 /// tables each unit's `Engine.Frozen` view is cut from. Read-only once built, so the
@@ -392,7 +393,7 @@ const Plan = struct {
             },
             .body = body,
             .sym = sym,
-            .opt = p.o.opt,
+            .profile = p.o.profile,
             .type_args = if (inst) |x| x.args else &.{},
             .conformances = if (inst) |x| x.conformances else &.{},
             .closure_facts = if (u == .body and i < p.closure_facts.len) p.closure_facts[i] else &.{},
@@ -465,7 +466,7 @@ pub fn lowerGraphProgram(
     res: *const ResolveGraph.GraphResult,
     tc: *const Typecheck.GraphResult,
     mode: Engine.Mode,
-    opt: Opt.Config,
+    profile: Profile,
     /// Give generic calls with a named fn or lambda argument their own spec unit; off
     /// sends every call through the erased instance.
     specialize: bool,
@@ -477,7 +478,7 @@ pub fn lowerGraphProgram(
     /// index order), so this is a perf lever only.
     ncpu: usize,
 ) !LowerProgramResult {
-    var plan = try Plan.init(gpa, graph, res, tc, .{ .opt = opt, .specialize = specialize, .frame = frameStorage(opt) });
+    var plan = try Plan.init(gpa, graph, res, tc, .{ .profile = profile, .specialize = specialize, .frame = frameStorage(profile.opt) });
     defer plan.deinit(gpa);
 
     const entry = plan.entry orelse return .{ .err = .{
@@ -630,10 +631,10 @@ pub fn renderGraphIr(
     graph: *const Graph.Graph,
     res: *const ResolveGraph.GraphResult,
     tc: *const Typecheck.GraphResult,
-    opt: Opt.Config,
+    profile: Profile,
     specialize: bool,
 ) !IrResult {
-    return renderIr(gpa, graph, res, tc, .{ .opt = opt, .specialize = specialize, .frame = frameStorage(opt) });
+    return renderIr(gpa, graph, res, tc, .{ .profile = profile, .specialize = specialize, .frame = frameStorage(profile.opt) });
 }
 
 /// `renderGraphIr` with frame storage chosen apart from the opt passes, which lets a test
@@ -720,8 +721,8 @@ const Checked = struct {
         gpa.destroy(self);
     }
 
-    fn plan(self: *const Checked, gpa: std.mem.Allocator, opt: Opt.Config) !Plan {
-        return Plan.init(gpa, &self.g, &self.res, &self.tc, .{ .opt = opt, .frame = frameStorage(opt) });
+    fn plan(self: *const Checked, gpa: std.mem.Allocator, profile: Profile) !Plan {
+        return Plan.init(gpa, &self.g, &self.res, &self.tc, .{ .profile = profile, .frame = frameStorage(profile.opt) });
     }
 };
 
@@ -749,7 +750,7 @@ test "the plan lists every unit class in canonical order, each under its own sym
     const gpa = testing.allocator;
     const ck = try Checked.create(gpa, every_class_src);
     defer ck.destroy(gpa);
-    var plan = try ck.plan(gpa, .O0);
+    var plan = try ck.plan(gpa, .debug);
     defer plan.deinit(gpa);
 
     const want = [_]struct { std.meta.Tag(Unit), []const u8 }{
@@ -780,10 +781,10 @@ test "--emit ir renders exactly the plan's units, in plan order" {
     const gpa = testing.allocator;
     const ck = try Checked.create(gpa, every_class_src);
     defer ck.destroy(gpa);
-    for ([_]Opt.Config{ .O0, .O1 }) |opt| {
-        var plan = try ck.plan(gpa, opt);
+    for ([_]Profile{ .debug, .release }) |profile| {
+        var plan = try ck.plan(gpa, profile);
         defer plan.deinit(gpa);
-        const out = try renderGraphIr(gpa, &ck.g, &ck.res, &ck.tc, opt, true);
+        const out = try renderGraphIr(gpa, &ck.g, &ck.res, &ck.tc, profile, true);
         const ir = out.ok;
         defer gpa.free(ir);
         var at: usize = 0;
@@ -801,7 +802,7 @@ test "each unit reads its owner's tables: an instance its own, a lambda its owne
     const gpa = testing.allocator;
     const ck = try Checked.create(gpa, every_class_src);
     defer ck.destroy(gpa);
-    var plan = try ck.plan(gpa, .O1);
+    var plan = try ck.plan(gpa, .release);
     defer plan.deinit(gpa);
     const tc = &ck.tc;
     for (plan.units, 0..) |u, i| {
@@ -848,8 +849,8 @@ test "the build lowers and links every unit of the plan" {
     defer threaded.deinit();
     const ck = try Checked.create(gpa, every_class_src);
     defer ck.destroy(gpa);
-    for ([_]Opt.Config{ .O0, .O1 }) |opt| {
-        var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, "aarch64-macos", &ck.g, &ck.res, &ck.tc, .verify, opt, true, null, null, 1);
+    for ([_]Profile{ .debug, .release }) |profile| {
+        var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, "aarch64-macos", &ck.g, &ck.res, &ck.tc, .verify, profile, true, null, null, 1);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .ok);
         try testing.expectEqual(@as(usize, 8), out.ok.codegen_compiled);
@@ -911,7 +912,7 @@ test "every call a body makes relocates to a symbol its key folds" {
         \\
     );
     defer ck.destroy(gpa);
-    var plan = try ck.plan(gpa, .O0);
+    var plan = try ck.plan(gpa, .debug);
     defer plan.deinit(gpa);
     var unfolded: std.ArrayList([]const u8) = .empty;
     defer unfolded.deinit(gpa);
@@ -943,7 +944,7 @@ test "the calls a for-in and a try_into make are folded into the body's key (#35
         \\
     );
     defer ck.destroy(gpa);
-    var plan = try ck.plan(gpa, .O0);
+    var plan = try ck.plan(gpa, .debug);
     defer plan.deinit(gpa);
     var unfolded: std.ArrayList([]const u8) = .empty;
     defer unfolded.deinit(gpa);
@@ -956,7 +957,7 @@ test "--verify names a reloc target the unit's key does not fold" {
     const gpa = testing.allocator;
     const ck = try Checked.create(gpa, every_class_src);
     defer ck.destroy(gpa);
-    var plan = try ck.plan(gpa, .O0);
+    var plan = try ck.plan(gpa, .debug);
     defer plan.deinit(gpa);
     // `main` (unit 1) calls `main.add` through `apply`'s spec unit and names it as a value.
     const fr = plan.frozenFor(1);

@@ -17,6 +17,7 @@ pub const DriverCodegen = @import("driver/Codegen.zig");
 pub const Check = @import("driver/Check.zig");
 pub const Decide = @import("driver/Decide.zig");
 pub const Libraries = @import("driver/Libraries.zig");
+pub const Profile = @import("driver/Profile.zig");
 pub const DiagnosticSink = @import("diagnostics/Sink.zig");
 pub const nearmiss = @import("diagnostics/nearmiss.zig");
 pub const diagnostics = struct {

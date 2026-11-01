@@ -28,6 +28,7 @@ const AstWalk = @import("AstWalk.zig");
 const Link = @import("../link/Link.zig");
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
+const Profile = @import("../driver/Profile.zig");
 const lower = @import("../lower.zig");
 const DeriveEmit = @import("../lower/derive_emit.zig");
 const AdapterEmit = @import("../lower/adapter_emit.zig");
@@ -459,8 +460,8 @@ pub const Frozen = struct {
     in: lower.Inputs,
     body: Body,
     sym: Link.SymName,
-    /// Mixed into the codegen key, so toggling `-O` lands on a different entry.
-    opt: Opt.Config,
+    /// Mixed into the codegen key, so another profile or `-O` lands on a different entry.
+    profile: Profile,
     /// An instance's own concrete type-args and resolved `[T has P]` bounds, folded into its
     /// key so two instances of one template never share an entry and toggling a sibling
     /// conformance invalidates exactly the dependent instances. Empty for every other unit.
@@ -539,8 +540,8 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
     const in = fr.in;
     const before = diags.items.len;
     var irf = switch (fr.body) {
-        .source => |s| return lowerFitted(gpa, in, fr.opt, .{ .source = .{ .decl = s.decl, .is_entry = s.is_entry } }, fr.sym, diags, stats),
-        .lambda => |ui| return lowerFitted(gpa, in, fr.opt, .{ .lambda = ui }, fr.sym, diags, stats),
+        .source => |s| return lowerFitted(gpa, in, fr.profile.opt, .{ .source = .{ .decl = s.decl, .is_entry = s.is_entry } }, fr.sym, diags, stats),
+        .lambda => |ui| return lowerFitted(gpa, in, fr.profile.opt, .{ .lambda = ui }, fr.sym, diags, stats),
         .derive => |d| try DeriveEmit.lower(gpa, in, d.*, fr.sym, diags),
         .erased => |u| try DeriveEmit.lowerErased(gpa, in, u.ty, u.kind, fr.sym, diags),
         .adapter => |a| try AdapterEmit.lowerAdapter(gpa, in, a.*, fr.sym, diags),
@@ -548,7 +549,7 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
     errdefer irf.deinit(gpa);
     stats.* = .{};
     if (diags.items.len != before) return irf;
-    try Opt.run(gpa, &irf, fr.opt, stats);
+    try Opt.run(gpa, &irf, fr.profile.opt, stats);
     return irf;
 }
 
@@ -641,7 +642,7 @@ fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl
     }
     try AstWalk.walkConformances(gpa, in, fr.conformances, &confs);
     const fp = Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts);
-    return Key.codegen(target, fp, fr.opt, fr.sym);
+    return Key.codegen(target, fp, fr.profile, fr.sym);
 }
 
 /// [C2] checked: the first symbol a keyed unit's code `fc` relocates to that its key does
@@ -698,7 +699,7 @@ fn deriveKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, d: *
     try AstWalk.appendTouched(gpa, fr.in.layouts, fr.in.enum_layouts, d.conform_ty, &conform_list);
     const conform: Fingerprint.TouchedType = if (conform_list.items.len > 0) conform_list.items[0] else .{ .kind = d.conform_ty.kind };
     const fp = Fingerprint.deriveFingerprint(d.protocol_name, d.kind, conform, d.field_witnesses);
-    return Key.codegen(target, fp, fr.opt, fr.sym);
+    return Key.codegen(target, fp, fr.profile, fr.sym);
 }
 
 /// The cache/verify/fresh-lower state machine of a keyed unit, honoring `self.mode`:

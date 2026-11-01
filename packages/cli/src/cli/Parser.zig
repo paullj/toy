@@ -525,7 +525,7 @@ fn sweepRequiredAndRelations(
                 inline for (cmd.options, 0..) |other, oj| {
                     if (comptime optRefMatches(other, ref)) {
                         if (seen[oj])
-                            try sink.add(gpa, .{ .kind = .conflict, .arg = optName(o), .where = ref });
+                            try sink.add(gpa, .{ .kind = .conflict, .arg = optFlagName(o), .where = optFlagName(other) });
                     }
                 }
             }
@@ -533,7 +533,7 @@ fn sweepRequiredAndRelations(
                 inline for (cmd.options, 0..) |other, oj| {
                     if (comptime optRefMatches(other, ref)) {
                         if (!seen[oj])
-                            try sink.add(gpa, .{ .kind = .unmet_requirement, .arg = optName(o), .where = ref });
+                            try sink.add(gpa, .{ .kind = .unmet_requirement, .arg = optFlagName(o), .where = optFlagName(other) });
                     }
                 }
             }
@@ -1194,8 +1194,16 @@ test "conflict and unmet_requirement reported from the sweep" {
     var saw_conflict = false;
     var saw_unmet = false;
     for (sink.items()) |e| {
-        if (e.kind == .conflict) saw_conflict = true;
-        if (e.kind == .unmet_requirement) saw_unmet = true;
+        if (e.kind == .conflict) {
+            saw_conflict = true;
+            try testing.expectEqualStrings("--a", e.arg);
+            try testing.expectEqualStrings("--b", e.where);
+        }
+        if (e.kind == .unmet_requirement) {
+            saw_unmet = true;
+            try testing.expectEqualStrings("--x", e.arg);
+            try testing.expectEqualStrings("--y", e.where);
+        }
     }
     try testing.expect(saw_conflict);
     try testing.expect(saw_unmet);

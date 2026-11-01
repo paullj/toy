@@ -4878,7 +4878,7 @@ fn renderUnit(gpa: std.mem.Allocator, src: []const u8, name: []const u8, o: Unit
     defer res.deinit(gpa);
     var tc = try TypecheckGraph.checkGraph(gpa, &g, &res, null, 0);
     defer tc.deinit(gpa);
-    const ir = switch (try Codegen.renderIr(gpa, &g, &res, &tc, .{ .opt = .O0, .specialize = o.specialize, .frame = o.frame })) {
+    const ir = switch (try Codegen.renderIr(gpa, &g, &res, &tc, .{ .profile = .debug, .specialize = o.specialize, .frame = o.frame })) {
         .ok => |text| text,
         .err => |e| {
             std.debug.print("lowering failed: {s}\n", .{e.message});
