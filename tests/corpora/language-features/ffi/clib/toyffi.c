@@ -62,7 +62,7 @@ char *toyffi_shout(const char *s) {
     return out;
 }
 
-// f32 rides the s registers; past v7 Apple packs each at 4 bytes.
+// float32 rides the s registers; past v7 Apple packs each at 4 bytes.
 float toyffi_scalef(float x, float k) { return x * k; }
 
 double toyffi_widenf(float x) { return x; }
@@ -193,7 +193,7 @@ long toyffi_each(long n, long (*cb)(long)) {
     return s;
 }
 
-// Narrow ints, a bool and an f32 arrive as C passes them: only the low bits are defined.
+// Narrow ints, a bool and a float32 arrive as C passes them: only the low bits are defined.
 long toyffi_cb_narrow(int32_t (*cb)(int8_t, uint16_t, int32_t, bool, float)) {
     return cb(-3, 65535, -100000, true, 1.5f);
 }

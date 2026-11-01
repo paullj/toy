@@ -813,8 +813,8 @@ pub fn lowerExpr(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Operand
         },
         .literal_float => {
             const f = Literal.floatValue(b.in.tokens[n.main_token].text(b.in.source)) orelse 0.0;
-            // An f32 constant holds the f32 value, so codegen materializes its bits exactly.
-            const v: f64 = if (ty.isF32()) @as(f32, @floatCast(f)) else f;
+            // A float32 constant holds the float32 value, so codegen materializes its bits exactly.
+            const v: f64 = if (ty.isFloat32()) @as(f32, @floatCast(f)) else f;
             return .{ .value = try b.emit(.{ .fconst = v }, ty) };
         },
         .literal_bool => {
@@ -2944,7 +2944,7 @@ fn lowerConvMethod(b: *Builder, node_idx: Ast.Index, cv: ConvCall) error{OutOfMe
         }
         const into_ty = b.in.nodes.typeOf(node_idx);
         if (into_ty.kind == .float) {
-            // int -> float: lossless single scvtf; between float and f32 one fcvt. No
+            // int -> float: lossless single scvtf; between float and float32 one fcvt. No
             // Result, no witness, no slot.
             const v = operandValue(try lowerExpr(b, cv.recv));
             if (recv_ty.kind == .float) return .{ .value = try b.emit(.{ .fcvt = v }, into_ty) };
@@ -2965,8 +2965,8 @@ fn lowerConvMethod(b: *Builder, node_idx: Ast.Index, cv: ConvCall) error{OutOfMe
 
     // try_into: build a `Result[T, ConvErr]` into a fresh slot.
     const v0 = if (recv_is_char) try loadCharCodepoint(b, cv.recv) else operandValue(try lowerExpr(b, cv.recv));
-    // The float -> int witness takes a float; an f32 widens to one exactly first.
-    const v = if (recv_ty.isF32()) try b.emit(.{ .fcvt = v0 }, Typecheck.Type.float) else v0;
+    // The float -> int witness takes a float; a float32 widens to one exactly first.
+    const v = if (recv_ty.isFloat32()) try b.emit(.{ .fcvt = v0 }, Typecheck.Type.float) else v0;
     const call_ty = b.in.nodes.typeOf(node_idx);
     const e = b.in.enum_layouts[call_ty.enum_id];
     const dst_T = Typecheck.somePayload(e);

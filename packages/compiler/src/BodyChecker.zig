@@ -1328,8 +1328,8 @@ pub const BodyChecker = struct {
         const ty: Type = switch (n.tag) {
             .literal_number => try bc.typeNumericLiteral(n.main_token, bc.literalExpected(n.main_token)),
             // A float literal has no precision of its own until a place gives it one, as an
-            // integer literal has no width: `x: f32 = 0.1` rounds it to single precision.
-            .literal_float => if (bc.body.expected) |e| (if (e.ty.isF32()) Type.float32 else Type.float) else Type.float,
+            // integer literal has no width: `x: float32 = 0.1` rounds it to single precision.
+            .literal_float => if (bc.body.expected) |e| (if (e.ty.isFloat32()) Type.float32 else Type.float) else Type.float,
             .literal_bool => Type.bool,
             .literal_string => Type.str,
             .literal_char => try bc.typeCharLiteral(n.main_token),
@@ -1400,7 +1400,7 @@ pub const BodyChecker = struct {
                 // A constant operand pair (`c: int8 = 1 + 2`, a sibling's `b + (1 + 2)`)
                 // has no typed operand to take a width from, so both take the expected
                 // width; else both stay platform `int` and the narrow bind is rejected.
-                if (saved) |e| if ((e.ty.isInteger() and bc.isConstInt(node_idx)) or (e.ty.isF32() and bc.isConstFloat(node_idx))) {
+                if (saved) |e| if ((e.ty.isInteger() and bc.isConstInt(node_idx)) or (e.ty.isFloat32() and bc.isConstFloat(node_idx))) {
                     const lt = try bc.typeOfExpected(n.lhs, e.ty);
                     const rt = try bc.typeOfExpected(n.rhs, e.ty);
                     if (lt.kind == .invalid or rt.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
@@ -4505,7 +4505,7 @@ pub const BodyChecker = struct {
         if (varargTypeOk(ty)) return;
         const hint: []const u8 = if (ty.isInteger())
             "; widen it first, as in 'w: int = n.into()'"
-        else if (ty.isF32())
+        else if (ty.isFloat32())
             "; convert it first, as in 'd: float = x.into()'"
         else if (ty.kind == .bool)
             "; pass an int, as in 'if b { 1 } else { 0 }'"
@@ -4519,7 +4519,7 @@ pub const BodyChecker = struct {
     fn varargTypeOk(ty: Type) bool {
         return switch (ty.kind) {
             .int => ty.intBits() == 64,
-            .float => !ty.isF32(),
+            .float => !ty.isFloat32(),
             .cstr, .invalid, .never => true,
             else => ty.isRawPtr(),
         };
@@ -5391,13 +5391,13 @@ pub const BodyChecker = struct {
     /// The type of binary operand `operand` (typed `t` with no expected type): a constant
     /// integer operand beside an operand of integer type `sibling` takes that width.
     fn adoptConstWidth(bc: *BodyChecker, operand: Ast.Index, t: Type, sibling: Type) error{OutOfMemory}!Type {
-        if (sibling.isF32() and bc.isConstFloat(operand)) return bc.typeOfExpected(operand, sibling);
+        if (sibling.isFloat32() and bc.isConstFloat(operand)) return bc.typeOfExpected(operand, sibling);
         if (!bc.isConstInt(operand) or !sibling.isInteger()) return t;
         return bc.typeOfExpected(operand, sibling);
     }
 
     /// Whether `node` is a float constant built from literals and the dotted operators,
-    /// which takes `f32` beside an `f32` sibling as an integer constant takes a width.
+    /// which takes `float32` beside a `float32` sibling as an integer constant takes a width.
     fn isConstFloat(bc: *const BodyChecker, node: Ast.Index) bool {
         if (node == Ast.none) return false;
         const n = bc.tree.nodes[node.int()];

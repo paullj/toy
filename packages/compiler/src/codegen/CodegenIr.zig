@@ -179,12 +179,12 @@ const Gen = struct {
     fn loadFpValue(g: *Gen, d: u32, vid: Ir.ValueId) error{OutOfMemory}!void {
         try g.spMem(.ldr_fp, d, g.valueOff(vid));
     }
-    /// Store D-register `d` into a float SSA value's cell. An f32 cell holds its bits
+    /// Store D-register `d` into a float SSA value's cell. A float32 cell holds its bits
     /// zero-extended, so a 64-bit copy of it (a field store, a C result whose upper half
     /// the callee left unspecified) stays canonical.
     fn storeFpValue(g: *Gen, d: u32, vid: Ir.ValueId) error{OutOfMemory}!void {
         if (vid == Ir.none_value) return;
-        if (g.func.values[vid].type.isF32()) {
+        if (g.func.values[vid].type.isFloat32()) {
             try g.emit(Aarch64.fmovWS(S2, d));
             return g.spMem(.str, S2, g.valueOff(vid));
         }
@@ -531,7 +531,7 @@ fn marshalParams(g: *Gen) error{OutOfMemory}!void {
 
 /// Marshal a C callback adapter's params, which C passed in its convention, into their
 /// slot cells as toy keeps them: a narrow int or bool, whose upper bits C leaves
-/// undefined, is extended, an f32 kept zero-extended, a stack argument read at its C size,
+/// undefined, is extended, a float32 kept zero-extended, a stack argument read at its C size,
 /// and an extern struct unpacked from its C image (in registers, on the stack or behind a
 /// pointer) into toy layout.
 fn marshalCParams(g: *Gen) error{OutOfMemory}!void {
@@ -575,7 +575,7 @@ fn marshalCParams(g: *Gen) error{OutOfMemory}!void {
                 }
             },
             .fpr => |v| {
-                if (ty.isF32()) {
+                if (ty.isFloat32()) {
                     try g.emit(Aarch64.fmovWS(S2, v));
                     try g.spMem(.str, S2, off);
                 } else try g.spMem(.str_fp, v, off);
@@ -661,8 +661,8 @@ fn genFloatArith(g: *Gen, result: Ir.ValueId, b: Ir.Bin, comptime kind: FloatAri
         .fmul => Aarch64.fmul(D0, D0, D1),
         .fdiv => Aarch64.fdiv(D0, D0, D1),
     };
-    try g.emit(if (g.func.values[result].type.isF32()) Aarch64.fpSingle(word) else word);
-    // No normalizeWidth: an f32 op writes an s register, which zeroes the upper bits.
+    try g.emit(if (g.func.values[result].type.isFloat32()) Aarch64.fpSingle(word) else word);
+    // No normalizeWidth: a float32 op writes an s register, which zeroes the upper bits.
     try g.storeFpValue(D0, result);
 }
 
@@ -758,8 +758,8 @@ fn genInstr(g: *Gen, ins: Ir.Instr) error{OutOfMemory}!void {
             try storeNormalized(g, ins.result, S0);
         },
         .fconst => |f| {
-            // The raw bit pattern into a GPR (an f32's zero-extended), then its cell.
-            const bits: i64 = if (g.func.values[ins.result].type.isF32()) @as(u32, @bitCast(@as(f32, @floatCast(f)))) else @bitCast(f);
+            // The raw bit pattern into a GPR (a float32's zero-extended), then its cell.
+            const bits: i64 = if (g.func.values[ins.result].type.isFloat32()) @as(u32, @bitCast(@as(f32, @floatCast(f)))) else @bitCast(f);
             try g.emitImm64(S0, bits);
             try g.storeValue(S0, ins.result);
         },
@@ -770,24 +770,24 @@ fn genInstr(g: *Gen, ins: Ir.Instr) error{OutOfMemory}!void {
         .fcmp => |c| {
             try g.loadFpValue(D0, c.lhs);
             try g.loadFpValue(D1, c.rhs);
-            try g.emit(if (g.func.values[c.lhs].type.isF32()) Aarch64.fpSingle(Aarch64.fcmp(D0, D1)) else Aarch64.fcmp(D0, D1));
+            try g.emit(if (g.func.values[c.lhs].type.isFloat32()) Aarch64.fpSingle(Aarch64.fcmp(D0, D1)) else Aarch64.fcmp(D0, D1));
             try g.emit(Aarch64.cset(S0, fcondToAarch64(c.cc))); // bool → GPR cell
             try g.storeValue(S0, ins.result);
         },
         .scvtf => |v| {
             try g.loadValue(S0, v); // source int in a GPR (width-canonicalized)
-            try g.emit(if (g.func.values[ins.result].type.isF32()) Aarch64.scvtfS(D0, S0) else Aarch64.scvtf(D0, S0));
+            try g.emit(if (g.func.values[ins.result].type.isFloat32()) Aarch64.scvtfS(D0, S0) else Aarch64.scvtf(D0, S0));
             try g.storeFpValue(D0, ins.result);
         },
         .fcvtzs => |v| {
             try g.loadFpValue(D0, v); // source float in a V reg
-            try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtzsS(S0, D0) else Aarch64.fcvtzs(S0, D0));
+            try g.emit(if (g.func.values[v].type.isFloat32()) Aarch64.fcvtzsS(S0, D0) else Aarch64.fcvtzs(S0, D0));
             try g.storeValue(S0, ins.result); // plat-width int result; no normalize needed
         },
         .overflow => |o| try genOverflow(g, ins.result, o),
         .fcvt => |v| {
             try g.loadFpValue(D0, v);
-            try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtDS(D0, D0) else Aarch64.fcvtSD(D0, D0));
+            try g.emit(if (g.func.values[v].type.isFloat32()) Aarch64.fcvtDS(D0, D0) else Aarch64.fcvtSD(D0, D0));
             try g.storeFpValue(D0, ins.result);
         },
     }
@@ -1156,7 +1156,7 @@ fn storeCAt(g: *Gen, rt: u32, base: u32, off: u32, bytes: u32) error{OutOfMemory
 }
 
 /// Load the C field of type `ty` at `[base, #off]` into `rt` as toy keeps it: a narrow
-/// signed int sign-extended, an unsigned one, a bool or an f32's bits zero-extended.
+/// signed int sign-extended, an unsigned one, a bool or a float32's bits zero-extended.
 fn loadCAt(g: *Gen, rt: u32, base: u32, off: u32, ty: Type) error{OutOfMemory}!void {
     const bytes = Abi.cScalarSize(ty);
     if (bytes == 8) return memAt(g, .ldr, rt, base, off);

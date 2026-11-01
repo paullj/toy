@@ -214,8 +214,8 @@ pub const Op = union(enum) {
     /// f64 value → signed i64 value, truncating toward zero (FCVTZS). Pure. Emitted ONLY inside the
     /// range-guarded float→int witness, so the hardware saturation is never observable.
     fcvtzs: ValueId,
-    /// Between `float` and `f32` (FCVT), the direction from the operand and result types:
-    /// to `float` exact, to `f32` rounding to nearest. Pure.
+    /// Between `float` and `float32` (FCVT), the direction from the operand and result types:
+    /// to `float` exact, to `float32` rounding to nearest. Pure.
     fcvt: ValueId,
 
     call_indirect: CallIndirect,

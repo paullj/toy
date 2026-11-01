@@ -145,7 +145,7 @@ pub fn lessThan(_: void, a: Derive, b: Derive) bool {
 pub fn writeKey(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), protocol_id: u32, kind: Kind, conform_ty: Type) !void {
     // Derive recipes only ever target struct/enum nominal types (and the float->int
     // witness, anchored on `float`); the key deliberately omits the descriptor byte, which
-    // is only sound because no `.int` or `f32` conformer reaches here. Pin that so the
+    // is only sound because no `.int` or `float32` conformer reaches here. Pin that so the
     // omission is principled, not an accidental drop.
     std.debug.assert(!Type.carriesIntDesc(conform_ty.kind) or Type.eql(conform_ty, Type.float));
     var w: [4]u8 = undefined;

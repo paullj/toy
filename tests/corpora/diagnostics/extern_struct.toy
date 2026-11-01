@@ -1,10 +1,10 @@
 struct Plain { x: int }
 
-extern struct Point { x: f32, y: f32 }
+extern struct Point { x: float32, y: float32 }
 
 extern struct Bad {
-    s: str,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    p: Plain,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    s: str,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, float32, float, bool, rawptr, cstr, or an extern struct
+    p: Plain,  #~ ERROR [T0037] an extern struct field must be a C type: an int of any width, float32, float, bool, rawptr, cstr, or an extern struct
     q: Point,
 }
 

@@ -2,7 +2,7 @@
 
 A program calls a C function by declaring it as an `extern` and calling it inside
 `unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` (`cstr.toy` and `cstr_libc.toy`
-for C strings, `f32.toy`, `structs.toy`, `struct_ptr.toy` and `struct_libc.toy` for `f32`
+for C strings, `float32.toy`, `structs.toy`, `struct_ptr.toy` and `struct_libc.toy` for `float32`
 and C structs, `callback.toy`, `callback_qsort.toy` and `callback_panic.toy` for
 callbacks, `varargs.toy` for varargs) and
 `tests/corpora/language-features/modules/ffi_extern/` and `ffi_dylib/`.
@@ -42,7 +42,7 @@ fn main() -> int {
 ## Types
 
 An extern's params and return use C ABI types: an integer of any width, `float` (C
-`double`), `f32` (C `float`), `bool`, `rawptr` (C `void*`), `cstr` (C `const char*`, see
+`double`), `float32` (C `float`), `bool`, `rawptr` (C `void*`), `cstr` (C `const char*`, see
 [C strings](#c-strings)) and an extern struct (see [Structs](#structs)). A param may also
 be a function type, a C function pointer (see [Callbacks](#callbacks)). Omitting
 `-> R` is a `void` return, and `-> never` is a C function that does not return (`exit`,
@@ -50,28 +50,28 @@ be a function type, a C function pointer (see [Callbacks](#callbacks)). Omitting
 declared, so its calls add no second error.
 
 Calls follow Apple's arm64 C convention: a narrow integer or `bool` returned by C is
-widened to its toy width, a `float` or `f32` goes in a V register (`d` or `s`), and
+widened to its toy width, a `float` or `float32` goes in a V register (`d` or `s`), and
 arguments that go on the stack are packed at their own size and alignment, as C
 expects.
 
-### f32
+### float32
 
-`f32` is a single-precision float, a type of its own beside `float`; it works in toy code
+`float32` is a single-precision float, a type of its own beside `float`; it works in toy code
 as well as at the C boundary.
 
-- A float literal is an `f32` where one is expected (`x: f32 = 0.1`, an `f32` param, or
-  beside an `f32` operand: `x *. 2.0`), rounded to the nearest `f32`.
-- The dotted operators (`+. -. *. /.`, `<. >. <=. >=.`) and `==`/`!=` take two `f32`s.
-  An `f32` and a `float` do not mix (T0044); convert one.
-- `x.into()` converts between `f32` and `float`: to `float` exactly, to `f32` rounded
-  to nearest (a value past the `f32` range becomes `inf`, as in C). An integer converts
-  to `f32` with `into` as it does to `float`, and an `f32` to an `int` with `try_into`.
-- With std/float (which std/io brings), an `f32` prints the fewest digits that read back
-  as the same `f32`: `0.1`, not `0.10000000149011612`.
+- A float literal is a `float32` where one is expected (`x: float32 = 0.1`, a `float32` param, or
+  beside a `float32` operand: `x *. 2.0`), rounded to the nearest `float32`.
+- The dotted operators (`+. -. *. /.`, `<. >. <=. >=.`) and `==`/`!=` take two `float32`s.
+  A `float32` and a `float` do not mix (T0044); convert one.
+- `x.into()` converts between `float32` and `float`: to `float` exactly, to `float32` rounded
+  to nearest (a value past the `float32` range becomes `inf`, as in C). An integer converts
+  to `float32` with `into` as it does to `float`, and a `float32` to an `int` with `try_into`.
+- With std/float (which std/io brings), a `float32` prints the fewest digits that read back
+  as the same `float32`: `0.1`, not `0.10000000149011612`.
 
 ## Structs
 
-An `extern struct` is a struct whose fields are C types: integers of any width, `f32`,
+An `extern struct` is a struct whose fields are C types: integers of any width, `float32`,
 `float`, `bool`, `rawptr`, `cstr` and other extern structs. Any other field is T0037. It
 cannot be generic (P0003). In toy code it is an ordinary struct: it is built, copied,
 compared and printed like any other, and can have methods.
@@ -101,7 +101,7 @@ At an extern call it crosses in C layout: each field at its C size and alignment
 struct padded to its largest alignment, as C lays out the same declaration.
 
 - **By value** it follows Apple's arm64 convention: a struct of one to four fields that
-  are all `f32` or all `float` (nested structs counted field by field) goes in V
+  are all `float32` or all `float` (nested structs counted field by field) goes in V
   registers; any other struct of up to 16 bytes in one or two X registers; a larger one
   as a pointer to a copy the callee may change. A struct result comes back the same way,
   a large one through the buffer the caller points `x8` at. A struct that does not fit in
@@ -226,7 +226,7 @@ C APIs hand back.
 
 **How it is called.** The compiler gives each such function a small adapter that C calls
 in its own convention, as an extern call passes arguments: a narrow integer or `bool`
-arrives with only its low bits defined and is widened, an `f32` arrives in an `s`
+arrives with only its low bits defined and is widened, a `float32` arrives in an `s`
 register, stack arguments are packed at their C size, and an extern struct arrives and
 returns in C layout (V registers for an HFA, X registers up to 16 bytes, else through a
 pointer, `x8` for a result). The adapter then calls the toy function. The pointer is the
@@ -278,7 +278,7 @@ fn main() -> int {
   args. Fewer args than named params is T0039.
 - Each extra arg must be a type C has already promoted: `int`, `int64` or `uint64`, `float`
   (a C `double`), `cstr` or `rawptr`. Anything else is T0081 at the arg: a narrower int,
-  `bool`, `f32`, `str`, a struct. Widen first, as in `w: int = n.into()` or
+  `bool`, `float32`, `str`, a struct. Widen first, as in `w: int = n.into()` or
   `d: float = x.into()`, and pass a `str` as `s.to_cstr()`.
 - The extra args have no expected type, so an integer literal is an `int` and a float
   literal a `float`, which is what `%d`, `%lld`, `%f` and `%g` read.

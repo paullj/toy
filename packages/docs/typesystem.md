@@ -77,19 +77,21 @@ two `int8` 100s add to -56 in release. Unary `-` on an unsigned value is `0 - u`
 (**T0044** otherwise), and a constant built with them folds wrapping, so
 `c: int8 = 100 +% 100` is -56.
 
-## Floats: `float` and `f32`
+## Floats: `float` and `float32`
 
-`float` is a 64-bit IEEE double and `f32` a single, a distinct type that shares every
-float rule (a `.float` kind whose width byte is `w32`). A float literal is a `float`
-unless it is expected to be an `f32` (`x: f32 = 0.1`, an `f32` param or field) or sits
-beside an `f32` operand (`x *. 2.0`); it is then rounded to the nearest `f32`. The
-dotted operators and `==`/`!=` take two operands of the same float type: an `f32` and a
+`float` is a 64-bit IEEE double and `float32` a single, a distinct type that shares every
+float rule (a `.float` kind whose width byte is `w32`). There is no `float64`: `float` is
+already the 64-bit type, and a `float64` would be a distinct width type the way `int64`
+is distinct from `int`, not another spelling of `float`. A float literal is a `float`
+unless it is expected to be a `float32` (`x: float32 = 0.1`, a `float32` param or field) or sits
+beside a `float32` operand (`x *. 2.0`); it is then rounded to the nearest `float32`. The
+dotted operators and `==`/`!=` take two operands of the same float type: a `float32` and a
 `float` do not mix (**T0044**), so one is converted with `into` (to `float` exactly, to
-`f32` rounded to nearest). An integer converts to either with `into`, and either to an
+`float32` rounded to nearest). An integer converts to either with `into`, and either to an
 integer with `try_into`. The target of `into` is the expected type; as a binary operand
 (`x.into() + n`, `-x.into() < n`, `n += x.into()`) it is the other operand's type, or,
 beside a literal, the operator's expected type. With no target at all it is **T0016**.
-See `ffi.md` for `f32` at the C boundary.
+See `ffi.md` for `float32` at the C boundary.
 
 ## Bidirectional checking: synth / check
 
@@ -1068,10 +1070,10 @@ from the same value on its own:
   name it, so it has no witness and the derive passes a fn field straight to this arm.
   `f.to_string()` is `"<fn>"`.
 - `char` → its UTF-8 encoding (the prelude `char` struct overrides the structural walk).
-- `float`, `f32` → no builtin rendering: std/float's `impl float has Display` (and its
-  `f32` impl) is the witness, called like a struct's, so a float prints only when
-  std/float is in the program (std/io imports it). An `f32` prints the fewest digits
-  that read back as the same `f32`. See `std.md` for the format.
+- `float`, `float32` → no builtin rendering: std/float's `impl float has Display` (and its
+  `float32` impl) is the witness, called like a struct's, so a float prints only when
+  std/float is in the program (std/io imports it). A `float32` prints the fewest digits
+  that read back as the same `float32`. See `std.md` for the format.
 
 **Structural derive.** `Display` for a struct or enum is synthesized on demand at a
 `to_string` use (which `io.print` makes), through the same source-less
@@ -1115,7 +1117,7 @@ never a fallback rendering (no addresses):
 
 | type | today |
 |------|-------|
-| `float` or `f32` without std/float | its `Display` is an impl in std/float: a `[T has Display]` bound is **T0023** naming std/float, `(1.5).to_string()` is T0018 |
+| `float` or `float32` without std/float | its `Display` is an impl in std/float: a `[T has Display]` bound is **T0023** naming std/float, `(1.5).to_string()` is T0018 |
 | a struct or enum holding a `float` field without std/float | the derive is blocked: **T0023** at an `io.print`, **T0031** at a `to_string` naming the field |
 | `rawptr`, `cstr` | no `Display`: a `rawptr` exists only inside core, and a `cstr` prints through `c.to_str()` (std/ffi) |
 | a generic `T` without a `Display` bound | checked per instance: `fn f[T has Eq](x: T) { io.print(x) }` accepts `f(2)` and `f(1.5)` (std/io brings std/float); an instance whose type does not conform is **T0023** at the call |

@@ -32,7 +32,7 @@ pub const builtin_names = std.StaticStringMap(Type).initComptime(.{
     .{ "float", Type.float },
     .{ "rawptr", Type.rawptr },
     .{ "cstr", Type.cstr },
-    .{ "f32", Type.float32 },
+    .{ "float32", Type.float32 },
 });
 
 /// The type kind. `invalid` is the poison/error type: it absorbs further errors
@@ -78,8 +78,8 @@ pub const Kind = enum(u8) { invalid, unit, int, bool, str, never, @"struct", @"e
 pub const IntWidth = enum(u3) { plat, w8, w16, w32, w64 };
 
 /// The sign+width descriptor an `.int`-kind `Type` carries in its otherwise-spare
-/// pad byte. A `.float` reuses its width: `w32` is `f32`, the default is the 64-bit
-/// `float`, so `f32` shares every float path and stays a distinct type.
+/// pad byte. A `.float` reuses its width: `w32` is `float32`, the default is the 64-bit
+/// `float`, so `float32` shares every float path and stays a distinct type.
 ///
 /// Defaults to signed platform `int`, so `Type.int` (`.{ .kind = .int }`)
 /// stays byte-identical to before this field existed. `packed struct(u8)` keeps
@@ -251,14 +251,14 @@ pub const Type = struct {
         return t.kind == .float;
     }
 
-    /// The single-precision `f32` (a `.float` of width `w32`).
-    pub fn isF32(t: Type) bool {
+    /// The single-precision `float32` (a `.float` of width `w32`).
+    pub fn isFloat32(t: Type) bool {
         return t.kind == .float and t.int_desc.width == .w32;
     }
 
     /// The source spelling of a float type.
     pub fn floatName(t: Type) []const u8 {
-        return if (t.isF32()) "f32" else "float";
+        return if (t.isFloat32()) "float32" else "float";
     }
 
     pub fn isNumeric(t: Type) bool {
@@ -506,13 +506,15 @@ test "algebra: cstr is its own scalar kind, spelled cstr, not a rawptr" {
     try testing.expectEqual(IdField.none, Type.idField(.cstr));
 }
 
-test "algebra: f32 is a float of its own, spelled f32" {
-    try testing.expect(Type.eql(builtin_names.get("f32").?, Type.float32));
-    try testing.expect(Type.float32.isFloat() and Type.float32.isF32());
-    try testing.expect(!Type.float.isF32());
+test "algebra: float32 is a float of its own, spelled float32" {
+    try testing.expect(Type.eql(builtin_names.get("float32").?, Type.float32));
+    try testing.expect(builtin_names.get("f32") == null);
+    try testing.expect(builtin_names.get("float64") == null);
+    try testing.expect(Type.float32.isFloat() and Type.float32.isFloat32());
+    try testing.expect(!Type.float.isFloat32());
     try testing.expect(!Type.assignable(Type.float, Type.float32));
     try testing.expect(!Type.assignable(Type.float32, Type.float));
-    try testing.expectEqualStrings("f32", Type.float32.floatName());
+    try testing.expectEqualStrings("float32", Type.float32.floatName());
     try testing.expectEqualStrings("float", Type.float.floatName());
     try testing.expect(Type.orderLeaf(Type.float, Type.float32) != .eq);
 }

@@ -196,7 +196,7 @@ pub const ParamLoc = union(enum) {
     fpr: u8,
     /// A C homogeneous floating-point aggregate (an extern struct of up to four floats
     /// or four doubles) in `count` consecutive V-registers from v`first`, one element
-    /// each; `single` when the elements are f32.
+    /// each; `single` when the elements are float32.
     fpr_run: struct { first: u8, count: u8, single: bool },
     stack: struct { nsaa_off: u32, bytes: u32 },
     stack_ptr: u32,
@@ -376,11 +376,11 @@ fn walkAbi(
 pub const Conv = enum { toy, c };
 
 /// The bytes a scalar takes as a C argument on the stack or as a C struct field: a narrow
-/// int its width, a `bool` one byte (C `_Bool`), an `f32` four, everything else 8.
+/// int its width, a `bool` one byte (C `_Bool`), a `float32` four, everything else 8.
 pub fn cScalarSize(ty: Type) u32 {
     return switch (ty.kind) {
         .bool => 1,
-        .float => if (ty.isF32()) 4 else 8,
+        .float => if (ty.isFloat32()) 4 else 8,
         .int => switch (ty.int_desc.width) {
             .w8 => 1,
             .w16 => 2,
@@ -536,7 +536,7 @@ pub fn cFieldOffset(ty: Type, field: usize, layouts: []const Layout) u32 {
     unreachable;
 }
 
-/// A homogeneous floating-point aggregate: `count` (1-4) elements, all f32 (`single`) or
+/// A homogeneous floating-point aggregate: `count` (1-4) elements, all float32 (`single`) or
 /// all float, after nested structs are flattened.
 pub const Hfa = struct { count: u8, single: bool };
 
@@ -553,8 +553,8 @@ fn hfaWalk(ty: Type, layouts: []const Layout, count: *u8, single: *?bool) bool {
         return true;
     }
     if (ty.kind != .float) return false;
-    if (single.*) |s| if (s != ty.isF32()) return false;
-    single.* = ty.isF32();
+    if (single.*) |s| if (s != ty.isFloat32()) return false;
+    single.* = ty.isFloat32();
     count.* += 1;
     return count.* <= 4;
 }

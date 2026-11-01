@@ -64,7 +64,7 @@
 
 ; ---- Identifier roles ----
 ((identifier) @type.builtin
-  (#any-of? @type.builtin "int" "bool" "str" "char" "byte" "rawptr" "cstr" "f32"
+  (#any-of? @type.builtin "int" "bool" "str" "char" "byte" "rawptr" "cstr" "float32"
      "int8" "int16" "int32" "int64" "uint8" "uint16" "uint32" "uint64"))
 
 ((identifier) @variable.builtin

@@ -96,17 +96,17 @@ const structs_src =
     \\
     \\extern struct Small { a: int32, b: int8, c: int16 }
     \\extern struct Big { a: int, b: int, c: int, d: int8 }
-    \\extern struct Vec2f { x: f32, y: f32 }
+    \\extern struct Vec2f { x: float32, y: float32 }
     \\extern struct Rect { min: Vec2f, max: Vec2f }
     \\extern struct Named { name: cstr, data: rawptr, n: uint16 }
     \\
     \\extern "toyffi" {
     \\    fn toyffi_small_make(a: int32, b: int8, c: int16) -> Small
     \\    fn toyffi_big_make(a: int) -> Big
-    \\    fn toyffi_rect_grow(r: Rect, d: f32) -> Rect
+    \\    fn toyffi_rect_grow(r: Rect, d: float32) -> Rect
     \\    fn toyffi_small_fill(mut s: Small, a: int32)
     \\    fn toyffi_named_echo(n: Named) -> Named
-    \\    fn toyffi_scalef(x: f32, k: f32) -> f32
+    \\    fn toyffi_scalef(x: float32, k: float32) -> float32
     \\    fn toyffi_counter_new(start: int) -> rawptr
     \\    fn toyffi_counter_bump(p: rawptr) -> int
     \\}
@@ -128,7 +128,7 @@ const structs_src =
     \\
 ;
 
-test "user dylibs: f32 and extern structs by value and by pointer run at -O0 and -O1" {
+test "user dylibs: float32 and extern structs by value and by pointer run at -O0 and -O1" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -149,7 +149,7 @@ const callbacks_src =
     \\
     \\extern "toyffi" {
     \\    fn toyffi_each(n: int, cb: fn(int) -> int) -> int
-    \\    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, f32) -> int32) -> int
+    \\    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, float32) -> int32) -> int
     \\    fn toyffi_cb_small(cb: fn(Small, int32) -> Small) -> int
     \\    fn toyffi_cb_big(cb: fn(Big) -> Big) -> int
     \\}
