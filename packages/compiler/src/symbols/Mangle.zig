@@ -43,14 +43,15 @@ pub fn lambda(gpa: std.mem.Allocator, owner_sym: []const u8, rank: u32) ![]u8 {
     return std.fmt.allocPrint(gpa, "{s}$l{d}", .{ owner_sym, rank });
 }
 
-/// The fn-value thunk or bound adapter for `target_sym`: `<target>$fnval`, `$bound`,
-/// `$boundbox` or `$boundref` as `kind` says.
+/// The fn-value thunk, bound adapter or C callback for `target_sym`: `<target>$fnval`,
+/// `$bound`, `$boundbox`, `$boundref` or `$cfn` as `kind` says.
 pub fn adapter(gpa: std.mem.Allocator, target_sym: []const u8, kind: Closure.AdapterKind) ![]u8 {
     const suffix = switch (kind) {
         .fn_value, .assoc_value => "$fnval",
         .bound_copy => "$bound",
         .bound_box => "$boundbox",
         .bound_ref => "$boundref",
+        .c_fn, .c_lambda, .c_assoc => "$cfn",
     };
     return std.mem.concat(gpa, u8, &.{ target_sym, suffix });
 }

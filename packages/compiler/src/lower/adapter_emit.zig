@@ -15,7 +15,9 @@ const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
 /// Lower adapter `a` to `sym`: param 0 is the env, the rest are the value signature's
 /// params, forwarded to a direct call of `a.target`. A `.fn_value` or `.assoc_value` thunk
-/// ignores the env; a bound adapter first passes the receiver the env holds as `self`.
+/// ignores the env; a bound adapter first passes the receiver the env holds as `self`. A C
+/// callback has no env param and is called in the C convention; it passes a lambda unit
+/// the null env the checker proved it has.
 pub fn lowerAdapter(
     gpa: std.mem.Allocator,
     in: L.Inputs,
@@ -28,23 +30,28 @@ pub fn lowerAdapter(
 
     var params: std.ArrayList(Ir.SlotId) = .empty;
     errdefer params.deinit(gpa);
-    try params.append(gpa, try b.addSlot(Typecheck.Type.rawptr));
+    const env_n: usize = @intFromBool(!a.kind.isC());
+    if (env_n == 1) try params.append(gpa, try b.addSlot(Typecheck.Type.rawptr));
     for (a.sig.params) |p| try params.append(gpa, try b.addSlot(p));
 
     const blocks = try L.openBodyBlocks(&b, a.sig.ret);
 
-    const self_n: usize = switch (a.kind) {
-        .fn_value, .assoc_value => 0,
-        .bound_copy, .bound_box, .bound_ref => 1,
+    const lead_n: usize = switch (a.kind) {
+        .fn_value, .assoc_value, .c_fn, .c_assoc => 0,
+        .bound_copy, .bound_box, .bound_ref, .c_lambda => 1,
     };
-    const args = try gpa.alloc(Ir.Operand, self_n + a.sig.params.len);
+    const args = try gpa.alloc(Ir.Operand, lead_n + a.sig.params.len);
     errdefer gpa.free(args);
-    if (self_n == 1) args[0] = try receiverOperand(&b, a, params.items[0]);
-    for (a.sig.params, params.items[1..], self_n..) |p, sid, i| args[i] = try L.slotOperand(&b, sid, p);
+    if (a.kind == .c_lambda) {
+        args[0] = .{ .value = try b.emit(.{ .iconst = 0 }, Typecheck.Type.rawptr) };
+    } else if (lead_n == 1) args[0] = try receiverOperand(&b, a, params.items[0]);
+    for (a.sig.params, params.items[env_n..], lead_n..) |p, sid, i| args[i] = try L.slotOperand(&b, sid, p);
     const result = try L.emitCall(&b, .{ .direct = a.target }, args, a.sig.ret, 0);
 
     if (!b.termSet()) try L.brTo(&b, blocks.exit, if (b.ret_param == Ir.none_value) .none else result);
-    return try L.finishFn(&b, gpa, sym, &params, blocks.entry, blocks.exit);
+    var func = try L.finishFn(&b, gpa, sym, &params, blocks.entry, blocks.exit);
+    func.c_abi = a.kind.isC();
+    return func;
 }
 
 /// The `self` a bound adapter passes: the address of the receiver for a `mut self`
@@ -111,6 +118,42 @@ test "a fn-value thunk takes the env first and forwards its params to a direct c
     const text = try renderFn(&func, in, &buf);
     try testing.expect(std.mem.indexOf(u8, text, "call @add(%") != null);
     try testing.expect(std.mem.indexOf(u8, text, "ret %") != null);
+}
+
+test "a C callback takes no env: a named fn's calls it directly, a lambda's passes a null env" {
+    const gpa = testing.allocator;
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    const in = adapterInputs(&.{});
+    const params = [_]Typecheck.Type{ Typecheck.Type.rawptr, Typecheck.Type.rawptr };
+    const sig: @import("../layout/Engine.zig").FnSig = .{ .params = &params, .ret = Typecheck.Type.int };
+    const named: Closure.Adapter = .{ .kind = .c_fn, .key = 2, .name = "main.cmp$cfn", .target = .{ .kind = .user_fn, .name = "main.cmp" }, .sig = sig };
+    var f1 = try lowerAdapter(gpa, in, named, .{ .kind = .user_fn, .name = named.name }, &diags);
+    defer f1.deinit(gpa);
+    var buf: [2048]u8 = undefined;
+    try testing.expectEqualStrings(
+        \\c fn main.cmp$cfn(s0, s1) -> int {
+        \\  slots: s0:rawptr s1:rawptr
+        \\b0:
+        \\  %1 = slot_addr s0
+        \\  %2 = load %1 : rawptr
+        \\  %3 = slot_addr s1
+        \\  %4 = load %3 : rawptr
+        \\  %5 = call @main.cmp(%2, %4)
+        \\  br b1(%5)
+        \\b1(%0:int):
+        \\  ret %0
+        \\}
+        \\
+    , try renderFn(&f1, in, &buf));
+    const lam: Closure.Adapter = .{ .kind = .c_lambda, .key = 0, .name = "main.main$l0$cfn", .target = .{ .kind = .user_fn, .name = "main.main$l0" }, .sig = sig };
+    var f2 = try lowerAdapter(gpa, in, lam, .{ .kind = .user_fn, .name = lam.name }, &diags);
+    defer f2.deinit(gpa);
+    try testing.expect(f2.c_abi);
+    try testing.expectEqual(@as(usize, 2), f2.params.len);
+    try testing.expect(std.mem.indexOf(u8, try renderFn(&f2, in, &buf), "%1 = iconst 0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, try renderFn(&f2, in, &buf), "call @main.main$l0(%1, %") != null);
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
 test "a unit-returning thunk returns nothing" {

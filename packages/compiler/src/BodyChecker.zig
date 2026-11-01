@@ -4420,7 +4420,75 @@ pub const BodyChecker = struct {
             }
         }
         _ = try bc.checkCall(node_idx, args, bc.fnSig(f, bc.nameText(callee.main_token)));
+        if (f.kind == .import and args.len == f.params.len) for (args, f.params) |arg, p| {
+            if (p.isFunc()) try bc.checkCallbackArg(arg);
+        };
         return f.ret;
+    }
+
+    /// An argument for an extern's fn-typed param becomes a bare C function pointer, so it
+    /// must be code with no env: a top-level fn named directly, an associated fn named
+    /// through its type, or a lambda or local fn that captures nothing (T0080). An arg
+    /// that is no fn at all already failed its type check.
+    fn checkCallbackArg(bc: *BodyChecker, arg: Ast.Index) error{OutOfMemory}!void {
+        if (!bc.node_types[arg.int()].isFunc()) return;
+        const node = bc.tree.nodes[arg.int()];
+        const at: Span = bc.spanOf(arg);
+        const callee = bc.callees[arg.int()];
+        // A generic type's method is picked at the seal; named through a type, it is an
+        // associated fn (`Box[int].make`), which has no receiver to hold.
+        if (callee.tag == .pending_bound and node.tag == .field_access and bc.namesType(node.lhs)) return;
+        if (callee.tag == .bound_method and bc.model.methods[callee.view().bound_method].is_static) return;
+        switch (bc.resolutions[arg.int()]) {
+            // Any other fn kind as a value was already rejected (T0049).
+            .func => if (node.tag == .identifier or node.tag == .field_access) return,
+            .local => |slot| if (node.tag == .identifier) if (bc.localFnBoundary(slot)) |b| {
+                if (b.captures.len == 0) return;
+                const name = bc.nameText(node.main_token);
+                const cap = bc.captureName(b.captures[0]);
+                if (bc.siblingUsing(b, b.captures[0].first_use)) |sib|
+                    return bc.report(.{ .span = at, .code = .T0080 }, "a C callback cannot capture: '{s}' shares its environment with '{s}', which captures '{s}', and C calls only its code", .{ name, bc.nameText(bc.tree.nodes[sib.node.int()].main_token), cap });
+                return bc.report(.{ .span = at, .code = .T0080 }, "a C callback cannot capture: '{s}' captures '{s}', and C calls only its code", .{ name, cap });
+            },
+            else => {},
+        }
+        if (node.tag == .lambda) if (bc.closures) |fc| for (fc.boundaries) |b| if (b.node == arg) {
+            if (b.captures.len == 0) return;
+            return bc.report(.{ .span = at, .code = .T0080 }, "a C callback cannot capture: this lambda captures '{s}', and C calls only its code", .{bc.captureName(b.captures[0])});
+        };
+        try bc.report(.{ .span = at, .code = .T0080 }, "a C callback must be a top-level fn named directly, an associated fn, or a lambda or local fn that captures nothing: C gets only a code pointer, not this value's environment", .{});
+    }
+
+    fn namesType(bc: *const BodyChecker, idx: Ast.Index) bool {
+        if (bc.tree.nodes[idx.int()].tag == .type_app) return !bc.appHeadIsValue(idx);
+        return bc.genericTypeNamed(idx) != null or bc.aliasTypeNamed(idx) != null;
+    }
+
+    fn localFnBoundary(bc: *const BodyChecker, slot: u32) ?*const Closure.Boundary {
+        const fc = bc.closures orelse return null;
+        for (fc.boundaries) |*b| if (b.self_slot) |ss| if (ss == slot) return b;
+        return null;
+    }
+
+    /// The other local fn of `b`'s group whose body holds `use`: the fns of a group that
+    /// name each other share one env, so each lists every capture of the group.
+    fn siblingUsing(bc: *const BodyChecker, b: *const Closure.Boundary, use: Ast.Index) ?*const Closure.Boundary {
+        const fc = bc.closures orelse return null;
+        const at = bc.spanOf(use).start;
+        var best: ?*const Closure.Boundary = null;
+        for (fc.boundaries) |*o| {
+            const ss = o.self_slot orelse continue;
+            if (!b.group.has(ss)) continue;
+            const sp = bc.spanOf(o.node);
+            if (at < sp.start or at >= sp.end) continue;
+            if (best == null or sp.start > bc.spanOf(best.?.node).start) best = o;
+        }
+        if (best) |o| if (o == b) return null;
+        return best;
+    }
+
+    fn captureName(bc: *const BodyChecker, c: Closure.Capture) []const u8 {
+        return bc.nameText(bc.tree.nodes[c.first_use.int()].main_token);
     }
 
     fn dispatchValueMethod(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, callee: Ast.Node) error{OutOfMemory}!?Type {

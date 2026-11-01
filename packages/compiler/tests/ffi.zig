@@ -137,6 +137,81 @@ test "user dylibs: f32 and extern structs by value and by pointer run at -O0 and
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-structs", structs_src, &.{ "-L", test_lib_dir }, "name\n");
 }
 
+const callbacks_src =
+    \\import std/io
+    \\import std/gc
+    \\import std/vec
+    \\
+    \\extern struct Small { a: int32, b: int8, c: int16 }
+    \\extern struct Big { a: int, b: int, c: int, d: int8 }
+    \\extern struct I64 { v: int }
+    \\extern struct Three { a: int, b: int, c: int }
+    \\
+    \\extern "toyffi" {
+    \\    fn toyffi_each(n: int, cb: fn(int) -> int) -> int
+    \\    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, f32) -> int32) -> int
+    \\    fn toyffi_cb_small(cb: fn(Small, int32) -> Small) -> int
+    \\    fn toyffi_cb_big(cb: fn(Big) -> Big) -> int
+    \\}
+    \\
+    \\extern {
+    \\    fn qsort(mut base: Three, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+    \\    fn memcpy(mut dst: I64, src: rawptr, n: int) -> rawptr
+    \\}
+    \\
+    \\struct Ops { n: int }
+    \\
+    \\impl Ops {
+    \\    fn tri(i: int) -> int { i * 3 }
+    \\}
+    \\
+    \\struct Wrap[T] { v: T }
+    \\
+    \\impl Wrap[T] {
+    \\    fn quad(i: int) -> int { i * 4 }
+    \\}
+    \\
+    \\fn read(p: rawptr) -> int {
+    \\    c := I64 { v: 0 }
+    \\    unsafe { memcpy(c, p, 8) }
+    \\    c.v
+    \\}
+    \\
+    \\fn desc(a: rawptr, b: rawptr) -> int32 {
+    \\    junk: Vec[str] = []
+    \\    junk.push("x".concat("y"))
+    \\    gc.collect()
+    \\    if read(a) < read(b) { 1 } else if read(a) > read(b) { -1 } else { 0 }
+    \\}
+    \\
+    \\fn main() -> int {
+    \\    keep: Vec[str] = []
+    \\    keep.push("o".concat("k"))
+    \\    fn twice(i: int) -> int { i * 2 }
+    \\    a := unsafe { toyffi_each(5, twice) }
+    \\    b := unsafe { toyffi_each(3, fn(i) { i + 1 }) }
+    \\    n := unsafe { toyffi_cb_narrow(fn(x, y, z, t, f) { if x == -3 && y == 65535 && z == -100000 && t && f == 1.5 { 7 } else { 0 } }) }
+    \\    s := unsafe { toyffi_cb_small(fn(sm, k) { Small { a: sm.a + k, b: sm.b, c: sm.c } }) }
+    \\    g := unsafe { toyffi_cb_big(fn(bg) { bg }) }
+    \\    c := unsafe { toyffi_each(4, Ops.tri) } + unsafe { toyffi_each(3, Wrap[int].quad) }
+    \\    t := Three { a: 1, b: 3, c: 2 }
+    \\    unsafe { qsort(t, 3, 8, desc) }
+    \\    ok := a == 20 && b == 6 && c == 30 && n == 7 && s == 29998017 && g == -3679 && t.a == 3 && t.b == 2 && t.c == 1
+    \\    io.println(if ok { keep[0] } else { "bad" })
+    \\    0
+    \\}
+    \\
+;
+
+test "user dylibs: capture-free toy fns as C callbacks run at -O0 and -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-callbacks", callbacks_src, &.{ "-L", test_lib_dir }, "ok\n");
+}
+
 test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -146,6 +221,8 @@ test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-j1", calls_src, &.{ "-O1", "-L", test_lib_dir }, 0);
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-sj0", structs_src, &.{ "-O0", "-L", test_lib_dir }, 0);
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-sj1", structs_src, &.{ "-O1", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-cj0", callbacks_src, &.{ "-O0", "-L", test_lib_dir }, 0);
+    try harness.expectDeterministicBuild(gpa, io, ".toy-test-ffi-cj1", callbacks_src, &.{ "-O1", "-L", test_lib_dir }, 0);
 }
 
 /// Run the built `toy` with `args` in `cwd_abs`, capturing its output (caller frees).

@@ -184,3 +184,62 @@ double toyffi_spill(long a, long b, long c, long d, long e, long f, long g, stru
     return (double)(a + b + c + d + e + f + g) + (double)(p.x + p.y + p.z) + v.x + w.w +
            (double)(q.x * q.y);
 }
+
+// Callbacks: C calls a toy function through a plain function pointer.
+long toyffi_each(long n, long (*cb)(long)) {
+    long s = 0;
+    for (long i = 0; i < n; i++) s += cb(i);
+    return s;
+}
+
+// Narrow ints, a bool and an f32 arrive as C passes them: only the low bits are defined.
+long toyffi_cb_narrow(int32_t (*cb)(int8_t, uint16_t, int32_t, bool, float)) {
+    return cb(-3, 65535, -100000, true, 1.5f);
+}
+
+// Nine longs and an int8 leave the last two on the stack, packed as C packs them; nine
+// floats leave the last on the stack at 4 bytes.
+long toyffi_cb_stack(long (*cb)(long, long, long, long, long, long, long, long, long, int8_t)) {
+    return cb(1, 2, 3, 4, 5, 6, 7, 8, 9, -10);
+}
+
+double toyffi_cb_floats(float (*cb)(float, float, float, float, float, float, float, float, float)) {
+    return cb(1, 2, 3, 4, 5, 6, 7, 8, 9);
+}
+
+// Extern structs by value, both ways: in x registers, an HFA in v registers, and a big one
+// through a pointer (x8 for the result).
+long toyffi_cb_small(struct toyffi_small (*cb)(struct toyffi_small, int32_t)) {
+    struct toyffi_small s = {7, -2, 300};
+    struct toyffi_small r = cb(s, 10);
+    return r.a + r.b * 1000 + r.c * 100000L;
+}
+
+double toyffi_cb_vec4d(struct toyffi_vec4d (*cb)(struct toyffi_vec4d, double)) {
+    struct toyffi_vec4d v = {1, 2, 3, 4};
+    struct toyffi_vec4d r = cb(v, 0.5);
+    return r.x + r.y * 10 + r.z * 100 + r.w * 1000;
+}
+
+long toyffi_cb_big(struct toyffi_big (*cb)(struct toyffi_big)) {
+    struct toyffi_big b = {1, 2, 3, -4};
+    struct toyffi_big r = cb(b);
+    return r.a + r.b * 10 + r.c * 100 + r.d * 1000;
+}
+
+const char *toyffi_cb_str(const char *(*cb)(const char *)) { return cb("from C"); }
+
+double toyffi_cb_vec2f(struct toyffi_vec2f (*cb)(struct toyffi_vec2f, struct toyffi_vec2f)) {
+    struct toyffi_vec2f a = {1.5f, 2.5f}, b = {2.5f, 4.0f};
+    struct toyffi_vec2f r = cb(a, b);
+    return r.x + r.y * 100;
+}
+
+// As toyffi_spill: the pair and the vec2f reach the callback on the stack.
+double toyffi_cb_spill(double (*cb)(long, long, long, long, long, long, long, struct toyffi_pair,
+                                    struct toyffi_vec4d, struct toyffi_vec4d, struct toyffi_vec2f)) {
+    struct toyffi_pair p = {10, 20, true};
+    struct toyffi_vec4d v = {0.5, 0, 0, 0}, w = {0, 0, 0, 2};
+    struct toyffi_vec2f q = {2.0f, 0.5f};
+    return cb(1, 2, 3, 4, 5, 6, 7, p, v, w, q);
+}

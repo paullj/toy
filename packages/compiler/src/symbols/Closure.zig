@@ -230,6 +230,20 @@ pub fn findUnit(units: []const LambdaUnit, owner: Owner, node: Ast.Index) ?u32 {
     return @intCast(i);
 }
 
+/// The unit of `owner`'s local fn whose name is resolver slot `slot`.
+pub fn localFnUnit(units: []const LambdaUnit, owner: Owner, slot: u32) ?u32 {
+    const lo = std.sort.lowerBound(LambdaUnit, units, owner, struct {
+        fn order(key: Owner, u: LambdaUnit) std.math.Order {
+            return std.math.order(key, u.owner);
+        }
+    }.order);
+    var i = lo;
+    while (i < units.len and units[i].owner == owner) : (i += 1) {
+        if (units[i].self_slot == slot) return @intCast(i);
+    }
+    return null;
+}
+
 /// The units of `owner`'s local fns that share the env of `g`, in node order.
 pub fn groupUnits(units: []const LambdaUnit, owner: Owner, g: Group) GroupIter {
     return .{ .units = ownerUnits(units, owner), .group = g };
@@ -265,6 +279,9 @@ pub const AdapterKind = enum(u8) {
     bound_box,
     bound_ref,
     assoc_value,
+    c_fn,
+    c_lambda,
+    c_assoc,
 
     /// How a bound adapter's env holds the receiver.
     pub fn recvHold(k: AdapterKind) Hold {
@@ -272,8 +289,13 @@ pub const AdapterKind = enum(u8) {
             .bound_copy => .copy,
             .bound_box => .cell,
             .bound_ref => .param_addr,
-            .fn_value, .assoc_value => unreachable,
+            .fn_value, .assoc_value, .c_fn, .c_lambda, .c_assoc => unreachable,
         };
+    }
+
+    /// A C callback: C calls the adapter in the C convention, with no env.
+    pub fn isC(k: AdapterKind) bool {
+        return k == .c_fn or k == .c_lambda or k == .c_assoc;
     }
 };
 
@@ -284,10 +306,13 @@ pub const AdapterKind = enum(u8) {
 /// passes the receiver its env holds as `self`: `.bound_copy` holds a copy of the
 /// receiver value, `.bound_box` the cell of a boxed local receiver, `.bound_ref` the
 /// address of a `mut` param receiver (as an `int`, so the word is never a root).
+/// `.c_fn`, `.c_assoc` and `.c_lambda` are the C callbacks a capture-free fn passes to an
+/// extern as: C calls them in the C convention, and they call a named fn or an associated
+/// fn directly, or a lambda unit with a null env.
 pub const Adapter = struct {
     kind: AdapterKind,
-    /// `.fn_value`: the referenced fn's global id. `.bound_*`, `.assoc_value`: the method's
-    /// index.
+    /// `.fn_value`, `.c_fn`: the referenced fn's global id. `.bound_*`, `.assoc_value`,
+    /// `.c_assoc`: the method's index. `.c_lambda`: the lambda unit's index.
     key: u32,
     /// Owned.
     name: []const u8,
@@ -332,6 +357,45 @@ pub fn boundRecvLocal(tree: Ast.Tree, resolutions: []const Resolution, fa: Ast.I
         .local => |slot| slot,
         else => null,
     };
+}
+
+/// Whether `ty` is a function type: a reified `{code, env}` pair, or one not yet reified.
+pub fn isFnType(ty: Type, layouts: []const LayoutEngine.Layout) bool {
+    if (ty.kind == .func) return true;
+    return ty.isStruct() and ty.struct_id < layouts.len and layouts[ty.struct_id].fn_sig != null;
+}
+
+/// The C callback adapter an extern's fn-typed argument `arg` of a body of `owner`
+/// goes through: a named fn's, an associated fn's, or the unit's of a lambda or a local
+/// fn named there. Null
+/// for anything else, which the checker rejected.
+pub fn callbackKey(
+    tree: Ast.Tree,
+    resolutions: []const Resolution,
+    nodes: Body.Nodes,
+    owner: Owner,
+    units: []const LambdaUnit,
+    arg: Ast.Index,
+) ?struct { kind: AdapterKind, key: u32 } {
+    const node = tree.nodes[arg.int()];
+    switch (nodes.callee(arg).view()) {
+        .fn_ref => |gid| return .{ .kind = .c_fn, .key = gid },
+        // The checker let only an associated fn through as a method value.
+        .bound_method => |mi| return .{ .kind = .c_assoc, .key = mi },
+        else => {},
+    }
+    if (node.tag == .lambda) {
+        const ui = findUnit(units, owner, arg) orelse return null;
+        return .{ .kind = .c_lambda, .key = ui };
+    }
+    if (node.tag == .identifier) switch (resolutions[arg.int()]) {
+        .local => |slot| {
+            const ui = localFnUnit(units, owner, slot) orelse return null;
+            return .{ .kind = .c_lambda, .key = ui };
+        },
+        else => {},
+    };
+    return null;
 }
 
 fn adapterLess(kind: AdapterKind, key: u32, a: Adapter) std.math.Order {

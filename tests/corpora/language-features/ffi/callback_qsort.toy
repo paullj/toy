@@ -1,0 +1,63 @@
+# expect: exit 0
+# expect: stdout "ints 1 2 3 5 8 9\npoints (1, 9) (2, 2) (3, 7) (3, 1)\nkept alive\n"
+# qsort from libSystem with toy comparators: a named fn over ints and a lambda over C
+# structs. The array is an extern struct passed by pointer (a mut param), which qsort
+# sorts in place. Toy cannot read a rawptr itself, so the comparators copy each element
+# into an extern struct with memcpy. The lambda collects garbage on every call, while
+# main's own heap values sit in the toy frame below qsort's C frame.
+import std/io
+import std/gc
+import std/vec
+
+extern struct I64 { v: int }
+extern struct Six { a: int, b: int, c: int, d: int, e: int, f: int }
+extern struct Pt { x: int32, y: int32 }
+extern struct Four { p: Pt, q: Pt, r: Pt, s: Pt }
+
+extern {
+    fn qsort(mut base: Six, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+    fn memcpy(mut dst: I64, src: rawptr, n: int) -> rawptr
+    fn memmove(mut dst: Pt, src: rawptr, n: int) -> rawptr
+}
+
+extern "c" {
+    fn mergesort(mut base: Four, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32) -> int32
+}
+
+fn read_int(p: rawptr) -> int {
+    cell := I64 { v: 0 }
+    unsafe { memcpy(cell, p, 8) }
+    cell.v
+}
+
+fn cmp_int(a: rawptr, b: rawptr) -> int32 {
+    x := read_int(a)
+    y := read_int(b)
+    if x < y { -1 } else if x > y { 1 } else { 0 }
+}
+
+fn show(p: Pt) -> str {
+    " (".concat(p.x.to_string()).concat(", ").concat(p.y.to_string()).concat(")")
+}
+
+fn main() -> int {
+    keep: Vec[str] = []
+    keep.push("kept ".concat("alive"))
+    xs := Six { a: 5, b: 3, c: 9, d: 1, e: 8, f: 2 }
+    unsafe { qsort(xs, 6, 8, cmp_int) }
+    io.println("ints ".concat(xs.a.to_string()).concat(" ").concat(xs.b.to_string()).concat(" ").concat(xs.c.to_string()).concat(" ").concat(xs.d.to_string()).concat(" ").concat(xs.e.to_string()).concat(" ").concat(xs.f.to_string()))
+    ps := Four { p: Pt { x: 3, y: 7 }, q: Pt { x: 1, y: 9 }, r: Pt { x: 3, y: 1 }, s: Pt { x: 2, y: 2 } }
+    unsafe { mergesort(ps, 4, 8, fn(a, b) {
+        junk: Vec[str] = []
+        junk.push("garbage ".concat("x"))
+        gc.collect()
+        u := Pt { x: 0, y: 0 }
+        w := Pt { x: 0, y: 0 }
+        unsafe { memmove(u, a, 8) }
+        unsafe { memmove(w, b, 8) }
+        if u.x != w.x { u.x - w.x } else { w.y - u.y }
+    }) }
+    io.println("points".concat(show(ps.p)).concat(show(ps.q)).concat(show(ps.r)).concat(show(ps.s)))
+    io.println(keep[0])
+    return 0
+}

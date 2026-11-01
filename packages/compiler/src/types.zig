@@ -2558,7 +2558,7 @@ pub fn checkGraph(
     const bodies = try buildBodies(gpa, fns, t.fns.items, sigs, node_types, callees, fn_boxed, instances);
     errdefer gpa.free(bodies.items);
 
-    const adapters = try ClosureTables.buildAdapters(gpa, t.graph, bodies, callees, instances, fns, sigs, methods, derives);
+    var adapters = try ClosureTables.buildAdapters(gpa, t.graph, bodies, callees, instances, fns, sigs, methods, derives);
     errdefer ClosureTables.freeAdapters(gpa, adapters);
 
     var layouts = try LayoutEngine.snapshotLayouts(gpa, t.structs.items);
@@ -2568,6 +2568,7 @@ pub fn checkGraph(
 
     const lambda_units = try ClosureTables.buildLambdaUnits(gpa, t.graph, bodies, layouts, enum_layouts);
     errdefer Closure.freeLambdaUnits(gpa, lambda_units);
+    adapters = try ClosureTables.appendCallbackAdapters(gpa, t.graph, bodies, instances, fns, sigs, methods, derives, lambda_units, layouts, adapters);
     var esc = try ClosureTables.analyzeEscapes(&t, fns, sigs, node_types, callees, bodies, instances, methods, lambda_units, layouts, enum_layouts);
     defer esc.deinit(gpa);
     const owner_closures = try ClosureTables.buildOwnerClosures(gpa, bodies, esc.unboxable);
@@ -5002,6 +5003,15 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
             // extern struct is laid out that way at the boundary.
             try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "a 'mut' extern parameter is a C pointer, so its type must be an extern struct", .{});
             params[i] = .invalid;
+        } else if (pty.isFunc()) {
+            // A C function pointer: C calls it with C arguments and no env, so its own
+            // signature must be C types too.
+            if (t.callbackTypeOk(pty)) {
+                params[i] = pty;
+            } else {
+                try t.sink.report(.{ .span = t.fieldTypeSpan(param_idx), .code = .T0037 }, "a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct", .{});
+                params[i] = .invalid;
+            }
         } else if (t.externTypeOk(pty)) {
             params[i] = pty;
         } else {
@@ -5039,6 +5049,14 @@ fn externTypeOk(t: *const Typecheck, ty: Type) bool {
 /// signature's. Poison is accepted so a prior error does not cascade.
 fn cTypeOk(t: *const Typecheck, ty: Type) bool {
     return ty.isInteger() or ty.kind == .bool or ty.isRawPtr() or ty.kind == .cstr or ty.kind == .float or ty.kind == .invalid or t.isExternStructTy(ty);
+}
+
+/// Whether fn type `ty` can be a C callback: each param a C type, the return one too or
+/// unit (a C `void`).
+fn callbackTypeOk(t: *Typecheck, ty: Type) bool {
+    const parts = Composite.fnParts(t.composite.at(ty.funcIdx()));
+    for (parts.params) |p| if (!t.cTypeOk(p)) return false;
+    return parts.ret.kind == .unit or t.cTypeOk(parts.ret);
 }
 
 fn isExternStructTy(t: *const Typecheck, ty: Type) bool {
@@ -10630,6 +10648,38 @@ test "an extern struct passes to and from an extern; a field that is no C type i
     try expectOnlyDiag("extern struct V { s: str }\nfn main() -> int {\n return 0\n}\n", .T0037);
     try expectOnlyDiag("struct P { x: int }\nextern fn f(p: P) -> int\nfn main() -> int {\n return 0\n}\n", .T0037);
     try expectOnlyDiag("extern fn f(mut n: int)\nfn main() -> int {\n return 0\n}\n", .T0037);
+}
+
+test "an extern param of fn type takes a named fn, or a lambda or local fn that captures nothing" {
+    const decl = "extern fn each(n: int, cb: fn(int) -> int) -> int\nfn sq(x: int) -> int { x * x }\n";
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount(decl ++ "fn main() -> int {\n fn dbl(x: int) -> int { x * 2 }\n return unsafe { each(2, sq) + each(2, fn(x) { x + 1 }) + each(2, dbl) }\n}\n"));
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n k := 3\n return unsafe { each(2, fn(x) { x + k }) }\n}\n", .T0080);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n k := 3\n fn addk(x: int) -> int { x + k }\n return unsafe { each(2, addk) }\n}\n", .T0080);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n f := sq\n return unsafe { each(2, f) }\n}\n", .T0080);
+    try expectOnlyDiag(decl ++ "struct A { n: int }\nimpl A {\n fn get(self, x: int) -> int { self.n + x }\n}\nfn main() -> int {\n a := A { n: 1 }\n return unsafe { each(2, a.get) }\n}\n", .T0080);
+}
+
+test "an associated fn is a C callback; a non-fn arg for a callback param is only T0040" {
+    const decl = "extern fn each(n: int, cb: fn(int) -> int) -> int\nstruct A { n: int }\nimpl A {\n fn tri(x: int) -> int { x * 3 }\n}\nstruct B[T] { v: T }\nimpl B[T] {\n fn dbl(x: int) -> int { x * 2 }\n}\n";
+    const gpa = testing.allocator;
+    var c = try checkSource(decl ++ "fn main() -> int {\n return unsafe { each(2, A.tri) + each(2, B[int].dbl) }\n}\n");
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+    var n_assoc: usize = 0;
+    for (c.result.adapters) |a| if (a.kind == .c_assoc) {
+        n_assoc += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), n_assoc);
+    try expectOnlyDiag(decl ++ "fn main() -> int {\n return unsafe { each(2, 5) }\n}\n", .T0040);
+}
+
+test "a callback's params and return are C types, else T0037" {
+    try testing.expectEqual(@as(usize, 0), try checkDiagCount("extern struct V { x: f32, y: f32 }\nextern fn f(cb: fn(int8, f32, V, cstr, rawptr, bool) -> V)\nextern fn g(cb: fn())\nfn main() -> int {\n return 0\n}\n"));
+    try expectOnlyDiag("extern fn f(cb: fn(str) -> int)\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("struct P { x: int }\nextern fn f(cb: fn(int) -> P)\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("extern fn f(cb: fn(fn(int) -> int))\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("extern fn f() -> fn(int) -> int\nfn main() -> int {\n return 0\n}\n", .T0037);
+    try expectOnlyDiag("extern fn f(mut cb: fn(int) -> int)\nfn main() -> int {\n return 0\n}\n", .T0037);
 }
 
 test "a float literal takes f32 where one is expected, and beside an f32 operand" {

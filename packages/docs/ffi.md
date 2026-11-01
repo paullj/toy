@@ -3,7 +3,8 @@
 A program calls a C function by declaring it as an `extern` and calling it inside
 `unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` (`cstr.toy` and `cstr_libc.toy`
 for C strings, `f32.toy`, `structs.toy`, `struct_ptr.toy` and `struct_libc.toy` for `f32`
-and C structs) and
+and C structs, `callback.toy`, `callback_qsort.toy` and `callback_panic.toy` for
+callbacks) and
 `tests/corpora/language-features/modules/ffi_extern/` and `ffi_dylib/`.
 
 ```toy
@@ -41,7 +42,8 @@ fn main() -> int {
 
 An extern's params and return use C ABI types: an integer of any width, `float` (C
 `double`), `f32` (C `float`), `bool`, `rawptr` (C `void*`), `cstr` (C `const char*`, see
-[C strings](#c-strings)) and an extern struct (see [Structs](#structs)). Omitting
+[C strings](#c-strings)) and an extern struct (see [Structs](#structs)). A param may also
+be a function type, a C function pointer (see [Callbacks](#callbacks)). Omitting
 `-> R` is a `void` return, and `-> never` is a C function that does not return (`exit`,
 `abort`). Any other type is T0037, reported once at the type; the extern stays
 declared, so its calls add no second error.
@@ -167,6 +169,81 @@ fn main() -> int {
   a `to_cstr` buffer, or a pointer into it that C returned, such as `strchr`'s) keeps the
   buffer alive, and a pointer into C memory is left alone.
 
+## Callbacks
+
+An extern param of a function type is a C function pointer. Its own params and return
+must be C types as above (a `void` callback omits `-> R`); anything else, a function type
+inside it included, is T0037. A return of a function type is T0037 too.
+
+```toy
+import std/io
+
+extern struct I64 { v: int }
+extern struct Six { a: int, b: int, c: int, d: int, e: int, f: int }
+
+extern {
+    fn qsort(mut base: Six, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+    fn memcpy(mut dst: I64, src: rawptr, n: int) -> rawptr
+}
+
+fn read(p: rawptr) -> int {
+    cell := I64 { v: 0 }
+    unsafe { memcpy(cell, p, 8) }
+    cell.v
+}
+
+fn by_value(a: rawptr, b: rawptr) -> int32 {
+    if read(a) < read(b) { -1 } else if read(a) > read(b) { 1 } else { 0 }
+}
+
+fn main() -> int {
+    xs := Six { a: 5, b: 3, c: 9, d: 1, e: 8, f: 2 }
+    unsafe { qsort(xs, 6, 8, by_value) }                     # a named fn
+    io.println(xs.a)                                         # 1
+    unsafe { qsort(xs, 6, 8, fn(a, b) { by_value(b, a) }) }  # a lambda that captures nothing
+    io.println(xs.a)                                         # 9
+    return 0
+}
+```
+
+C calls the pointer with its own arguments and nothing else, so the argument must be
+code with no environment, one of:
+
+- a top-level function named directly (`by_value`, or `m.by_value` from a module);
+- an associated function named through its type (`Order.by_value`, `Box[int].make`);
+- a lambda that captures nothing, typed from the param as any lambda is;
+- a local fn that captures nothing.
+
+Anything else is T0080 at the argument: a lambda or local fn that reads a local around
+it, a bound method (`acc.get`), or any other function value (a local `f := by_value`, a
+field, a call result), whose environment the compiler cannot prove empty. Local fns that
+name each other share one environment, so a local fn that captures nothing is still
+rejected when it shares one with a sibling that does; so is a lambda that calls a local
+fn, since it captures that fn as a value. To give a
+callback state, pass it through the callback's params, such as the `void*` context many
+C APIs hand back.
+
+**How it is called.** The compiler gives each such function a small adapter that C calls
+in its own convention, as an extern call passes arguments: a narrow integer or `bool`
+arrives with only its low bits defined and is widened, an `f32` arrives in an `s`
+register, stack arguments are packed at their C size, and an extern struct arrives and
+returns in C layout (V registers for an HFA, X registers up to 16 bytes, else through a
+pointer, `x8` for a result). The adapter then calls the toy function. The pointer is the
+adapter's address in the program's code, so it stays valid for the whole run: C may keep
+it and call it later.
+
+**Panics.** A panic inside a callback ends the program as any panic does: the message and
+a backtrace go to stderr and the process exits with 1. It does not unwind through the C
+frames, so C code above it gets no chance to clean up. The backtrace prints C frames as
+bare addresses.
+
+**Collections.** A callback may allocate and collect. The collector walks the frame chain
+through the C frames (Apple's arm64 code keeps a frame record in every function), finds
+the toy frames below them by their return addresses, and scans the C frames
+conservatively, so what the toy caller of the extern holds stays alive. A pointer to the
+gc heap that only C keeps (in a register, or in its own memory after the call returns) is
+not a root: keep the value alive in toy code while C uses it.
+
 ## unsafe
 
 The compiler cannot check what a C function does with its arguments, so every call to
@@ -267,4 +344,6 @@ library relinks against the new set.
 - Static libraries (`.a`, `.o`), and libraries in a project manifest.
 - Fixed-size arrays in an extern struct, and a C pointer to a struct that C returns or
   keeps (a `rawptr` toy cannot read).
-- C callbacks and varargs (`printf`): #152, #153.
+- Varargs (`printf`): #153.
+- A callback with captures, or one a C function returns (a C function pointer toy can
+  call).

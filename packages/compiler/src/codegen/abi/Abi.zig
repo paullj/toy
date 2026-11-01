@@ -362,8 +362,8 @@ fn walkAbi(
 
 /// Whose calling convention a call follows. Toy functions give every stack argument
 /// an 8-byte slot. A C function follows Apple's arm64 variant of AAPCS64, which packs
-/// a stack argument at its own size and alignment; toy never defines a C-callable
-/// function, so only the call side needs `.c`.
+/// a stack argument at its own size and alignment. Toy defines C-callable functions only
+/// as the adapters a C callback goes through.
 pub const Conv = enum { toy, c };
 
 /// The bytes a scalar takes as a C argument on the stack or as a C struct field: a narrow
@@ -408,13 +408,31 @@ pub fn planParams(
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) error{OutOfMemory}!ParamPlan {
+    return planParamsConv(gpa, .toy, params, ret, layouts, enum_layouts);
+}
+
+/// `planParams` under convention `conv`; a C callback adapter is `.c`.
+pub fn planParamsConv(
+    gpa: std.mem.Allocator,
+    conv: Conv,
+    params: []const Type,
+    ret: Type,
+    layouts: []const Layout,
+    enum_layouts: []const EnumLayout,
+) error{OutOfMemory}!ParamPlan {
     const locs = try gpa.alloc(ParamLoc, params.len);
     errdefer gpa.free(locs);
-    _ = walkAbi(.toy, params, locs, layouts, enum_layouts);
+    _ = walkAbi(conv, params, locs, layouts, enum_layouts);
     return .{
-        .sret_in_x8 = classifyRet(ret, layouts, enum_layouts) == .sret,
+        .sret_in_x8 = retIsSret(conv, ret, layouts, enum_layouts),
         .locs = locs,
     };
+}
+
+/// Whether a function returning `ret` under `conv` gets its result buffer in x8.
+pub fn retIsSret(conv: Conv, ret: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) bool {
+    if (conv == .c and isCStruct(ret, layouts)) return cRet(ret, layouts) == .sret;
+    return classifyRet(ret, layouts, enum_layouts) == .sret;
 }
 
 /// The full outbound-argument plan for one call site: where each argument goes,
@@ -466,7 +484,7 @@ pub fn planCallConv(
     return .{
         .locs = locs,
         .nsaa_bytes = nsaa,
-        .sret_in_x8 = if (conv == .c and isCStruct(ret, layouts)) cRet(ret, layouts) == .sret else classifyRet(ret, layouts, enum_layouts) == .sret,
+        .sret_in_x8 = retIsSret(conv, ret, layouts, enum_layouts),
     };
 }
 
@@ -817,6 +835,27 @@ test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest w
     defer fp.deinit(gpa);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.nsaa_off);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.bytes);
+}
+
+test "planParamsConv .c: a C callback's params arrive as a C call places them; its sret by C size" {
+    const gpa = testing.allocator;
+    // C size 12 (x registers), toy size 24 (which toy would return through x8).
+    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
+    const ls = [_]Layout{cStruct("Three", &three)};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
+    var c = try planParamsConv(gpa, .c, &params, Type.structT(0), &ls, el);
+    defer c.deinit(gpa);
+    var call = try planCallConv(gpa, .c, &params, Type.structT(0), &ls, el);
+    defer call.deinit(gpa);
+    for (c.locs, call.locs) |p, a| try testing.expectEqualDeep(a, p);
+    try testing.expectEqual(@as(u32, 1), c.locs[8].stack.bytes);
+    try testing.expect(!c.sret_in_x8);
+    var toy = try planParams(gpa, &params, Type.structT(0), &ls, el);
+    defer toy.deinit(gpa);
+    try testing.expect(toy.sret_in_x8);
+    try testing.expectEqual(@as(u32, 8), toy.locs[8].stack.bytes);
 }
 
 test "planCall: AAPCS no-split — reg-pair that doesn't fit goes wholly to stack and forbids backfill" {

@@ -98,8 +98,9 @@ pub const Call = struct {
     /// `mut` extern struct param keeps its struct type while its operand is the address of
     /// the argument (see `isByPtrArg`).
     params: []const Type = &.{},
-    /// Bit `i`: argument `i` is a `mut` extern param, passed to C as a pointer. Recorded
-    /// from the callee's signature because the operand's type cannot tell: the address of a
+    /// Bit `i`: argument `i` is passed to C as a pointer: a `mut` extern param, or a
+    /// fn-typed one, whose operand is a C callback's code address. Recorded from the
+    /// callee's signature because the operand's type cannot tell: the address of a
     /// closure-captured local is its box pointer, a `rawptr`.
     by_ptr: u64 = 0,
 };
@@ -272,6 +273,9 @@ pub const Function = struct {
     /// Decoded string literals this function references, content-hash keyed. A
     /// `cstr_ptr` op names a hash; codegen looks the bytes up here. Owned.
     literals: []Literal = &.{},
+    /// C calls this function through a function pointer, so its params arrive and its
+    /// result leaves in the C convention (a C callback adapter).
+    c_abi: bool = false,
 
     /// Free every owned slice. `name.name` is borrowed from the names table
     /// (owned by the caller), so it is NOT freed here.
@@ -297,9 +301,9 @@ pub const Function = struct {
         return if (isByPtrArg(by_ptr, i)) Type.rawptr else params[i];
     }
 
-    /// Whether call argument `i` is a `mut` extern struct param: the C callee gets a
-    /// pointer, and the operand is the address of the toy value it is copied from and back
-    /// into.
+    /// Whether call argument `i` goes to C as a pointer: for a `mut` extern struct param
+    /// the operand is the address of the toy value it is copied from and back into, for a
+    /// fn-typed one the address of its C callback.
     pub fn isByPtrArg(by_ptr: u64, i: usize) bool {
         return i < 64 and (by_ptr >> @intCast(i)) & 1 != 0;
     }
@@ -335,7 +339,7 @@ pub fn render(
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
 ) anyerror!void {
-    try out.print("fn {s}(", .{func.name.name});
+    try out.print("{s}fn {s}(", .{ if (func.c_abi) "c " else "", func.name.name });
     for (func.params, 0..) |sid, i| {
         if (i != 0) try out.writeAll(", ");
         try out.print("s{d}", .{sid});
