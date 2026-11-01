@@ -3290,7 +3290,8 @@ test "integration: emitted binary runs with the right exit code" {
     const dir = std.fmt.bufPrint(&dir_buf, "{s}/{s}/cache", .{ cache_root, version.stamp(&stamp_buf) }) catch unreachable;
     const cache = try Cache.init(io, dir);
 
-    const Case = struct { src: []const u8, name: []const u8, expect: u8 };
+    // `wraps`: build without debug's overflow tests, for a case about wrapping codegen.
+    const Case = struct { src: []const u8, name: []const u8, expect: u8, wraps: bool = false };
     const cases = [_]Case{
         .{ .src = "fn main() -> int {\n x := 40\n y := 2\n return x + y\n}\n", .name = "add", .expect = 42 },
         // 300 & 0xFF == 44: dyld's start glue masks main's return to a byte.
@@ -3645,11 +3646,11 @@ test "integration: emitted binary runs with the right exit code" {
         // WIDTH-CORRECT WRAPPING: 100+100 on two int8 overflows and wraps to -56
         // (sxtb). Observed via a SIGNED compare (never return the raw int8 — macOS masks
         // main's return to 8 bits). -56 < 100 is true only after the wrap → 42.
-        .{ .src = "fn main() -> int {\n a: int8 = 100\n b: int8 = 100\n c: int8 = a + b\n return if c < b { 42 } else { 0 }\n}\n", .name = "wrap_int8", .expect = 42 },
+        .{ .src = "fn main() -> int {\n a: int8 = 100\n b: int8 = 100\n c: int8 = a +% b\n return if c < b { 42 } else { 0 }\n}\n", .name = "wrap_int8", .expect = 42 },
         // Register-domain normalization: the wrapped sum feeds the icmp DIRECTLY (no
         // memory round-trip), so genArith's post-op sxtb is the only thing that makes
         // 200 wrap to -56. Without it, 200 < 100 is false → 0.
-        .{ .src = "fn main() -> int {\n a: int8 = 100\n b: int8 = 100\n return if a + b < b { 42 } else { 0 }\n}\n", .name = "wrap_arith_value", .expect = 42 },
+        .{ .src = "fn main() -> int {\n a: int8 = 100\n b: int8 = 100\n return if a +% b < b { 42 } else { 0 }\n}\n", .name = "wrap_arith_value", .expect = 42 },
         // UNSIGNED compare: 2^63 > 1 is true UNSIGNED (ugt→hi) but false signed
         // (bit63 reads as negative). x must be uint64 so the operand type drives the
         // unsigned dispatch. → 42.
@@ -3660,14 +3661,14 @@ test "integration: emitted binary runs with the right exit code" {
         // NARROW STRUCT FIELD round-trip (semantic leg of the GOAL): the wrapped -56
         // stores into an int8 field and loads back canonical (8-byte-strided cell + 64-bit
         // str/ldr, sound because the stored value is already canonicalized). -56 < 0 → 42.
-        .{ .src = "struct S { v: int8 }\nfn main() -> int {\n a: int8 = 100\n b: int8 = 100\n c: int8 = a + b\n s := S{ v: c }\n return if s.v < 0 { 42 } else { 0 }\n}\n", .name = "struct_narrow_field", .expect = 42 },
+        .{ .src = "struct S { v: int8 }\nfn main() -> int {\n a: int8 = 100\n b: int8 = 100\n c: int8 = a +% b\n s := S{ v: c }\n return if s.v < 0 { 42 } else { 0 }\n}\n", .name = "struct_narrow_field", .expect = 42 },
         // NARROW NEG re-wrap (signed leg): a+a=128 wraps to -128, then -(-128)=128
         // must re-wrap to -128 (sxtb on the neg result) for `d < 0` to hold. Without the
         // neg-leg normalize, d stays +128 → 0. Feeds the icmp directly (no memory hop).
-        .{ .src = "fn main() -> int {\n a: int8 = 64\n c: int8 = a + a\n d: int8 = -c\n return if d < 0 { 42 } else { 0 }\n}\n", .name = "neg_int8_rewrap", .expect = 42 },
+        .{ .src = "fn main() -> int {\n a: int8 = 64\n c: int8 = a +% a\n d: int8 = -c\n return if d < 0 { 42 } else { 0 }\n}\n", .name = "neg_int8_rewrap", .expect = 42, .wraps = true },
         // NARROW NEG re-wrap (unsigned/and-mask leg): -(5) = -5 masks to 251 in uint8.
         // The `and #0xff` on the neg result is the only thing that makes b == 251. → 42.
-        .{ .src = "fn main() -> int {\n a: uint8 = 5\n b: uint8 = -a\n return if b == 251 { 42 } else { 0 }\n}\n", .name = "neg_uint8_mask", .expect = 42 },
+        .{ .src = "fn main() -> int {\n a: uint8 = 5\n b: uint8 = -a\n return if b == 251 { 42 } else { 0 }\n}\n", .name = "neg_uint8_mask", .expect = 42, .wraps = true },
         // UNSIGNED `<` (ult→lo): 1 < 2^63 is true unsigned, false signed (bit63<0). → 42.
         .{ .src = "fn main() -> int {\n x: uint64 = 0x8000000000000000\n return if 1 < x { 42 } else { 0 }\n}\n", .name = "uint64_lt_unsigned", .expect = 42 },
         // UNSIGNED `<=` (ule→ls): 1 <= 2^63 unsigned true, signed false. → 42.
@@ -3735,7 +3736,7 @@ test "integration: emitted binary runs with the right exit code" {
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, if (c.wraps) .{ .name = .release, .opt = .O0 } else .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,

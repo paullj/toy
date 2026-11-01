@@ -241,6 +241,15 @@ pub const Tag = enum(u8) {
     /// `...` marks a C variadic extern's trailing parameters.
     ellipsis,
 
+    // Wrapping integer operators: they wrap at the operand width in every profile, where
+    // `+`/`-`/`*` trap on overflow in a debug build.
+    plus_percent, // +%
+    minus_percent, // -%
+    star_percent, // *%
+    plus_percent_eq, // +%=
+    minus_percent_eq, // -%=
+    star_percent_eq, // *%=
+
     /// The binary operator a compound assignment applies, or null for any other tag.
     pub fn compoundBase(tag: Tag) ?Tag {
         return switch (tag) {
@@ -258,6 +267,9 @@ pub const Tag = enum(u8) {
             .minus_dot_eq => .minus_dot,
             .star_dot_eq => .star_dot,
             .slash_dot_eq => .slash_dot,
+            .plus_percent_eq => .plus_percent,
+            .minus_percent_eq => .minus_percent,
+            .star_percent_eq => .star_percent,
             else => null,
         };
     }

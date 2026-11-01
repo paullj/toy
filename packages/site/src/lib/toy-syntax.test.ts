@@ -16,8 +16,15 @@ it('marks a declared fn name, not the first parameter of a lambda or a fn type',
 });
 
 it('marks every compound assignment operator as one punctuation token', () => {
-	for (const op of ['+=', '-=', '*=', '/=', '%=', '|=', '&=', '^=', '<<=', '>>=', '+.=', '-.=', '*.=', '/.=']) {
+	for (const op of ['+=', '-=', '*=', '/=', '%=', '|=', '&=', '^=', '<<=', '>>=', '+.=', '-.=', '*.=', '/.=', '+%=', '-%=', '*%=']) {
 		const toks = highlightLines(`x ${op} 1`).flat();
+		expect(toks.find((t) => t.text === op)?.cls).toBe('tok-punc');
+	}
+});
+
+it('marks each wrapping operator as one punctuation token', () => {
+	for (const op of ['+%', '-%', '*%']) {
+		const toks = highlightLines(`a ${op} b`).flat();
 		expect(toks.find((t) => t.text === op)?.cls).toBe('tok-punc');
 	}
 });

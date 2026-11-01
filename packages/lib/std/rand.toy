@@ -10,13 +10,13 @@ pub struct Rng { s0: uint64, s1: uint64, s2: uint64, s3: uint64 }
 # or zero seed still gives a state that is not all zero (which would stay zero forever).
 pub fn seeded(seed: uint64) -> Rng {
     s := seed
-    s = s + 0x9E3779B97F4A7C15
+    s = s +% 0x9E3779B97F4A7C15
     a := mix(s)
-    s = s + 0x9E3779B97F4A7C15
+    s = s +% 0x9E3779B97F4A7C15
     b := mix(s)
-    s = s + 0x9E3779B97F4A7C15
+    s = s +% 0x9E3779B97F4A7C15
     c := mix(s)
-    s = s + 0x9E3779B97F4A7C15
+    s = s +% 0x9E3779B97F4A7C15
     d := mix(s)
     return Rng { s0: a, s1: b, s2: c, s3: d }
 }
@@ -28,8 +28,8 @@ pub fn from_os() -> Rng {
 
 fn mix(s: uint64) -> uint64 {
     z := s
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
     return z ^ (z >> 31)
 }
 
@@ -48,7 +48,7 @@ fn rotl(x: uint64, k: uint64) -> uint64 {
 
 impl Rng {
     fn next(mut self) -> uint64 {
-        result := rotl(self.s1 * 5, 7) * 9
+        result := rotl(self.s1 *% 5, 7) *% 9
         t := self.s1 << 17
         self.s2 = self.s2 ^ self.s0
         self.s3 = self.s3 ^ self.s1
@@ -72,7 +72,7 @@ impl Rng {
     # A uniform uint64 in [0, m). `x % m` alone favors the low values when m does not divide
     # 2^64, so draws below 2^64 mod m are rejected; at most half of them ever are.
     fn below_u64(mut self, m: uint64) -> uint64 {
-        floor := (0 - m) % m
+        floor := (0 -% m) % m
         x := self.next()
         while x < floor {
             x = self.next()
@@ -84,7 +84,7 @@ impl Rng {
     # span is drawn as a uint64 split at 2^63, keeping every int sum in range.
     fn range(mut self, lo: int, hi: int) -> int {
         if hi <= lo { panic("rand: range(lo, hi) needs lo < hi") }
-        d := hi - lo
+        d := hi -% lo
         if d > 0 { return lo + self.below(d) }
         half: uint64 = 0x8000_0000_0000_0000
         over: uint64 = match (d + 9223372036854775807 + 1).try_into() {

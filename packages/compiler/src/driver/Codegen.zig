@@ -390,6 +390,7 @@ const Plan = struct {
                     .spec => |k| p.specs.units[k].targets,
                     else => &.{},
                 }) else .none,
+                .trap_overflow = p.o.profile.trapsOverflow(),
             },
             .body = body,
             .sym = sym,

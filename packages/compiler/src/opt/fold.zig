@@ -121,6 +121,17 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                     stats.consts_folded += 1;
                     changed = true;
                 },
+                .overflow => |o| {
+                    const l = constInt(known, o.lhs) orelse continue;
+                    const r = constInt(known, o.rhs) orelse continue;
+                    // A constant that overflows folds to `true`, so its guard still panics at
+                    // run time: a debug build never folds an overflow into a wrapped value.
+                    const folded = arith.overflows(o.kind, l, r, o.ty);
+                    ins.op = .{ .bconst = folded };
+                    if (res != Ir.none_value) known[res] = .{ .bool = folded };
+                    stats.consts_folded += 1;
+                    changed = true;
+                },
                 .icmp => |c| {
                     const l = constInt(known, c.lhs) orelse continue;
                     const r = constInt(known, c.rhs) orelse continue;

@@ -1,0 +1,43 @@
+# Feature: `+%`, `-%` and `*%` wrap at the operand width in every profile, and so do
+# their compound forms, which `+=`, `-=` and `*=` would panic on in a debug build. They
+# bind as `+`, `-` and `*` do.
+# expect: stdout "-128\n127\n0\n-2\n0\n255\n252\n-32768\n0\n-9223372036854775808\n9223372036854775807\n0\n0\n18446744073709551615\n7\n-56\n255\n"
+import std/io
+
+fn main() {
+    a: int8 = 127
+    b: int8 = -128
+    c: int8 = 16
+    io.println(a +% 1)
+    io.println(b -% 1)
+    io.println(c *% c)
+    io.println(a *% 2)
+    u: uint8 = 255
+    z: uint8 = 0
+    v: uint8 = 63
+    v *%= 4
+    io.println(u +% 1)
+    io.println(z -% 1)
+    io.println(v)
+    h: int16 = 32767
+    h +%= 1
+    g: uint32 = 0
+    g -%= 0
+    io.println(h)
+    io.println(g)
+    x := 9223372036854775807
+    y := -9223372036854775807 - 1
+    io.println(x +% 1)
+    io.println(y -% 1)
+    io.println(y *% 2)
+    p: uint64 = 18446744073709551615
+    q: uint64 = 0
+    q -%= 1
+    io.println(p +% 1)
+    io.println(q)
+    k: int8 = 100 +% 100
+    n: uint8 = 1 -% 2
+    io.println(1 +% 2 *% 3)
+    io.println(k)
+    io.println(n)
+}

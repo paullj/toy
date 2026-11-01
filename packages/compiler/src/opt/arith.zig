@@ -116,6 +116,32 @@ pub fn wrapTo(ty: Ir.Type, x: i64) i64 {
     };
 }
 
+/// Whether `l op r` overflows integer type `ty`, the value-domain mirror of
+/// `CodegenIr.genOverflow`. A narrow type's operands fit 32 bits, so the 64-bit result is
+/// exact and overflows when it does not survive `wrapTo`; a 64-bit type is judged exactly.
+pub fn overflows(kind: Ir.Overflow.Kind, l: i64, r: i64, ty: Ir.Type) bool {
+    if (ty.intBits() < 64) {
+        const x = foldBin(switch (kind) {
+            .add => .add,
+            .sub => .sub,
+            .mul => .mul,
+        }, l, r);
+        return wrapTo(ty, x) != x;
+    }
+    if (ty.int_desc.signed) return switch (kind) {
+        .add => @addWithOverflow(l, r)[1] == 1,
+        .sub => @subWithOverflow(l, r)[1] == 1,
+        .mul => @mulWithOverflow(l, r)[1] == 1,
+    };
+    const a: u64 = @bitCast(l);
+    const b: u64 = @bitCast(r);
+    return switch (kind) {
+        .add => @addWithOverflow(a, b)[1] == 1,
+        .sub => @subWithOverflow(a, b)[1] == 1,
+        .mul => @mulWithOverflow(a, b)[1] == 1,
+    };
+}
+
 /// Logical not on a bool (matches `cmp #0; cset eq`).
 pub fn bnot(b: bool) bool {
     return !b;
@@ -262,4 +288,28 @@ test "foldBin bitwise and bcompl, then narrow wrapTo" {
     try std.testing.expectEqual(~@as(i64, 48), bcompl(48));
     try std.testing.expectEqual(@as(i64, 207), wrapTo(Ir.Type.uint8, bcompl(48))); // demo's ~c
     try std.testing.expectEqual(@as(i64, 65280), wrapTo(Ir.Type.uint16, bcompl(0x00FF)));
+}
+
+test "overflows: each op at the edges of signed and unsigned, narrow and 64-bit" {
+    const max = std.math.maxInt(i64);
+    const min = std.math.minInt(i64);
+    try std.testing.expect(overflows(.add, max, 1, Ir.Type.int));
+    try std.testing.expect(!overflows(.add, max, 0, Ir.Type.int));
+    try std.testing.expect(overflows(.sub, min, 1, Ir.Type.int));
+    try std.testing.expect(overflows(.sub, 0, min, Ir.Type.int));
+    try std.testing.expect(overflows(.mul, 4, 4611686018427387904, Ir.Type.int));
+    try std.testing.expect(overflows(.mul, min, -1, Ir.Type.int64));
+    try std.testing.expect(!overflows(.mul, -1, max, Ir.Type.int));
+    try std.testing.expect(overflows(.add, 127, 1, Ir.Type.int8));
+    try std.testing.expect(!overflows(.add, -128, 127, Ir.Type.int8));
+    try std.testing.expect(overflows(.sub, 0, 1, Ir.Type.uint8));
+    try std.testing.expect(overflows(.mul, 16, 16, Ir.Type.uint8));
+    try std.testing.expect(!overflows(.mul, 15, 17, Ir.Type.uint8));
+    try std.testing.expect(overflows(.add, -1, 1, Ir.Type.uint64));
+    try std.testing.expect(!overflows(.add, -2, 1, Ir.Type.uint64));
+    try std.testing.expect(overflows(.sub, 0, 1, Ir.Type.uint));
+    try std.testing.expect(overflows(.mul, 1 << 32, 1 << 32, Ir.Type.uint64));
+    try std.testing.expect(overflows(.mul, 65536, 32768, Ir.Type.int32));
+    // A literal `int` operand of 128 negated at int8 is -128, which fits.
+    try std.testing.expect(!overflows(.sub, 0, 128, Ir.Type.int8));
 }

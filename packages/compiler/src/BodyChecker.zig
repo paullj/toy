@@ -5245,9 +5245,10 @@ pub const BodyChecker = struct {
                 if (lt.kind == .bool and rt.kind == .bool) return Type.bool;
                 try bc.sink.report(.{ .span = bc.blameSpan(blame), .code = .T0044 }, "operands of '{s}' must be bool", .{op_text});
             },
-            .amp, .pipe, .caret, .lt_lt, .gt_gt, .percent => {
+            .amp, .pipe, .caret, .lt_lt, .gt_gt, .percent, .plus_percent, .minus_percent, .star_percent => {
                 if (lt.isInteger() and Type.eql(lt, rt)) return lt;
-                try bc.sink.report(.{ .span = bc.blameSpan(blame), .code = .T0044 }, "operands of '{s}' must be int", .{op_text});
+                const why = if (lt.isInteger() and rt.isInteger()) "have the same type" else "be int";
+                try bc.sink.report(.{ .span = bc.blameSpan(blame), .code = .T0044 }, "operands of '{s}' must {s}", .{ op_text, why });
             },
             .plus_dot, .minus_dot, .star_dot, .slash_dot => {
                 // The dotted operators are float-ONLY inline machine ops (no protocol
@@ -5301,7 +5302,7 @@ pub const BodyChecker = struct {
             .binary => switch (bc.tokens[n.main_token].tag) {
                 // A shift is left out: `constValue` cannot fold it, so a narrow width it
                 // took would go unchecked and wrap (`b + (1 << 10)` at int8).
-                .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret => bc.isConstInt(n.lhs) and bc.isConstInt(n.rhs),
+                .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent => bc.isConstInt(n.lhs) and bc.isConstInt(n.rhs),
                 else => false,
             },
             else => false,
@@ -5326,6 +5327,10 @@ pub const BodyChecker = struct {
             .amp => l & r,
             .pipe => l | r,
             .caret => l ^ r,
+            // Wrapping at 128 bits keeps the low bits `wrap` reads, so no operand can trap.
+            .plus_percent => Literal.wrap(l +% r, t),
+            .minus_percent => Literal.wrap(l -% r, t),
+            .star_percent => Literal.wrap(l *% r, t),
             else => null,
         };
     }

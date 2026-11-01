@@ -758,6 +758,7 @@ fn genInstr(g: *Gen, ins: Ir.Instr) error{OutOfMemory}!void {
             try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtzsS(S0, D0) else Aarch64.fcvtzs(S0, D0));
             try g.storeValue(S0, ins.result); // plat-width int result; no normalize needed
         },
+        .overflow => |o| try genOverflow(g, ins.result, o),
         .fcvt => |v| {
             try g.loadFpValue(D0, v);
             try g.emit(if (g.func.values[v].type.isF32()) Aarch64.fcvtDS(D0, D0) else Aarch64.fcvtSD(D0, D0));
@@ -793,6 +794,48 @@ fn genArith(g: *Gen, result: Ir.ValueId, b: Ir.Bin, kind: ArithKind) error{OutOf
     };
     try g.emit(word);
     try storeNormalized(g, result, S0);
+}
+
+/// The bool `o.lhs op o.rhs` overflows `o.ty`, mirrored by `arith.overflows`. A narrow
+/// type's operands fit 32 bits, so the 64-bit result is exact and overflows when width
+/// normalization changes it. A 64-bit type reads the flags (V signed, C unsigned) or, for
+/// `*`, compares the high half of the 128-bit product with the low half's sign.
+fn genOverflow(g: *Gen, result: Ir.ValueId, o: Ir.Overflow) error{OutOfMemory}!void {
+    try g.loadValue(S0, o.lhs);
+    try g.loadValue(S1, o.rhs);
+    const signed = o.ty.int_desc.signed;
+    if (o.ty.intBits() < 64) {
+        try g.emit(switch (o.kind) {
+            .add => Aarch64.addReg(S0, S0, S1),
+            .sub => Aarch64.subReg(S0, S0, S1),
+            .mul => Aarch64.mul(S0, S0, S1),
+        });
+        try g.emit(Aarch64.movReg(S1, S0));
+        try normalizeWidth(g, S1, o.ty);
+        try g.emit(Aarch64.cmpReg(S0, S1));
+        try g.emit(Aarch64.cset(S0, .ne));
+    } else switch (o.kind) {
+        .add => {
+            try g.emit(Aarch64.addsReg(Aarch64.XZR, S0, S1));
+            try g.emit(Aarch64.cset(S0, if (signed) .vs else .hs));
+        },
+        .sub => {
+            try g.emit(Aarch64.cmpReg(S0, S1));
+            try g.emit(Aarch64.cset(S0, if (signed) .vs else .lo));
+        },
+        .mul => if (signed) {
+            try g.emit(Aarch64.smulh(S2, S0, S1));
+            try g.emit(Aarch64.mul(S0, S0, S1));
+            try g.emit(Aarch64.asrImm(S0, S0, 63));
+            try g.emit(Aarch64.cmpReg(S2, S0));
+            try g.emit(Aarch64.cset(S0, .ne));
+        } else {
+            try g.emit(Aarch64.umulh(S0, S0, S1));
+            try g.emit(Aarch64.cmpImm(S0, 0));
+            try g.emit(Aarch64.cset(S0, .ne));
+        },
+    }
+    try g.storeValue(S0, result);
 }
 
 const RemKind = enum { smod, umod };
@@ -1326,6 +1369,11 @@ fn genTerm(g: *Gen, term: Ir.Terminator) error{OutOfMemory}!void {
             .div_by_zero => "division by zero",
             .rem_by_zero => "remainder by zero",
             .index_oob => "index out of bounds",
+            .add_overflow => "integer overflow in '+'",
+            .sub_overflow => "integer overflow in '-'",
+            .mul_overflow => "integer overflow in '*'",
+            .div_overflow => "integer overflow in '/'",
+            .neg_overflow => "integer overflow in negation",
         }),
     }
 }

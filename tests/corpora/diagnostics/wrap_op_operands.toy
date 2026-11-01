@@ -1,0 +1,18 @@
+# The wrapping operators `+%`, `-%` and `*%` and their compound forms take integers of
+# one type only (T0044): a float has the dotted operators, and no protocol makes them
+# work on a struct. A constant folds with wrapping, so it is never out of range.
+struct P { x: int }
+
+fn main() -> int {
+    f := 1.5
+    _a := f +% 1.0  #~ ERROR [T0044] operands of '+%' must be int
+    f *%= 2.0  #~ ERROR [T0044] operands of '*%=' must be int
+    p := P { x: 1 }
+    _b := p -% p  #~ ERROR [T0044] operands of '-%' must be int
+    n: int8 = 1
+    w: int = 2
+    _c := n +% w  #~ ERROR [T0044] operands of '+%' must have the same type
+    c: int8 = 100 +% 100
+    d: uint8 = 1 -% 2
+    return if c == -56 && d == 255 { 0 } else { 1 }
+}

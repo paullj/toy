@@ -56,7 +56,7 @@ protocol or a type parameter named where a value is wanted (`x := Color`,
 `id(Color)`, `Color |> id`, `lib.Shape`) is **T0056**, and the hint for an enum names
 one of its variants (`Color.red`).
 
-## Integer widths: literals fit, operators wrap
+## Integer widths: literals fit, operators trap or wrap
 
 An integer literal takes the width it is expected to have and must fit it (**T0034**).
 A negated literal is checked as the negative value it denotes: `-128` fits an `int8`,
@@ -66,9 +66,13 @@ and `-1` fits no unsigned width (`v: uint8 = -1`, `id(-1)` with `fn id(x: uint8)
 it takes that width, as a bare literal does (`b + -1` and `b += 1 + 2` with `b: int8`
 are `int8`), and its folded value must fit the width it takes (`c: int8 = 100 + 100` is
 T0034). One given no width (`x := 9223372036854775807 + 1`) is an `int` whose folded
-value is not checked. Operators on values never check at run time: they wrap at the
-operand width, so two `int8` 100s add to -56, and unary `-` on an unsigned value is
-`0 - u` (`u: uint8 = 1` then `-u` is 255).
+value is not checked when compiled (a debug build panics on it when it runs). On values, `+`, `-`, `*`, `/` and unary `-` panic on overflow in a
+debug build and wrap at the operand width in a release build (see `profiles.md`), so
+two `int8` 100s add to -56 in release. Unary `-` on an unsigned value is `0 - u`
+(`u: uint8 = 1` then `-u` is 255 in release). The wrapping operators `+%`, `-%` and `*%`
+(and `+%=`, `-%=`, `*%=`) wrap in every profile; they take two integers of one type
+(**T0044** otherwise), and a constant built with them folds wrapping, so
+`c: int8 = 100 +% 100` is -56.
 
 ## Floats: `float` and `f32`
 

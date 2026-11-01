@@ -74,6 +74,24 @@ pub fn addReg(rd: u32, rn: u32, rm: u32) u32 {
     return 0x8B000000 | (rm << 16) | (rn << 5) | rd;
 }
 
+/// adds rd, rn, rm — add and set flags (V on signed overflow, C on unsigned carry).
+/// adds x9,x9,x10 → 0xAB0A0129.
+pub fn addsReg(rd: u32, rn: u32, rm: u32) u32 {
+    return 0xAB000000 | (rm << 16) | (rn << 5) | rd;
+}
+
+/// smulh rd, rn, rm — the high 64 bits of the signed 128-bit product.
+/// smulh x11,x9,x10 → 0x9B4A7D2B.
+pub fn smulh(rd: u32, rn: u32, rm: u32) u32 {
+    return 0x9B407C00 | (rm << 16) | (rn << 5) | rd;
+}
+
+/// umulh rd, rn, rm — the high 64 bits of the unsigned 128-bit product.
+/// umulh x11,x9,x10 → 0x9BCA7D2B.
+pub fn umulh(rd: u32, rn: u32, rm: u32) u32 {
+    return 0x9BC07C00 | (rm << 16) | (rn << 5) | rd;
+}
+
 /// add rd, rn, rm, uxtx — the extended-register form, the one whose `rn` may be sp
 /// (in `addReg`'s shifted-register form, register 31 is xzr). add x9,x9,x14,uxtx →
 /// 0x8B2E6129; add x1,sp,x14 → 0x8B2E63E1.
@@ -398,6 +416,8 @@ pub const Cond = enum(u4) {
     lo = 0x3, // unsigned <
     mi = 0x4, // N==1 (float <: unordered→false, NOT `lt` which is unordered→true)
     pl = 0x5, // N==0 (the inverse of `mi`)
+    vs = 0x6, // signed overflow (V==1)
+    vc = 0x7, // no signed overflow (V==0)
     hi = 0x8, // unsigned >
     ls = 0x9, // unsigned <=
     ge = 0xA, // signed >=
@@ -423,6 +443,8 @@ pub fn invert(c: Cond) Cond {
         .ls => .hi,
         .mi => .pl,
         .pl => .mi,
+        .vs => .vc,
+        .vc => .vs,
     };
 }
 
@@ -731,6 +753,12 @@ test "large-offset frame encoders (assembler-verified)" {
     try std.testing.expectEqual(@as(u32, 0xD14007FF), subImmLsl12(SP, SP, 1));
     try std.testing.expectEqual(@as(u32, 0xD17FFFFF), subImmLsl12(SP, SP, 4095));
     try std.testing.expectEqual(@as(u32, 0xF100058C), subsImm(12, 12, 1));
+    try std.testing.expectEqual(@as(u32, 0xAB0A0129), addsReg(9, 9, 10));
+    try std.testing.expectEqual(@as(u32, 0x9B4A7D2B), smulh(11, 9, 10));
+    try std.testing.expectEqual(@as(u32, 0x9BCA7D2B), umulh(11, 9, 10));
+    try std.testing.expectEqual(@as(u32, 0x9A9F77E9), cset(9, .vs));
+    try std.testing.expectEqual(@as(u32, 0x9A9F37E9), cset(9, .hs));
+    try std.testing.expectEqual(@as(u32, 0x9A9F27E9), cset(9, .lo));
     try std.testing.expectEqual(@as(u32, 0x910003BF), addImm(SP, FP, 0)); // mov sp, x29
     try std.testing.expectEqual(@as(u32, 0xFD400590), ldrFpRegUoff(16, 12, 8));
     try std.testing.expectEqual(@as(u32, 0xFD07FD91), strFpRegUoff(17, 12, 4088));
