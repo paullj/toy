@@ -57,7 +57,12 @@ test('the metric, x axis and machine controls redraw the charts', async ({ page 
 });
 
 test('on a phone, the page never scrolls sideways', async ({ page }) => {
+	// Load at phone width, as a phone does: charts measured at desktop width
+	// only shrink after a ResizeObserver tick, which a slow runner can miss.
 	await page.setViewportSize({ width: 390, height: 800 });
+	await page.reload();
 	await expect(page.locator('figure[data-bench]').first()).toBeVisible();
-	expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(0);
+	await expect
+		.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+		.toBe(0);
 });
