@@ -67,7 +67,8 @@ dir = "packages/site"
 depends = ["site:wasm"]
 run = "pnpm build"
 
-# Benchmarks run locally, never in CI (#74). Arguments pass through to bench/run.sh:
+# Benchmarks run locally, never in CI (#74); on main they append to bench/history.jsonl
+# (see bench/README.md). Arguments pass through to bench/run.sh:
 # `mise run bench [--runs N] [FILTER]`, e.g. `mise run bench --runs 10 alloc`.
 [tasks.bench]
 description = "Run the benchmarks on the working tree: [--runs N] [FILTER]"

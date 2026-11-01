@@ -3,8 +3,9 @@
 #   usage: bench/run.sh [--runs N] [FILTER]
 # FILTER is a regex matched against benchmark names. Wall time comes from hyperfine
 # (N timed runs after one warmup); instructions, cycles and peak memory come from one
-# `/usr/bin/time -l` run, since they barely move between runs. Results go to
-# zig-out/bench/results.json. A checksum mismatch fails the run.
+# `/usr/bin/time -l` run, since they barely move between runs. record.sh then prints
+# the table and either appends to bench/history.jsonl or writes a temp file. A checksum
+# mismatch fails the run.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -14,7 +15,7 @@ filter=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -r|--runs) runs="${2:?--runs needs a count}"; shift 2 ;;
-    -h|--help) sed -n '2,7s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,8s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) filter="$1"; shift ;;
   esac
 done
@@ -25,6 +26,10 @@ done
 for tool in hyperfine jq zig; do
   command -v "$tool" >/dev/null || { echo "missing $tool: run through mise (mise run bench)"; exit 2; }
 done
+
+# Before the build: the record wants the ambient load, not the load of this run.
+BENCH_MACHINE="$(bash "$here/machine.sh")"
+export BENCH_MACHINE
 
 out="$root/zig-out/bench"
 echo "building toy (ReleaseFast) into ${out#"$root"/}..."
@@ -102,34 +107,16 @@ while IFS= read -r bench; do
   jq -c -n --arg name "$name" --arg kind "$kind" --argjson runs "$runs" \
     --arg checksum "$got" --argjson ok "$ok" \
     --slurpfile h "$work/$name.json" --argjson t "$t" \
-    '{name: $name, kind: $kind, runs: $runs,
-      wall_s: ($h[0].results[0].summary.time_wall_clock | {median, stddev, min, max, mean}),
-      checksum: (if $checksum == "" then null else $checksum end), checksum_ok: $ok} + $t' \
+    '$h[0].results[0].summary as $s
+     | {name: $name, kind: $kind, runs: $runs,
+        metrics: ($t + {wall_median_s: $s.time_wall_clock.median, wall_mean_s: $s.time_wall_clock.mean,
+          wall_stddev_s: $s.time_wall_clock.stddev, wall_min_s: $s.time_wall_clock.min,
+          wall_max_s: $s.time_wall_clock.max, user_s: $s.time_user.mean, sys_s: $s.time_system.mean}),
+        checksum: (if $checksum == "" then null else $checksum end), checksum_ok: $ok}' \
     >>"$work/results.jsonl"
 done < <(jq -c '.[]' "$here/benchmarks.json")
 
 [ -s "$work/results.jsonl" ] || { echo "no benchmark matches '$filter'"; exit 2; }
 
-dirty=false
-[ -n "$(git -C "$root" status --porcelain)" ] && dirty=true
-jq -s --arg commit "$(git -C "$root" rev-parse HEAD)" --argjson dirty "$dirty" \
-  --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{commit: $commit, dirty: $dirty, date: $date, results: .}' \
-  "$work/results.jsonl" >"$out/results.json"
-
-echo
-{
-  printf 'benchmark\tmedian\t± stddev\tmin..max\tinstructions\tcycles\tpeak RSS\tchecksum\n'
-  jq -r '.results[] |
-    def ms: . * 1000 | . * 10 | round / 10 | tostring + " ms";
-    def mega: . / 1e6 | . * 10 | round / 10 | tostring + "M";
-    [.name, (.wall_s.median | ms), (.wall_s.stddev | ms),
-     "\(.wall_s.min | ms)..\(.wall_s.max | ms)",
-     (.instructions | mega), (.cycles | mega),
-     (.max_rss_bytes / 1048576 | . * 10 | round / 10 | tostring + " MiB"),
-     (if .checksum == null then "-" elif .checksum_ok then "ok" else "FAIL" end)] | @tsv' \
-    "$out/results.json"
-} | column -t -s "$(printf '\t')"
-echo
-echo "results: ${out#"$root"/}/results.json"
+(cd "$root" && bash "$here/record.sh" "$work/results.jsonl")
 [ "$fails" -eq 0 ] || { echo "$fails checksum mismatch(es)"; exit 1; }
