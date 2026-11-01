@@ -436,7 +436,7 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
             try testing.expect(std.mem.startsWith(u8, atos.out, "util.sq (in prog)"));
         }
 
-        const lldb = (try runTool(gpa, io, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -n util.sq", exe })) orelse {
+        const lldb = (try runTool(gpa, io, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -n util.sq", "-o", "breakpoint set -n _util.sq", "-o", "breakpoint set -r util\\.sq", "-o", "breakpoint set -F util.sq", "-o", "breakpoint set -n sq", "-o", "breakpoint set -n main.apply", "-o", "breakpoint set -n main", "-o", "image lookup -s util.sq", "-o", "image lookup -s _util.sq", "-o", "image lookup -n util.sq", "-o", "image lookup -r -s util", "-o", "image dump symtab prog", exe })) orelse {
             lldb_broken = true;
             continue;
         };
@@ -445,8 +445,8 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
             lldb_broken = true;
             continue;
         }
-        errdefer std.debug.print("lldb:\n{s}{s}\n", .{ lldb.out, lldb.err });
-        try testing.expect(std.mem.indexOf(u8, lldb.out, "prog`util.sq") != null);
+        std.debug.print("PROBE-LLDB-BEGIN\n{s}{s}\nPROBE-LLDB-END\n", .{ lldb.out, lldb.err });
+        return error.ProbeOnly;
     }
     // Every other check ran; the skip marks that the lldb one could not.
     if (lldb_broken) return error.SkipZigTest;
