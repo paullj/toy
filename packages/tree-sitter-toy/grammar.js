@@ -157,8 +157,9 @@ module.exports = grammar({
         choice($.struct_field_block, $.tuple_field_list),
       ),
 
+    // The compiler separates fields by a comma or a newline, so the comma is optional.
     struct_field_block: ($) =>
-      seq("{", optional(commaList($.struct_field)), "}"),
+      seq("{", repeat(seq($.struct_field, optional(","))), "}"),
 
     // `pub` is accepted on enum-variant fields too (they share these rules); the
     // compiler rejects it there.
@@ -504,8 +505,8 @@ module.exports = grammar({
     _pattern: ($) =>
       choice($.variant_pattern, $.path_pattern, $.literal_pattern, $.identifier),
 
-    // A dot-leading variant pattern (`.some(n)`, `.N`, `.Rect { w, h }`). The payload is
-    // a tuple of sub-patterns or a record destructure binding field names.
+    // A dot-leading variant pattern (`.some(n)`, `.N`, `.Rect { w, h: high }`). The payload
+    // is a tuple of sub-patterns or a record destructure of fields.
     variant_pattern: ($) =>
       seq(".", $.identifier, optional($._pattern_payload)),
 
@@ -517,8 +518,13 @@ module.exports = grammar({
     _pattern_payload: ($) =>
       choice(
         seq("(", optional(commaList($._pattern)), ")"),
-        seq("{", optional(commaList($.identifier)), "}"),
+        seq("{", repeat(seq($.struct_pattern_field, optional(","))), "}"),
       ),
+
+    // `f` binds the field, `f: high` renames it, `f: 0` / `f: .some(n)` matches it. A rename
+    // is just the identifier sub-pattern, so one rule covers both. Commas are optional, as
+    // in a struct declaration.
+    struct_pattern_field: ($) => seq($.identifier, optional(seq(":", $._pattern))),
 
     literal_pattern: ($) =>
       choice($.number, $.float, $.string, $.char, $.boolean),

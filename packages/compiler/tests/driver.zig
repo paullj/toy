@@ -1539,6 +1539,13 @@ fn runToyOnFixture(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, src: []
     defer argv.deinit(gpa);
     try argv.append(gpa, bin_abs);
     for (args) |a| try argv.append(gpa, a);
+    // Without `-o` every fixture's binary lands at the one shared `.toy/<stamp>/debug/one`,
+    // and macOS can SIGKILL a binary rebuilt at a path it has already run (#245).
+    var out_buf: [256]u8 = undefined;
+    if (std.mem.eql(u8, args[0], "run")) {
+        try argv.append(gpa, "-o");
+        try argv.append(gpa, try std.fmt.bufPrint(&out_buf, "{s}/prog", .{dir_name}));
+    }
     try argv.append(gpa, path);
 
     var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe, .stderr = .ignore });

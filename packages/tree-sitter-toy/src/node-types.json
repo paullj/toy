@@ -3065,6 +3065,10 @@
           "named": true
         },
         {
+          "type": "struct_pattern_field",
+          "named": true
+        },
+        {
           "type": "variant_pattern",
           "named": true
         }
@@ -3672,6 +3676,33 @@
     }
   },
   {
+    "type": "struct_pattern_field",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "literal_pattern",
+          "named": true
+        },
+        {
+          "type": "path_pattern",
+          "named": true
+        },
+        {
+          "type": "variant_pattern",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "try_expression",
     "named": true,
     "fields": {},
@@ -4122,6 +4153,10 @@
         },
         {
           "type": "path_pattern",
+          "named": true
+        },
+        {
+          "type": "struct_pattern_field",
           "named": true
         },
         {
