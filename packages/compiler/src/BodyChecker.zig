@@ -1409,8 +1409,21 @@ pub const BodyChecker = struct {
                 // `a + 300` fires T0034 exactly once via the sibling path, never also via
                 // the outer expected.
                 bc.body.expected = null;
-                var lt = try bc.typeOf(n.lhs);
-                var rt = try bc.typeOf(n.rhs);
+                const want = resultWant(op_tok.tag, saved);
+                var lt: Type = undefined;
+                var rt: Type = undefined;
+                const l_into = bc.isIntoCall(n.lhs);
+                const r_into = bc.isIntoCall(n.rhs);
+                if (l_into and r_into) {
+                    lt = try bc.typeOfExpected(n.lhs, want);
+                    rt = try bc.typeOfExpected(n.rhs, want);
+                } else if (l_into) {
+                    rt = try bc.typeOf(n.rhs);
+                    lt = try bc.typeOfExpected(n.lhs, bc.intoTarget(n.rhs, rt, want));
+                } else {
+                    lt = try bc.typeOf(n.lhs);
+                    rt = if (r_into) try bc.typeOfExpected(n.rhs, bc.intoTarget(n.lhs, lt, want)) else try bc.typeOf(n.rhs);
+                }
                 bc.body.expected = saved;
                 if (lt.kind == .invalid or rt.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
                 const l_const = bc.isConstInt(n.lhs);
@@ -4594,6 +4607,11 @@ pub const BodyChecker = struct {
         const recv_is_char = Typecheck.isCharTy(recv_ty, char_id);
         if ((recv_ty.isInteger() or recv_is_char or recv_ty.kind == .float) and (std.mem.eql(u8, member, "into") or std.mem.eql(u8, member, "try_into"))) {
             if (bc.expectedTy()) |exp| {
+                // A poisoned sibling operand gives `.invalid`, already reported.
+                if (exp.kind == .invalid) {
+                    try bc.drainArgs(args);
+                    return .invalid;
+                }
                 if (Typecheck.builtinConvMethod(recv_ty, exp, member, char_id)) |cm| {
                     bc.setCallee(n, Callee.builtinMethod(if (std.mem.eql(u8, member, "into")) .conv_into else .conv_try_into));
                     _ = try bc.checkCall(node_idx, args, .{ .params = &.{}, .name = member });
@@ -4618,6 +4636,13 @@ pub const BodyChecker = struct {
                     bc.node_types[(node_idx).int()] = ret;
                     return ret;
                 }
+            } else {
+                // The method exists for every target; only the target is missing, so
+                // T0018's "no method" would point at the wrong fix.
+                try bc.drainArgs(args);
+                const eg: []const u8 = if (std.mem.eql(u8, member, "into")) "'y: int = x.into()'" else "'y: int8 = x.try_into().or(0)'";
+                try bc.report(.{ .span = bc.tokSpan(callee.main_token), .code = .T0016 }, "cannot infer the target of '{s}'; give the result a type, e.g. {s}", .{ member, eg });
+                return .invalid;
             }
         }
         if (std.mem.eql(u8, member, "cmp") and (recv_ty.kind == .@"struct" or recv_ty.kind == .@"enum" or Typecheck.isBuiltinOrdScalar(recv_ty)))
@@ -5264,6 +5289,36 @@ pub const BodyChecker = struct {
         return Type.invalid;
     }
 
+    /// What an operator's expected type says of its operands: their type, for an operator
+    /// whose result is its operand type, and nothing for a comparison or `&&`/`||`.
+    fn resultWant(op: TokenTag, saved: ?Expected) ?Type {
+        const e = saved orelse return null;
+        return switch (op) {
+            .plus, .minus, .star, .slash, .amp, .pipe, .caret, .lt_lt, .gt_gt, .percent, .plus_percent, .minus_percent, .star_percent, .plus_dot, .minus_dot, .star_dot, .slash_dot => e.ty,
+            else => null,
+        };
+    }
+
+    /// Whether `node` is a bare `v.into()`, whose target only its context can name: as a
+    /// binary operand it takes the other operand's type. A `-` or `~` passes its expected
+    /// type to its operand, so `-v.into()` takes it too.
+    fn isIntoCall(bc: *const BodyChecker, node: Ast.Index) bool {
+        var n = bc.tree.nodes[node.int()];
+        while (n.tag == .unary and n.lhs != Ast.none and (bc.tokens[n.main_token].tag == .minus or bc.tokens[n.main_token].tag == .tilde))
+            n = bc.tree.nodes[n.lhs.int()];
+        if (n.tag != .call or Ast.rangeSlice(bc.tree, n.rhs.int()).len != 0) return false;
+        const callee = bc.tree.nodes[n.lhs.int()];
+        return callee.tag == .field_access and std.mem.eql(u8, bc.nameText(callee.main_token), "into");
+    }
+
+    /// The target an `into()` operand converts to beside `sibling`, typed `st`. A constant
+    /// has no type of its own until it adopts one, and `never` gives none, so beside
+    /// either the operator's expected type (`want`) names it.
+    fn intoTarget(bc: *const BodyChecker, sibling: Ast.Index, st: Type, want: ?Type) ?Type {
+        if (st.kind == .never or bc.isConstInt(sibling) or bc.isConstFloat(sibling)) return want;
+        return st;
+    }
+
     /// The type of binary operand `operand` (typed `t` with no expected type): a constant
     /// integer operand beside an operand of integer type `sibling` takes that width.
     fn adoptConstWidth(bc: *BodyChecker, operand: Ast.Index, t: Type, sibling: Type) error{OutOfMemory}!Type {
@@ -5351,10 +5406,11 @@ pub const BodyChecker = struct {
 
     /// The type `place op= v` stores, `place op v`, given the place type `lt`. `v` is typed
     /// as a binary operand is, with no expected type, so a constant adopts the place's
-    /// width and anything else must already match it; errors name the compound operator.
+    /// width, an `into()` converts to it, and anything else must already match it; errors
+    /// name the compound operator.
     fn compoundValue(bc: *BodyChecker, stmt_idx: Ast.Index, base: TokenTag, lt: Type) error{OutOfMemory}!Type {
         const stmt = bc.tree.nodes[stmt_idx.int()];
-        var rt = try bc.typeOfExpected(stmt.rhs, null);
+        var rt = try bc.typeOfExpected(stmt.rhs, if (bc.isIntoCall(stmt.rhs)) lt else null);
         if (lt.kind == .invalid or rt.kind == .invalid) return Type.invalid;
         rt = try bc.adoptConstWidth(stmt.rhs, rt, lt);
         const op_tok = bc.tokens[stmt.main_token];

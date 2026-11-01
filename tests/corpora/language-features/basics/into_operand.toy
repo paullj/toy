@@ -1,0 +1,21 @@
+# Feature: `.into()` as a binary operand takes its target from the other operand's type:
+# both orders, a compound assignment and comparisons. Beside a literal, which has no
+# type of its own, an arithmetic operator's expected type gives the target.
+# expect: exit 40
+fn widen(x: int32) -> int { 1 + x.into() }
+fn widen_rev(x: int32) -> int { x.into() + 1 }
+
+fn main() -> int {
+    x: int32 = 5
+    n := 10
+    a := n + x.into()
+    b := x.into() * n
+    c: int = 0
+    c += x.into()
+    d := if x.into() < n { 1 } else { 0 }
+    e := if n == x.into() { 100 } else { 0 }
+    f: int64 = 2
+    g := f - x.into()
+    h: int = g.into()
+    widen(x) + widen_rev(x) + a + b - 50 + c + d + e - h + 4
+}

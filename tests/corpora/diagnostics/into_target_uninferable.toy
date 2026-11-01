@@ -1,0 +1,11 @@
+# A builtin `.into()` / `.try_into()` with nothing to name its target is T0016, not
+# T0018: no annotation, a literal beside it under a comparison, or no expected type
+# for an arithmetic operator beside a literal.
+fn main() -> int {
+    x: int32 = 5
+    _a := x.into()  #~ ERROR [T0016] cannot infer the target of 'into'; give the result a type, e.g. 'y: int = x.into()'
+    _b := x.into() == 5  #~ ERROR [T0016] cannot infer the target of 'into'
+    _c := 1 + x.into()  #~ ERROR [T0016] cannot infer the target of 'into'
+    _d := x.try_into()  #~ ERROR [T0016] cannot infer the target of 'try_into'; give the result a type, e.g. 'y: int8 = x.try_into().or(0)'
+    return 0
+}

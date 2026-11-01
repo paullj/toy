@@ -6593,6 +6593,48 @@ test "an associated fn of a bare generic struct infers its type params from its 
     }
 }
 
+test "the expected type binds an associated fn's impl params its args leave open" {
+    const decls =
+        \\struct Box[T] { v: T }
+        \\impl Box[T] {
+        \\ fn empty() -> Box[T] { panic("none") }
+        \\ fn tag(_n: int) -> Box[T] { panic("none") }
+        \\ fn conv[U](_v: T) -> Box[U] { panic("none") }
+        \\}
+        \\fn take(b: Box[bool]) -> int { if b.v { 1 } else { 0 } }
+        \\fn mk() -> Box[str] { Box.tag(1) }
+        \\
+    ;
+    try expectNoErrors(decls ++ "fn main() -> int {\n e: Box[int] = Box.empty()\n _s := mk()\n return e.v + take(Box.empty())\n}\n");
+    // A return type the expected type cannot be binds nothing.
+    try expectOneDiag(decls ++ "fn main() -> int {\n _x: int = Box.empty()\n return 0\n}\n", .T0016, "cannot infer type parameter 'T' for 'Box.empty'; add explicit type arguments, e.g. Box[int].empty");
+    // A fn's own param is the args' to bind, never the expected type's.
+    try expectOneDiag(decls ++ "fn main() -> int {\n _c: Box[int] = Box.conv(true)\n return 0\n}\n", .T0016, "cannot infer type parameter 'U' for 'Box.conv'; add explicit type arguments, e.g. Box[bool].conv[int]");
+    // A receiver's type is not the call's result type, so the call's expected type binds
+    // nothing in it.
+    const chained = decls ++ "impl Box[T] {\n fn same(self) -> Box[T] { self }\n fn as_str(self) -> Box[str] { panic(\"none\") }\n}\n";
+    try expectOneDiag(chained ++ "fn main() -> int {\n _b: Box[int] = Box.empty().same()\n return 0\n}\n", .T0016, "cannot infer type parameter 'T' for 'Box.empty'; add explicit type arguments, e.g. Box[int].empty");
+    try expectOneDiag(chained ++ "fn main() -> int {\n _b: Box[str] = Box.empty().as_str()\n return 0\n}\n", .T0016, "cannot infer type parameter 'T' for 'Box.empty'; add explicit type arguments, e.g. Box[int].empty");
+}
+
+test "an into() operand takes its target from the other operand" {
+    try expectNoErrors(
+        \\fn f(x: int32) -> int { 1 + x.into() }
+        \\fn g(x: int32, n: int) -> bool { x.into() < n }
+        \\fn h(x: int32) -> int {
+        \\ c := 2
+        \\ c += x.into()
+        \\ c
+        \\}
+        \\fn k(x: int32, n: int) -> int { -x.into() + n }
+        \\fn main() -> int { f(1) + h(2) + k(3, 4) }
+        \\
+    );
+    try expectOneDiag("fn main() -> int {\n x: int32 = 1\n _b := x.into() == 5\n return 0\n}\n", .T0016, "cannot infer the target of 'into'; give the result a type, e.g. 'y: int = x.into()'");
+    // The method exists; only the target is missing, so no T0018.
+    try expectOneDiag("fn main() -> int {\n x: int32 = 1\n _b := x.into()\n return 0\n}\n", .T0016, "cannot infer the target of 'into'; give the result a type, e.g. 'y: int = x.into()'");
+}
+
 test "a field of a call result is no store target, and a user Vec has no index" {
     const gpa = testing.allocator;
     const decls =

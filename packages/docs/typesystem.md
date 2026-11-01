@@ -83,7 +83,10 @@ beside an `f32` operand (`x *. 2.0`); it is then rounded to the nearest `f32`. T
 dotted operators and `==`/`!=` take two operands of the same float type: an `f32` and a
 `float` do not mix (**T0044**), so one is converted with `into` (to `float` exactly, to
 `f32` rounded to nearest). An integer converts to either with `into`, and either to an
-integer with `try_into`. See `ffi.md` for `f32` at the C boundary.
+integer with `try_into`. The target of `into` is the expected type; as a binary operand
+(`x.into() + n`, `-x.into() < n`, `n += x.into()`) it is the other operand's type, or,
+beside a literal, the operator's expected type. With no target at all it is **T0016**.
+See `ffi.md` for `f32` at the C boundary.
 
 ## Bidirectional checking: synth / check
 
@@ -417,7 +420,11 @@ the receiver's variables. The arguments are typed in this order:
    the receiver's bindings in, a bare call's against its parameter through what the
    call's expected type binds against the return type, an associated call's with no
    expectation from the call (a parameter with no type parameter is the argument's
-   type outright, as for any part). One that errs under that is typed again against
+   type outright, as for any part). An associated call's impl type parameter the
+   arguments leave open then binds from the call's expected type against the return
+   type (`v: Vec[int] = Vec.new()`), though never as a receiver: with
+   `fn chain(self) -> Box[T]`, `b: Box[int] = Box.mk().chain()` is still **T0016**
+   for `Box.mk`. One that errs under that is typed again against
    its parameter with what the earlier arguments bind, and keeps that typing when it
    errs less: `pair(t, Option.none)`, `pair(t, .none)` and `count(t, [])` take `t`'s
    type, while an argument that types itself binds as before (`f(x8, 5)` with
