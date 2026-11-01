@@ -9,6 +9,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bench/lib.sh
+. "$here/lib.sh"
 root="$(dirname "$here")"
 runs=5
 filter=""
@@ -31,30 +33,12 @@ done
 BENCH_MACHINE="$(bash "$here/machine.sh")"
 export BENCH_MACHINE
 
-out="$root/zig-out/bench"
-echo "building toy (ReleaseFast) into ${out#"$root"/}..."
-# A separate prefix keeps the Debug zig-out/bin/toy the tests use untouched.
-(cd "$root" && zig build -Doptimize=ReleaseFast -p "$out")
-toy="$out/bin/toy"
+toy="$(release_toy "$root")"
 
 # A fresh dir per run: macOS can kill a binary rebuilt over the path of one it ran before.
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 : >"$work/results.jsonl"
-
-time_metrics() {
-  awk '
-    /instructions retired/      { i = $1 }
-    /cycles elapsed/            { c = $1 }
-    /maximum resident set size/ { r = $1 }
-    /peak memory footprint/     { p = $1 }
-    END {
-      # A field this macOS does not print must fail the run, not be recorded as 0.
-      if (i == "" || c == "" || r == "" || p == "") { print "time -l lacks a field: " FILENAME > "/dev/stderr"; exit 1 }
-      printf "{\"instructions\":%d,\"cycles\":%d,\"max_rss_bytes\":%d,\"peak_footprint_bytes\":%d}\n", i, c, r, p
-    }
-  ' "$1"
-}
 
 fails=0
 while IFS= read -r bench; do
@@ -67,8 +51,7 @@ while IFS= read -r bench; do
   case "$kind" in
     runtime)
       src="$here/$(jq -r .source <<<"$bench")"
-      # The corpus checks the same line in CI, so the checksum has one source.
-      checksum="$(sed -n 's/^# expect: stdout "\(.*\)\\n"$/\1/p' "$src")"
+      checksum="$(expected_checksum "$src")"
       [ -n "$checksum" ] || { echo "  $name: no '# expect: stdout' checksum line in ${src#"$root"/}"; exit 2; }
       bin="$work/$name"
       (cd "$work" && "$toy" build --release -o "$bin" "$src") >/dev/null
@@ -103,16 +86,11 @@ while IFS= read -r bench; do
     fi
   fi
 
-  t="$(time_metrics "$work/$name.time")"
+  m="$(bench_metrics "$work/$name.json" "$work/$name.time")"
   jq -c -n --arg name "$name" --arg kind "$kind" --argjson runs "$runs" \
-    --arg checksum "$got" --argjson ok "$ok" \
-    --slurpfile h "$work/$name.json" --argjson t "$t" \
-    '$h[0].results[0].summary as $s
-     | {name: $name, kind: $kind, runs: $runs,
-        metrics: ($t + {wall_median_s: $s.time_wall_clock.median, wall_mean_s: $s.time_wall_clock.mean,
-          wall_stddev_s: $s.time_wall_clock.stddev, wall_min_s: $s.time_wall_clock.min,
-          wall_max_s: $s.time_wall_clock.max, user_s: $s.time_user.mean, sys_s: $s.time_system.mean}),
-        checksum: (if $checksum == "" then null else $checksum end), checksum_ok: $ok}' \
+    --arg checksum "$got" --argjson ok "$ok" --argjson m "$m" \
+    '{name: $name, kind: $kind, runs: $runs, metrics: $m,
+      checksum: (if $checksum == "" then null else $checksum end), checksum_ok: $ok}' \
     >>"$work/results.jsonl"
 done < <(jq -c '.[]' "$here/benchmarks.json")
 
