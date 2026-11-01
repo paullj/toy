@@ -44,6 +44,7 @@ pub fn lowerLambda(
         try b.homes.put(gpa, li, .{ .slot = sid });
     }
     const lam = in.tree.nodes[unit.node.int()];
+    b.markFnLines(lam.main_token, lam.rhs);
     const blocks = try L.openBodyBlocks(&b, unit.sig.ret);
     try bindCaptures(&b, unit, env_slot);
     if (unit.self_slot != null) try bindGroup(&b, unit, env_slot);
