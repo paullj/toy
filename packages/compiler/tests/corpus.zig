@@ -701,7 +701,7 @@ fn compileAndRun(
     defer lp.deinit(gpa);
     if (lp.diags.len > 0) return .{ .compile_error = try std.fmt.allocPrint(gpa, "codegen diagnostics ({d})\n", .{lp.diags.len}) };
 
-    const image = try DriverCodegen.buildImage(io, gpa, out_name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, libs.linking);
+    const image = try DriverCodegen.buildImage(io, gpa, out_name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, libs.linking, lp.symtab);
     defer gpa.free(image);
     {
         const perms: Io.File.Permissions = .fromMode(0o755);
