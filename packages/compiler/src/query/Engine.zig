@@ -25,6 +25,7 @@ const CodegenIr = @import("../codegen/CodegenIr.zig");
 const Ast = @import("../ast/Ast.zig");
 const Fingerprint = @import("Fingerprint.zig");
 const AstWalk = @import("AstWalk.zig");
+const Walk = @import("../ast/Walk.zig");
 const Link = @import("../link/Link.zig");
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
@@ -641,7 +642,13 @@ fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl
         confs.deinit(gpa);
     }
     try AstWalk.walkConformances(gpa, in, fr.conformances, &confs);
-    const fp = Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts);
+    var fp = Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts);
+    if (in.lines.tracked()) {
+        var h = std.hash.Wyhash.init(fp);
+        var lv = AstWalk.LineVisitor{ .h = &h, .in = in };
+        Walk.walk(.{ .tree = in.tree, .tokens = in.tokens, .source = in.source }, decl, &lv) catch unreachable;
+        fp = h.final();
+    }
     return Key.codegen(target, fp, fr.profile, fr.sym);
 }
 

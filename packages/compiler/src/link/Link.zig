@@ -37,6 +37,7 @@ const Type = @import("../layout/Type.zig").Type;
 // keeps only the orchestration and calls `reloc.patchIntra`/`reloc.patchCross`.
 const reloc = @import("reloc.zig");
 const MachO = @import("MachO.zig");
+const Dwarf = @import("Dwarf.zig");
 pub const SymbolId = reloc.SymbolId;
 pub const RelocKind = reloc.RelocKind;
 pub const Reloc = reloc.Reloc;
@@ -99,6 +100,21 @@ pub const FnCode = struct {
     /// as "scan this frame conservatively". A pure function of the IR + layouts, so it rides
     /// the content-fp cache. Owned like the other regions ("always own").
     root_bitmap: []u8 = &.{},
+    /// A debug build's line table: each statement's first code byte, with its line relative
+    /// to `src.line`. Relative, so an edit that only moves the function keeps its cached
+    /// code; the codegen key folds every line delta inside it. Empty for a release build or
+    /// a unit with no source.
+    lines: []LineRow = &.{},
+    /// Where the function is written: set each build after the cache, never packed, since
+    /// a module's index and a declaration's line can change while the code does not.
+    src: ?Src = null,
+
+    pub const Src = struct {
+        /// The module, by its index in the build's file list (`DebugInput.files`).
+        file: u32,
+        /// The line `lines` are relative to.
+        line: u32,
+    };
 
     pub fn deinit(fc: *FnCode, gpa: std.mem.Allocator) void {
         gpa.free(fc.sym.name);
@@ -108,8 +124,20 @@ pub const FnCode = struct {
         for (fc.literals) |l| gpa.free(l.bytes);
         gpa.free(fc.literals);
         gpa.free(fc.root_bitmap);
+        gpa.free(fc.lines);
         fc.* = undefined;
     }
+};
+
+pub const LineRow = extern struct { off: u32, line: u32 };
+
+/// What `link` needs to emit debug info beyond the fns: the build's source files and
+/// where relative names resolve.
+pub const DebugInput = struct {
+    files: []const []const u8,
+    /// The entry module, which names the compile unit.
+    cu_file: u32,
+    comp_dir: []const u8,
 };
 
 /// In-session symbol→handle map. Never persisted: the on-disk identity is the
@@ -338,9 +366,10 @@ pub const Linked = struct {
     /// ranked; consumes only order-independent inputs), so it is `-jN` byte-identical. Owned
     /// by the caller.
     stack_map: []u8 = &.{},
-    /// The Mach-O symbol table of a debug build (empty unless `link` was asked for it):
-    /// one row per fn, by the same names and order as `sym_table`. Owned by the caller.
-    debug_symtab: MachO.Symtab = .{},
+    /// The debug info of a debug build (empty unless `link` was asked for it): the symbol
+    /// table, one row per fn by the same names and order as `sym_table`, and the DWARF line
+    /// tables. Owned by the caller.
+    debug: MachO.Debug = .{},
 };
 
 /// Raised when a `.call26` displacement does not fit AArch64's signed imm26
@@ -389,7 +418,7 @@ fn prefixSumTextOffsets(
 /// backward (and self/mutual) recursion a non-positive one; both encode directly
 /// via `Aarch64.bl`. Because the delta is intra-module it is fixed at link time
 /// and needs NO runtime relocation under PIE/ASLR.
-pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterner, entry: SymName, emit_symtab: bool, emit_stackmap: bool, descriptors: []const DescEntry, emit_debug_symtab: bool) LinkError!Linked {
+pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterner, entry: SymName, emit_symtab: bool, emit_stackmap: bool, descriptors: []const DescEntry, debug: ?DebugInput) LinkError!Linked {
     // 1) LAYOUT: assign every fn a dense handle by STABLE SORT of the fn set
     //    (rank, never arrival/source order), then
     //    walk `fns` in SOURCE ORDER to give each its text offset. Layout STAYS
@@ -520,8 +549,10 @@ pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterne
     //    a pure function of the fn set.
     const sym_table: []u8 = if (emit_symtab) try buildSymTable(gpa, fns, site_h, offsets, cursor) else &.{};
     errdefer gpa.free(sym_table);
-    const debug_symtab: MachO.Symtab = if (emit_debug_symtab) try buildDebugSymtab(gpa, fns, site_h, offsets) else .{};
+    const debug_symtab: MachO.Symtab = if (debug != null) try buildDebugSymtab(gpa, fns, site_h, offsets) else .{};
     errdefer debug_symtab.deinit(gpa);
+    const dwarf: Dwarf.Sections = if (debug) |d| try buildDwarf(gpa, fns, site_h, offsets, cursor, d) else .{};
+    errdefer dwarf.deinit(gpa);
 
     // 4b) DESCRIPTORS: the per-type table the erased `descriptor_of` path reads. Built
     //     from the same `si`/`offsets`, so it is a pure function of the fn set.
@@ -542,7 +573,7 @@ pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterne
         .sym_table = sym_table,
         .desc_table = desc_table,
         .stack_map = stack_map,
-        .debug_symtab = debug_symtab,
+        .debug = .{ .symtab = debug_symtab, .dwarf = dwarf },
     };
 }
 
@@ -705,6 +736,40 @@ fn buildDebugSymtab(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const
     return MachO.Symtab.build(gpa, rows);
 }
 
+/// The DWARF line tables of a debug build: every fn that carries a line table and a
+/// source, in text order. Empty when none does.
+fn buildDwarf(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32, in: DebugInput) !Dwarf.Sections {
+    var dfns: std.ArrayList(Dwarf.Fn) = .empty;
+    defer dfns.deinit(gpa);
+    var n_rows: usize = 0;
+    for (fns) |f| n_rows += f.lines.len;
+    // Sized once, so the per-fn slices into it stay valid.
+    const rows = try gpa.alloc(Dwarf.Row, n_rows);
+    defer gpa.free(rows);
+    var at: usize = 0;
+    for (fns, 0..) |f, i| {
+        if (f.lines.len == 0) continue;
+        const src = f.src orelse continue;
+        const mine = rows[at..][0..f.lines.len];
+        at += f.lines.len;
+        for (f.lines, mine) |r, *d| d.* = .{ .off = r.off, .line = src.line +% r.line };
+        try dfns.append(gpa, .{
+            .name = f.sym.name,
+            .text_off = offsets[site_h[i]],
+            .size = @intCast(f.code.len),
+            .file = src.file,
+            .rows = mine,
+        });
+    }
+    if (dfns.items.len == 0) return .{};
+    std.mem.sortUnstable(Dwarf.Fn, dfns.items, {}, struct {
+        fn less(_: void, a: Dwarf.Fn, b: Dwarf.Fn) bool {
+            return a.text_off < b.text_off;
+        }
+    }.less);
+    return Dwarf.build(gpa, .{ .files = in.files, .cu_file = in.cu_file, .comp_dir = in.comp_dir, .fns = dfns.items, .text_size = text_size });
+}
+
 /// Whether a reloc names a function whose `__text` offset the link resolves: every
 /// `bl` (`.call26`) and every function-address adrp/add pair. The ONE predicate the
 /// target pre-resolution and the per-fn job's handle cursor both use, so the cursor
@@ -858,6 +923,7 @@ fn dataRelocJob(
 // `extern` records inside the same `[u64 checksum][payload]` envelope `Cache`
 // uses for the parse Tree. Blob layout:
 //   [FnHeader][sym name][code][RelocRec×n][names pool][LitRec×m][lits pool][root bitmap]
+//   [LineRow×k]
 // Names (reloc `.func`/`.import` targets) are pooled; each RelocRec carries an
 // (offset,len) into that pool. `unpack` reconstructs an "always own" FnCode so a
 // hit and a fresh lower share one `deinit`.
@@ -867,7 +933,7 @@ pub const fncode_magic: u32 = 0x544f4643;
 
 const FnHeader = extern struct {
     magic: u32,
-    version: u32 = 2,
+    version: u32 = 3,
     sym_kind: u8,
     _pad: [3]u8 = .{ 0, 0, 0 },
     sym_name_len: u32,
@@ -877,6 +943,7 @@ const FnHeader = extern struct {
     names_len: u32,
     lits_len: u32,
     root_bitmap_len: u32,
+    line_count: u32,
 };
 
 const RelocRec = extern struct {
@@ -916,7 +983,8 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
 
     const total = @sizeOf(FnHeader) + fc.sym.name.len + fc.code.len +
         fc.relocs.len * @sizeOf(RelocRec) + names_len +
-        fc.literals.len * @sizeOf(LitRec) + lits_len + fc.root_bitmap.len;
+        fc.literals.len * @sizeOf(LitRec) + lits_len + fc.root_bitmap.len +
+        fc.lines.len * @sizeOf(LineRow);
     const buf = try gpa.alloc(u8, total);
     errdefer gpa.free(buf);
 
@@ -930,6 +998,7 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
         .names_len = @intCast(names_len),
         .lits_len = @intCast(lits_len),
         .root_bitmap_len = @intCast(fc.root_bitmap.len),
+        .line_count = @intCast(fc.lines.len),
     };
     @memcpy(buf[0..@sizeOf(FnHeader)], std.mem.asBytes(&hdr));
     var off: usize = @sizeOf(FnHeader);
@@ -1000,6 +1069,9 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
     // Root bitmap trails the lits pool (a raw byte blob, no records).
     @memcpy(buf[off .. off + fc.root_bitmap.len], fc.root_bitmap);
     off += fc.root_bitmap.len;
+    const line_bytes = std.mem.sliceAsBytes(fc.lines);
+    @memcpy(buf[off .. off + line_bytes.len], line_bytes);
+    off += line_bytes.len;
 
     std.debug.assert(off == total);
     return buf;
@@ -1013,13 +1085,13 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
     if (bytes.len < @sizeOf(FnHeader)) return null;
     var hdr: FnHeader = undefined;
     @memcpy(std.mem.asBytes(&hdr), bytes[0..@sizeOf(FnHeader)]);
-    if (hdr.magic != fncode_magic or hdr.version != 2) return null;
+    if (hdr.magic != fncode_magic or hdr.version != 3) return null;
     if (hdr.sym_kind > @intFromEnum(SymKind.import)) return null;
 
     const need = @sizeOf(FnHeader) + @as(usize, hdr.sym_name_len) + @as(usize, hdr.code_len) +
         @as(usize, hdr.reloc_count) * @sizeOf(RelocRec) + @as(usize, hdr.names_len) +
         @as(usize, hdr.lit_count) * @sizeOf(LitRec) + @as(usize, hdr.lits_len) +
-        @as(usize, hdr.root_bitmap_len);
+        @as(usize, hdr.root_bitmap_len) + @as(usize, hdr.line_count) * @sizeOf(LineRow);
     if (bytes.len != need) return null;
 
     var off: usize = @sizeOf(FnHeader);
@@ -1097,12 +1169,18 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
     errdefer gpa.free(root_bitmap);
     off += hdr.root_bitmap_len;
 
+    const lines = try gpa.alloc(LineRow, hdr.line_count);
+    errdefer gpa.free(lines);
+    @memcpy(std.mem.sliceAsBytes(lines), bytes[off .. off + lines.len * @sizeOf(LineRow)]);
+    off += lines.len * @sizeOf(LineRow);
+
     return FnCode{
         .sym = .{ .kind = @enumFromInt(hdr.sym_kind), .name = sym_name },
         .code = code,
         .relocs = relocs,
         .literals = literals,
         .root_bitmap = root_bitmap,
+        .lines = lines,
     };
 }
 
@@ -1156,7 +1234,7 @@ fn linkTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry: u32) Li
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), false, false, &.{}, false);
+    return link(threaded.io(), gpa, fns, &si, fname(entry), false, false, &.{}, null);
 }
 
 /// Like `linkTest` but requests the backtrace symbol table (`emit_symtab = true`).
@@ -1165,7 +1243,7 @@ fn linkSymTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry: u32)
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), true, false, &.{}, false);
+    return link(threaded.io(), gpa, fns, &si, fname(entry), true, false, &.{}, null);
 }
 
 /// Like `linkTest` but requests the GC stack-map table (`emit_stackmap = true`).
@@ -1174,7 +1252,7 @@ fn linkStackMapTest(gpa: std.mem.Allocator, fns: []const FnCode, comptime entry:
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    return link(threaded.io(), gpa, fns, &si, fname(entry), false, true, &.{}, false);
+    return link(threaded.io(), gpa, fns, &si, fname(entry), false, true, &.{}, null);
 }
 
 test "the debug symtab names every fn at its text offset, in offset order" {
@@ -1190,12 +1268,12 @@ test "the debug symtab names every fn at its text offset, in offset order" {
     defer threaded.deinit();
     var si: SymInterner = .{};
     defer si.deinit(gpa);
-    const linked = try link(threaded.io(), gpa, &fns, &si, fname(0), false, false, &.{}, true);
+    const linked = try link(threaded.io(), gpa, &fns, &si, fname(0), false, false, &.{}, .{ .files = &.{"main.toy"}, .cu_file = 0, .comp_dir = "/" });
     defer gpa.free(linked.text);
     defer gpa.free(linked.data_relocs);
-    defer linked.debug_symtab.deinit(gpa);
+    defer linked.debug.deinit(gpa);
 
-    const st = linked.debug_symtab;
+    const st = linked.debug.symtab;
     try testing.expectEqual(@as(usize, 3), st.syms.len);
     const want_off = [_]u32{ 0, 12, 16 };
     for (st.syms, fns, want_off) |s, f, off| {
@@ -1833,7 +1911,7 @@ test "CallTargetTooFar on i26-overflowing displacement" {
     try testing.expectError(error.CallTargetTooFar, linkTest(gpa, &fns, 0));
 }
 
-test "FnCode pack/unpack round-trips relocs, names, and literals" {
+test "FnCode pack/unpack round-trips relocs, names, literals and line rows" {
     const gpa = testing.allocator;
     // A FnCode with one func reloc, one cstr reloc, one import reloc, plus a
     // literal — exercises every target tag and the names/lits pools.
@@ -1847,7 +1925,8 @@ test "FnCode pack/unpack round-trips relocs, names, and literals" {
     const literals = try gpa.dupe(Literal, &.{.{ .hash = 0x1234, .bytes = lit_bytes }});
     // A non-empty root bitmap `[u32 2][8][24]` exercises the trailing-blob round-trip.
     const rb = try gpa.dupe(u8, &[_]u8{ 2, 0, 0, 0, 8, 0, 0, 0, 24, 0, 0, 0 });
-    const fc = FnCode{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") }, .code = code, .relocs = relocs, .literals = literals, .root_bitmap = rb };
+    const lines = try gpa.dupe(LineRow, &.{ .{ .off = 0, .line = 0 }, .{ .off = 4, .line = 2 } });
+    const fc = FnCode{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") }, .code = code, .relocs = relocs, .literals = literals, .root_bitmap = rb, .lines = lines, .src = .{ .file = 1, .line = 9 } };
     defer {
         // free the original's owned bits (names here are static literals except
         // sym.name and the duped slices) — use a manual free, not deinit, since
@@ -1858,6 +1937,7 @@ test "FnCode pack/unpack round-trips relocs, names, and literals" {
         for (fc.literals) |l| gpa.free(l.bytes);
         gpa.free(fc.literals);
         gpa.free(fc.root_bitmap);
+        gpa.free(fc.lines);
     }
 
     const blob = try pack(gpa, fc);
@@ -1876,6 +1956,9 @@ test "FnCode pack/unpack round-trips relocs, names, and literals" {
     try testing.expectEqual(@as(usize, 1), got.literals.len);
     try testing.expectEqual(@as(u64, 0x1234), got.literals[0].hash);
     try testing.expectEqualSlices(u8, "hi", got.literals[0].bytes);
+    try testing.expectEqualSlices(LineRow, fc.lines, got.lines);
+    // Where the fn is written is the build's, not the cache's.
+    try testing.expect(got.src == null);
 }
 
 test "unpack rejects a foreign or corrupt blob" {

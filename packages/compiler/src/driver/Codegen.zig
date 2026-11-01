@@ -82,8 +82,8 @@ pub const LinkedProgram = struct {
     /// vmaddrs. Owned; empty for reloc-free programs. The dyld import set is DERIVED
     /// from these (`.import` targets) in `assembleAndSign`.
     data_relocs: []Link.Reloc = &.{},
-    /// The debug symbol table, empty unless the profile asks for it. Owned.
-    symtab: MachO.Symtab = .{},
+    /// The debug info, empty unless the profile asks for it. Owned.
+    debug: MachO.Debug = .{},
     /// Incremental counters: how many functions were freshly lowered vs served
     /// from the codegen cache this build. Surfaced via `--codegen-stats`.
     codegen_compiled: usize = 0,
@@ -107,7 +107,7 @@ pub const LinkedProgram = struct {
         // FnCodes were freed by the relink tail); `.cstr` targets are offsets.
         for (self.data_relocs) |rl| if (rl.target.name()) |nm| gpa.free(nm);
         gpa.free(self.data_relocs);
-        self.symtab.deinit(gpa);
+        self.debug.deinit(gpa);
         self.* = undefined;
     }
 };
@@ -152,7 +152,7 @@ fn relink(
     opt_stats: Opt.Stats,
     ir_instrs: usize,
     desc_plan: []const Link.DescEntry,
-    debug_symtab: bool,
+    debug: ?Link.DebugInput,
 ) !LowerProgramResult {
     // Gather the lowered fns into a contiguous slice in source order. `linkAndTail`
     // CONSUMES the elements (frees each FnCode on every path), so we only free the
@@ -164,7 +164,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug_symtab) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -185,8 +185,8 @@ fn relink(
 /// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
 /// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug_symtab: bool) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug_symtab);
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug);
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -194,7 +194,7 @@ fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []cons
         .owned_msgs = &.{},
         .cstrings = lk.cstrings,
         .data_relocs = lk.data_relocs,
-        .symtab = lk.symtab,
+        .debug = lk.debug,
     };
 }
 
@@ -241,6 +241,9 @@ const Plan = struct {
     /// The unit of the entry `main`: the bare `main` with a body in the entry module.
     entry: ?u32,
     o: Options,
+    /// Each module's line starts, by module id, when the profile wants debug info; else
+    /// empty. Owned.
+    line_starts: []const []const u32 = &.{},
 
     fn init(gpa: std.mem.Allocator, graph: *const Graph.Graph, res: *const ResolveGraph.GraphResult, tc: *const Typecheck.GraphResult, o: Options) !Plan {
         const modules = try gpa.alloc(Walk.Source, graph.modules.len);
@@ -290,10 +293,26 @@ const Plan = struct {
         };
         errdefer gpa.free(p.units);
         p.closure_facts = try p.ownerClosureFacts(gpa);
+        errdefer freeClosureFacts(gpa, p.closure_facts);
+        if (o.profile.debugInfo()) {
+            const starts = try gpa.alloc([]const u32, modules.len);
+            var done: usize = 0;
+            errdefer {
+                for (starts[0..done]) |st| gpa.free(st);
+                gpa.free(starts);
+            }
+            for (modules, starts) |m, *st| {
+                st.* = try lower.Lines.compute(gpa, m.source);
+                done += 1;
+            }
+            p.line_starts = starts;
+        }
         return p;
     }
 
     fn deinit(p: *Plan, gpa: std.mem.Allocator) void {
+        for (p.line_starts) |st| gpa.free(st);
+        gpa.free(p.line_starts);
         freeClosureFacts(gpa, p.closure_facts);
         p.specs.deinit(gpa);
         gpa.free(p.units);
@@ -331,6 +350,20 @@ const Plan = struct {
     fn declOf(p: *const Plan, u: Unit) Ast.Index {
         const o = p.ownerOf(u) orelse return Ast.none;
         return p.tc.bodies.items[o].decl;
+    }
+
+    /// The lines unit `u` tags its code with: relative to the declaration `declOf` names,
+    /// so a body and the lambdas written in it share one anchor. None for a source-less
+    /// unit or a build without debug info.
+    fn linesFor(p: *const Plan, u: Unit) lower.Lines {
+        if (p.line_starts.len == 0) return .{};
+        const decl = p.declOf(u);
+        if (decl == Ast.none) return .{};
+        const mod = p.moduleOf(u);
+        const src = p.modules[mod];
+        const tok = src.tree.nodes[decl.int()].main_token;
+        const starts = p.line_starts[mod];
+        return .{ .starts = starts, .anchor = lower.Lines.lineOf(starts, src.tokens[tok].start) };
     }
 
     /// The symbol unit `u` is emitted and linked under. Borrowed from the plan's tables.
@@ -397,6 +430,7 @@ const Plan = struct {
                     else => &.{},
                 }) else .none,
                 .trap_overflow = p.o.profile.trapsOverflow(),
+                .lines = p.linesFor(u),
             },
             .body = body,
             .sym = sym,
@@ -547,6 +581,11 @@ pub fn lowerGraphProgram(
         return e;
     };
 
+    for (slots, plan.units) |*s, u| {
+        const fc = &s.fc.?;
+        if (fc.lines.len != 0) fc.src = .{ .file = plan.moduleOf(u), .line = plan.linesFor(u).anchor };
+    }
+
     var compiled: usize = 0;
     var cached_n: usize = 0;
     var opt_stats: Opt.Stats = .{};
@@ -584,8 +623,30 @@ pub fn lowerGraphProgram(
         });
     }
 
+    var files: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (files.items) |f| gpa.free(f);
+        files.deinit(gpa);
+    }
+    var cwd: ?[:0]u8 = null;
+    defer if (cwd) |c| gpa.free(c);
+    if (profile.debugInfo()) {
+        // A bundled module has no file on disk. A relative name would resolve against the
+        // comp dir to a missing file, or to an unrelated `./std/io.toy`, so it gets an
+        // absolute name no real file has.
+        for (graph.modules) |*m| try files.append(gpa, if (m.bundled or m.file.len == 0)
+            try std.fmt.allocPrint(gpa, "/<toy>/{s}.toy", .{m.path})
+        else
+            try gpa.dupe(u8, m.file));
+        cwd = std.process.currentPathAlloc(io, gpa) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => null,
+        };
+    }
+    const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "" } else null;
+
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, profile.debugSymtab());
+    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -685,9 +746,9 @@ pub fn buildImage(
     cstrings: []const u8,
     data_relocs: []const Link.Reloc,
     libs: Dylib.Linking,
-    symtab: MachO.Symtab,
+    debug: MachO.Debug,
 ) ![]u8 {
-    return link.assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, symtab);
+    return link.assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
 }
 
 const testing = std.testing;

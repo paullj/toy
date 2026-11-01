@@ -20,6 +20,7 @@ toy run main.toy --profile release    # the same as --release
 | IR passes | none (as `-O0`) | all of them (as `-O1`) |
 | Integer overflow | panics | wraps |
 | Symbol table | yes | no |
+| Line tables (DWARF) | yes | no |
 | Default output | `.toy/<stamp>/debug/<name>` | `.toy/<stamp>/release/<name>` |
 
 When a new pass is added, `release` runs it too.
@@ -81,8 +82,35 @@ A function is named as the panic backtrace names it: `module.fn`, with `main` ba
 generic instance adds its type arguments (`util.ident$int`) and a lambda its owner and
 index (`main$l0`), and a runtime function its own name (`panic`). Every symbol is local
 and carries the leading `_` of a C symbol, which `atos`, crash reports and `lldb` drop, so
-they show `util.sq`. A release build has no symbol table. Line tables (DWARF) are not
-emitted yet.
+they show `util.sq`. A release build has no symbol table.
+
+A debug build also carries DWARF line tables, which map each statement's code to its toy
+file and line, so a debugger can stop at a line and a backtrace shows where each frame is:
+
+```sh
+$ lldb .toy/<stamp>/debug/main
+(lldb) breakpoint set -f util.toy -l 3
+(lldb) run
+(lldb) bt
+```
+
+`atos` and crash reports read them too:
+
+```sh
+$ atos -o .toy/<stamp>/debug/main -l 0x100000000 0x100000690 0x1000005c0
+util.sq (in main) (util.toy:3)
+main (in main) (main.toy:4)
+```
+
+The DWARF sits in the executable itself, in a `__DWARF` segment that is never loaded, so
+there is no `.dSYM` to make: `lldb` and `atos` find it with the binary, and `dsymutil`
+has nothing to gather. A line is the line a statement starts on; an `if` or `else if`
+condition and a `match` arm are on their own lines, and a function's return code is on
+its closing brace. Each function is described with its name, its declaration's file and
+line and its address range; variables and types are not described. A standard library
+function names its module under `/<toy>` (`/<toy>/std/io.toy`), a path no real file has,
+as it has no file on disk. File names are as the build was given them, and relative ones
+resolve against the directory the build ran in. A release build has no DWARF.
 
 ## `-O`, `--opt` and `--no-opt`
 
@@ -103,3 +131,8 @@ The profile is part of every codegen cache key. A debug build never reuses code 
 release build compiled, and the other way round, even when `-O` makes their passes the
 same. Each profile keeps its own cache entries, so switching back to a profile is
 a warm build again.
+
+A debug build caches each function's line table with its code, each line counted from the
+function's declaration. An edit that moves a function, such as a comment above it, reuses
+its code and still writes the new lines; an edit that moves a line inside it lowers that
+function again.

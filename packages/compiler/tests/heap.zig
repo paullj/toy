@@ -200,7 +200,7 @@ test "dfe: a collection inside a kept fn works after the link drops an allocatin
     try std.testing.expectEqual([2]u8{ 42, 42 }, codes);
 }
 
-test "dfe: a heap type only dropped code uses leaves the heap-free image byte-identical, at -O0 and -O1" {
+test "dfe: a heap type only dropped code uses leaves the heap-free code unchanged, at -O0 and -O1" {
     // Codegen plans a descriptor for every typechecked heap type, so rooting every planned
     // descriptor would keep its hash/eq/trace units and the whole collector in a program
     // that never allocates.
@@ -231,7 +231,7 @@ test "dfe: a heap type only dropped code uses leaves the heap-free image byte-id
             defer gpa.free(got);
             const got_bytes = try Io.Dir.cwd().readFileAlloc(io, got, gpa, .unlimited);
             defer gpa.free(got_bytes);
-            if (!std.mem.eql(u8, want_bytes, got_bytes)) {
+            if (!harness.sameCode(want_bytes, got_bytes)) {
                 std.debug.print("variant {d} at {s}: {d} bytes, want {d}\n", .{ i, lvl, got_bytes.len, want_bytes.len });
                 return error.TestExpectedEqual;
             }
