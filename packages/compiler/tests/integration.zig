@@ -37,4 +37,5 @@ test {
     _ = @import("io.zig");
     _ = @import("unit.zig");
     _ = @import("grammar_agreement.zig");
+    _ = @import("profiles.zig");
 }

@@ -5,6 +5,7 @@
 //! Spellings tests/corpora depends on:
 //! - `-O` is short-only (Range 0..1) so `-O0`/`-O1`/`-O 1` parse (`-O2` rejected).
 //! - `--opt`/`--no-opt` are repeatable enums over the `Opt.Pass` names, one pass each.
+//! - `--release`/`--profile` pick the profile; `-O`/`--opt`/`--no-opt` then override its passes.
 //! - `-h`/`--help`/`-V`/`--version` are auto-injected by the framework, so not listed here.
 
 const toyc = @import("toy_compiler");
@@ -56,14 +57,16 @@ const pass_names = std.meta.fieldNames(toyc.Opt.Pass);
 // The build/inspect options MINUS the dev-only ones (`emit_opt`, `dev_core_opt`, spliced
 // in so they can be gated behind `dev_inspect`). `shared_opts` below is `pre_emit ++ emit_opt ++ dev_core_opt ++ post_emit`.
 const pre_emit: []const Spec.Option = &[_]Spec.Option{
-    .{ .long = "output", .short = 'o', .value = .string, .value_name = "PATH", .help = "Output path for the built binary (default: .toy/<stamp>/build/<name>)" },
+    .{ .long = "output", .short = 'o', .value = .string, .value_name = "PATH", .help = "Output path for the built binary (default: .toy/<stamp>/<profile>/<name>)" },
     target_opt,
 } ++ roots_opts ++ link_opts;
 const post_emit: []const Spec.Option = &[_]Spec.Option{
     // -j: N>=1; the parser rejects -j0/negatives as a bad value via the Range.
     .{ .short = 'j', .value = .{ .int = .{ .min = 1, .max = null } }, .value_name = "N", .help = "Build worker threads (N>=1; -j1 = serial; default cpu-based)" },
+    .{ .long = "release", .action = .set_true, .conflicts = &.{"profile"}, .help = "Build with the release profile (same as --profile release)" },
+    .{ .long = "profile", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Name) }, .value_name = "NAME", .help = "Build profile: debug runs no IR passes, release runs them all (default debug)" },
     // -O is short-only => Parsed field `O`; -O0 / -O1 / -O 1 all parse, -O2 rejected.
-    .{ .short = 'O', .value = .{ .int = .{ .min = 0, .max = 1 } }, .value_name = "LEVEL", .help = "IR optimization level (0 = none, 1 = all passes; any pass on also keeps non-escaping closure envs in frames)" },
+    .{ .short = 'O', .value = .{ .int = .{ .min = 0, .max = 1 } }, .value_name = "LEVEL", .help = "IR optimization level, overriding the profile's (0 = none, 1 = all passes; any pass on also keeps non-escaping closure envs in frames)" },
     .{ .long = "opt", .value = .{ .@"enum" = pass_names }, .action = .append, .value_name = "PASS", .help = "Enable only the named passes (repeatable)" },
     .{ .long = "no-opt", .value = .{ .@"enum" = pass_names }, .action = .append, .value_name = "PASS", .help = "Disable one pass from the current level (repeatable)" },
     .{ .long = "dump", .action = .set_true, .help = "Print the emit phase's artifact (tokens, or the AST)" },
@@ -204,7 +207,7 @@ comptime {
     if (hasLong(check_opts, "emit"))
         @compileError("`check` must never register `--emit`");
     // check_opts must carry ONLY the restricted, non-codegen knobs.
-    for ([_][]const u8{ "output", "j", "O", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "emit" }) |banned| {
+    for ([_][]const u8{ "output", "j", "O", "release", "profile", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "emit" }) |banned| {
         if (hasLong(check_opts, banned))
             @compileError("`check` option set must not contain build/codegen/opt flags");
     }

@@ -56,11 +56,11 @@ fn lowerSingleFile(
     target: []const u8,
     r: *const FileResult,
     mode: Engine.Mode,
-    opt: Opt.Config,
+    profile: toyc.Profile,
 ) !LowerProgramResult {
     var graph = try Graph.single(gpa, "main", r.path, r.source, r.tokens, r.nodes, r.extra, r.pub_bits);
     defer graph.deinit(gpa);
-    return lowerGraphProgram(gpa, io, cache, target, &graph, &r.resolve.?, &r.typecheck.?, mode, opt, true, null, null, 0);
+    return lowerGraphProgram(gpa, io, cache, target, &graph, &r.resolve.?, &r.typecheck.?, mode, profile, true, null, null, 0);
 }
 
 test "cold then warm parse: 2nd run hits cache and renders identically" {
@@ -3189,7 +3189,7 @@ test "codegen reports missing main and lowers a simple main" {
         try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
         switch (lowered) {
             .err => |e| try testing.expect(e.span == null),
             .ok => |*lp| {
@@ -3209,7 +3209,7 @@ test "codegen reports missing main and lowers a simple main" {
         try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
         switch (lowered) {
             .err => return error.TestUnexpectedResult,
             .ok => |*lp| {
@@ -3735,7 +3735,7 @@ test "integration: emitted binary runs with the right exit code" {
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3817,7 +3817,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expect(!std.mem.eql(u8, insts[0].name.?, insts[1].name.?));
 
         // Force a fresh lowering: main + 2 instances = exactly 3 codegen units.
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3858,7 +3858,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.instances.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3907,7 +3907,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expectEqual(@as(usize, 1), derives.len);
         try testing.expectEqualStrings("Eq$eq$s0", derives[0].name.?);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3948,7 +3948,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.derives.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .O0);
+        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -4030,7 +4030,7 @@ fn checkAndLower(
     r_out.* = .{ .path = path };
     try pipeline(gpa, io, cache, .check, "aarch64-macos", r_out, 0);
     try testing.expect(r_out.err == null);
-    const lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", r_out, mode, .O0);
+    const lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", r_out, mode, .debug);
     return switch (lowered) {
         .ok => |ok| ok,
         .err => error.TestUnexpectedResult,
@@ -5010,7 +5010,7 @@ test "a lowering diagnostic reaches the build result with its text and span" {
     var ck = try checkWithBlankedMethods(gpa, io, dir_name, lower_diag_src, &blankAll);
     defer ck.r.deinit(gpa);
 
-    var out = try lowerSingleFile(gpa, io, ck.cache, Driver.default_target, &ck.r, .force, .O0);
+    var out = try lowerSingleFile(gpa, io, ck.cache, Driver.default_target, &ck.r, .force, .debug);
     defer if (out == .ok) out.ok.deinit(gpa);
     try testing.expect(out == .err);
     try testing.expectEqualStrings("call target unsupported in lower", out.err.message);
@@ -5033,7 +5033,7 @@ test "--emit ir reports a lowering diagnostic" {
 
     var graph = try Graph.single(gpa, "main", ck.r.path, ck.r.source, ck.r.tokens, ck.r.nodes, ck.r.extra, ck.r.pub_bits);
     defer graph.deinit(gpa);
-    const out = try Codegen.renderGraphIr(gpa, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .O0, true);
+    const out = try Codegen.renderGraphIr(gpa, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .debug, true);
     defer if (out == .ok) gpa.free(out.ok);
     try testing.expect(out == .err);
     try testing.expectEqualStrings("call target unsupported in lower", out.err.message);
@@ -5069,7 +5069,7 @@ test "the first failing unit in index order is reported at every -j" {
     var graph = try Graph.single(gpa, "main", ck.r.path, ck.r.source, ck.r.tokens, ck.r.nodes, ck.r.extra, ck.r.pub_bits);
     defer graph.deinit(gpa);
     for ([_]usize{ 1, 8 }) |ncpu| {
-        var out = try lowerGraphProgram(gpa, io, ck.cache, Driver.default_target, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .force, .O0, true, null, null, ncpu);
+        var out = try lowerGraphProgram(gpa, io, ck.cache, Driver.default_target, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .force, .debug, true, null, null, ncpu);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .err);
         const at = out.err.span.?.start;

@@ -314,10 +314,16 @@ test "parse query: miss parses+stores; hit serves a validated cached tree" {
     freeTree(gpa, hit.tree);
 }
 
-test "codegen key discrimination: opt level / own-symbol / fingerprint each key distinctly" {
-    // The uniform `Key.codegen` must not alias across O-level, emitted symbol, or
+test "codegen key discrimination: profile / opt level / own-symbol / fingerprint each key distinctly" {
+    // The uniform `Key.codegen` must not alias across profile, O-level, emitted symbol, or
     // fingerprint — the invariants the consolidated key preserves.
     const base = Key.codegen("native", 0x1111, .{}, .{ .kind = .user_fn, .name = "add" });
+
+    const sym: toyc.Link.SymName = .{ .kind = .user_fn, .name = "add" };
+    const profiles = [_]toyc.Profile{ .debug, .release, .{ .name = .debug, .opt = .O1 }, .{ .name = .release, .opt = .O0 } };
+    for (profiles, 0..) |a, i| for (profiles[i + 1 ..]) |b|
+        try testing.expect(Key.codegen("native", 0x1111, a, sym).digest() != Key.codegen("native", 0x1111, b, sym).digest());
+    try testing.expectEqual(base.digest(), Key.codegen("native", 0x1111, .debug, sym).digest());
 
     const diff_fp = Key.codegen("native", 0x2222, .{}, .{ .kind = .user_fn, .name = "add" });
     try testing.expect(base.digest() != diff_fp.digest());

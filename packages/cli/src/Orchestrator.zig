@@ -13,7 +13,7 @@ const Graph = toyc.Graph;
 const ResolveGraph = toyc.ResolveGraph;
 const TypecheckGraph = toyc.TypecheckGraph;
 const Codegen = toyc.DriverCodegen;
-const Opt = toyc.Opt;
+const Profile = toyc.Profile;
 const SevCfg = toyc.diagnostics.severity_config;
 const Diagnostic = toyc.DiagnosticSink.Diagnostic;
 
@@ -95,7 +95,7 @@ pub const Orchestrator = struct {
     collect_contribs: *std.ArrayList(u64),
     gt_contribs: *std.ArrayList(u64),
     mode: Engine.Mode,
-    opt: Opt.Config,
+    profile: Profile,
     /// `--no-specialize` clears it (see `Codegen.lowerGraphProgram`).
     specialize: bool,
     /// the discover stage's compute/cache probe (file-read+lex+parse compute
@@ -206,7 +206,7 @@ pub const Orchestrator = struct {
         comptime std.debug.assert(@as(Stage, @enumFromInt(stage_i)) == .codegen);
         switch (self.tail) {
             .lower => {
-                self.lowered.* = try Codegen.lowerGraphProgram(self.gpa, self.io, self.cache, self.target, &self.graph.*.?, &self.res.*.?, &self.tc.*.?, self.mode, self.opt, self.specialize, self.probe, self.link_ns, self.ncpu);
+                self.lowered.* = try Codegen.lowerGraphProgram(self.gpa, self.io, self.cache, self.target, &self.graph.*.?, &self.res.*.?, &self.tc.*.?, self.mode, self.profile, self.specialize, self.probe, self.link_ns, self.ncpu);
                 self.lap(self.ns_lower);
                 const bad = switch (self.lowered.*.?) {
                     .err => true,
@@ -218,7 +218,7 @@ pub const Orchestrator = struct {
                 }
             },
             .render_ir => {
-                self.ir.* = try Codegen.renderGraphIr(self.gpa, &self.graph.*.?, &self.res.*.?, &self.tc.*.?, self.opt, self.specialize);
+                self.ir.* = try Codegen.renderGraphIr(self.gpa, &self.graph.*.?, &self.res.*.?, &self.tc.*.?, self.profile, self.specialize);
                 self.lap(self.ns_lower);
                 if (self.ir.*.? == .err) {
                     self.failed_stage.* = .codegen;

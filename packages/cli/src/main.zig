@@ -25,6 +25,7 @@ const ResolveGraph = toyc.ResolveGraph;
 const TypecheckGraph = toyc.TypecheckGraph;
 const CodegenIr = toyc.CodegenIr;
 const Opt = toyc.Opt;
+const Profile = toyc.Profile;
 const Engine = toyc.QueryEngine;
 const version = toyc.version;
 // The CLI framework + terminal library, reached through the library module (never
@@ -301,12 +302,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Build the executable: output → `-o`/`--output`, else the default build dir.
     if (build_exe) {
-        std.process.exit(try emitExecutable(gpa, out, level, usage, st.target, st.paths.items, st.out_path, run_after, st.program_args, st.mode, st.codegen_stats, st.opt, st.specialize, st.opt_stats, st.timings, st.jlimit, threads, st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
+        std.process.exit(try emitExecutable(gpa, out, level, usage, st.target, st.paths.items, st.out_path, run_after, st.program_args, st.mode, st.codegen_stats, st.profile, st.specialize, st.opt_stats, st.timings, st.jlimit, threads, st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
     }
 
     // `--emit ir`: print the target-independent IR for the whole program.
     if (st.emit == .ir) {
-        std.process.exit(try emitIr(gpa, out, level, usage, st.target, st.paths.items, st.opt, st.specialize, st.jlimit, st.sev, st.allow_core_imports, roots(&st)));
+        std.process.exit(try emitIr(gpa, out, level, usage, st.target, st.paths.items, st.profile, st.specialize, st.jlimit, st.sev, st.allow_core_imports, roots(&st)));
     }
 
     const results = try Driver.run(gpa, io, st.emit, st.target, st.paths.items);
@@ -359,9 +360,9 @@ const State = struct {
     out_path: ?[]const u8 = null,
     codegen_stats: bool = false,
     mode: Engine.Mode = .normal,
-    // opt level / pass selection. Default -O0. Base -O then --opt (resets+sets) then
-    // each --no-opt; the flat model loses cross-flag argv order (documented deviation).
-    opt: Opt.Config = .O0,
+    // The profile (default debug), whose passes -O then --opt (resets+sets) then each
+    // --no-opt override; the flat model loses cross-flag argv order (documented deviation).
+    profile: Profile = .debug,
     specialize: bool = true,
     opt_stats: bool = false,
     timings: bool = false,
@@ -435,13 +436,18 @@ fn applyParsed(gpa: std.mem.Allocator, comptime cmd: cli.Spec.Command, p: anytyp
         st.jlimit = if (u == 1) .limited(0) else .limited(u);
         st.job_count = u;
     }
-    // Base opt level from -O (short-only => field `O`); .max=1 rejects -O2 upstream.
-    st.opt = if (p.O) |lvl| (if (lvl == 1) Opt.Config.O1 else Opt.Config.O0) else Opt.Config.O0;
-    // --opt: reset to level-off, then turn ON each named pass; each --no-opt then turns
-    // one OFF. The parser has already checked every name against `Opt.Pass`.
-    if (p.opt.len != 0) st.opt = .O0;
-    for (p.opt) |pass| st.opt.set(optPass(pass), true);
-    for (p.no_opt) |pass| st.opt.set(optPass(pass), false);
+    // The parser rejects `--release` with `--profile`, so at most one names the profile.
+    st.profile = .of(if (p.release) .release else if (p.profile) |n| switch (n) {
+        .debug => .debug,
+        .release => .release,
+    } else .debug);
+    // An explicit -O replaces the profile's passes (short-only => field `O`; .max=1 rejects
+    // -O2 upstream). --opt: reset to none, then turn ON each named pass; each --no-opt then
+    // turns one OFF. The parser has already checked every name against `Opt.Pass`.
+    if (p.O) |lvl| st.profile.opt = if (lvl == 1) .O1 else .O0;
+    if (p.opt.len != 0) st.profile.opt = .O0;
+    for (p.opt) |pass| st.profile.opt.set(optPass(pass), true);
+    for (p.no_opt) |pass| st.profile.opt.set(optPass(pass), false);
     if (try buildSevRules(gpa, p, sev_rules)) |e| return try cliValueError(usage, e);
     st.sev = .{ .rules = sev_rules.items, .deny_warnings = p.deny_warnings };
     // p.file is a variadic slice borrowing argv/arena; copy the ELEMENTS (slices) —
@@ -577,13 +583,20 @@ fn cliValueError(usage: Usage, e: cli.Sink.Error) !?u8 {
     return usage_exit;
 }
 
+const profile_name_max = blk: {
+    var max: usize = 0;
+    for (std.meta.fieldNames(Profile.Name)) |n| max = @max(max, n.len);
+    break :blk max;
+};
+
 /// The default executable output when no `-o`/`--output` is given:
-/// `.toy/<stamp>/build/<entry-stem>`. Creates the build dir on demand; the path is
-/// written into `buf` (caller-owned, must outlive the write).
-fn defaultOutputPath(io: Io, buf: []u8, entry: []const u8) ![]const u8 {
+/// `.toy/<stamp>/<profile>/<entry-stem>`, one folder per profile so a release build never
+/// replaces the debug binary. Creates the folder on demand; the path is written into `buf`
+/// (caller-owned, must outlive the write).
+fn defaultOutputPath(io: Io, buf: []u8, entry: []const u8, profile: Profile.Name) ![]const u8 {
     var stamp_buf: [version.stamp_max]u8 = undefined;
-    var dir_buf: [Driver.cache_root.len + 1 + version.stamp_max + "/build".len]u8 = undefined;
-    const build_dir = std.fmt.bufPrint(&dir_buf, "{s}/{s}/build", .{ Driver.cache_root, version.stamp(&stamp_buf) }) catch unreachable;
+    var dir_buf: [Driver.cache_root.len + 1 + version.stamp_max + 1 + profile_name_max]u8 = undefined;
+    const build_dir = std.fmt.bufPrint(&dir_buf, "{s}/{s}/{t}", .{ Driver.cache_root, version.stamp(&stamp_buf), profile }) catch unreachable;
     try Io.Dir.cwd().createDirPath(io, build_dir);
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ build_dir, Decide.stemOf(Decide.basename(entry)) }) catch unreachable;
 }
@@ -776,7 +789,7 @@ fn emitExecutable(
     program_args: []const []const u8,
     mode: Engine.Mode,
     codegen_stats: bool,
-    opt: Opt.Config,
+    profile: Profile,
     specialize: bool,
     opt_stats: bool,
     timings: bool,
@@ -807,9 +820,9 @@ fn emitExecutable(
     const build_start = nowNs(io);
 
     // Resolve the output: `-o`/`--output` wins; otherwise default to
-    // `.toy/<stamp>/build/<entry-stem>` (the build dir is created on demand).
+    // `.toy/<stamp>/<profile>/<entry-stem>` (the folder is created on demand).
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved_out = out_path orelse try defaultOutputPath(io, &out_buf, paths[0]);
+    const resolved_out = out_path orelse try defaultOutputPath(io, &out_buf, paths[0], profile.name);
 
     var dir_buf: [Driver.cache_dir_buf_len]u8 = undefined;
     var pack = toyc.Cache.Pack.init(gpa);
@@ -903,7 +916,7 @@ fn emitExecutable(
         .collect_contribs = &collect_contribs,
         .gt_contribs = &gt_contribs,
         .mode = mode,
-        .opt = opt,
+        .profile = profile,
         .specialize = specialize,
         .discover_probe = discover_probe_ptr,
         .probe = probe_ptr,
@@ -1082,7 +1095,7 @@ fn emitIr(
     usage: Usage,
     target: []const u8,
     paths: []const []const u8,
-    opt: Opt.Config,
+    profile: Profile,
     specialize: bool,
     jlimit: Io.Limit,
     sev: SevCfg.SeverityConfig,
@@ -1140,7 +1153,7 @@ fn emitIr(
         .collect_contribs = &collect_contribs,
         .gt_contribs = &gt_contribs,
         .mode = .normal,
-        .opt = opt,
+        .profile = profile,
         .specialize = specialize,
         .discover_probe = null,
         .probe = null,
