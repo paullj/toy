@@ -1,0 +1,12 @@
+# Feature: a pub alias qualified through its module names a struct in a literal
+# (`util.A { .. }`, an instance alias `util.BI { .. }`), and a qualified generic fn
+# takes its type param from the expected type (`o: Option[int] = util.nothing()`).
+# expect: exit 42
+import util
+
+fn main() -> int {
+    a := util.A { v: 4 }
+    b := util.BI { v: 30 }
+    o: Option[int] = util.nothing()
+    a.v + b.v + o.or(8)
+}

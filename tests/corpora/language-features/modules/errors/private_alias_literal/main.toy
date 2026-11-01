@@ -1,0 +1,8 @@
+# Feature: a type alias without `pub` names no struct literal through its module.
+# expect: compile-error "type alias 'A' is not exported by module 'hidden'"
+import hidden
+
+fn main() -> int {
+    a := hidden.A { v: 1 }
+    a.v
+}

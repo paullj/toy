@@ -1,0 +1,14 @@
+# Feature: a struct literal names its struct through a type alias; an alias of a
+# generic-struct instance fixes the args, as `Box[int] { .. }` does.
+# expect: exit 42
+struct K { v: int }
+type A = K
+struct Box[T] { v: T }
+type BI = Box[int]
+
+fn main() -> int {
+    a := A { v: 4 }
+    b := BI { v: 30 }
+    c: A = A { v: 8 }
+    a.v + b.v + c.v
+}

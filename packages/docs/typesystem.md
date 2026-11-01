@@ -49,7 +49,10 @@ Two special types are not ordinary value types:
 * **`invalid`** is **poison** and is not spellable. The first time an
   operand is `invalid`, the containing expression silently becomes `invalid`
   too, so one root mistake produces exactly one diagnostic and never cascades.
-  It *absorbs* in both `assignable` and `merge`.
+  It *absorbs* in both `assignable` and `merge`. An expected type that holds it
+  (`x: Option[Nope] = ..`, or an arm after an arm that failed) fixes nothing, yet a
+  type parameter it leaves open or binds to the poison is no new error: `Option.none`,
+  `[]` or `nothing()` under it reports nothing more.
 
 A type-level name is never a value: a struct, an enum, a builtin type, an alias, a
 protocol or a type parameter named where a value is wanted (`x := Color`,
@@ -420,9 +423,10 @@ the receiver's variables. The arguments are typed in this order:
    the receiver's bindings in, a bare call's against its parameter through what the
    call's expected type binds against the return type, an associated call's with no
    expectation from the call (a parameter with no type parameter is the argument's
-   type outright, as for any part). An associated call's impl type parameter the
-   arguments leave open then binds from the call's expected type against the return
-   type (`v: Vec[int] = Vec.new()`), though never as a receiver: with
+   type outright, as for any part). A bare call's type parameter, or an associated
+   call's impl type parameter, that the arguments leave open then binds from the call's
+   expected type against the return type (`o: Option[int] = nothing()` with
+   `fn nothing[T]() -> Option[T]`, `v: Vec[int] = Vec.new()`), though never as a receiver: with
    `fn chain(self) -> Box[T]`, `b: Box[int] = Box.mk().chain()` is still **T0016**
    for `Box.mk`. One that errs under that is typed again against
    its parameter with what the earlier arguments bind, and keeps that typing when it
@@ -457,7 +461,7 @@ parameters too (`impl K { fn map[U](self, f: fn(int) -> U) -> U }`, `fn with[U](
 tag: U) -> K`): it is a template on the concrete receiver, inferred or written alike
 (`k.map[str](f)`, `K.with[bool](1, true)`), with one instance row per instantiation on
 `K` itself. A builtin type's method cannot yet (**T0013** at its declaration; a call
-of it reports nothing more). A method's own type parameter may not reuse a name of its
+of it, with type args or without, reports nothing more). A method's own type parameter may not reuse a name of its
 impl's (`impl Box[T] { fn conv[T](..) }`), and no fn declares one name twice
 (**T0053**). An impl's pattern, inherent or a conformance, names each type parameter
 once (`impl Pair[A, B]`); one on a single instance (`impl Box[int]`,
@@ -475,7 +479,7 @@ An `impl` fn without `self` is an associated function, called on its type: `K.ma
 on a struct or enum `K`, `lib.K.make(1)` through a module, `Box[int].new()` on a generic
 struct or enum (or `Box.new(5)`, inferred as above). An alias names its target's
 (`type A = K` makes `A.make(1)` call `K.make`, and `type B = Box[int]` makes `B.new()` call
-`Box[int].new`), and a builtin type has them too: with `impl int { fn zero() -> int { 0 } }`,
+`Box[int].new`; so does a literal, `A { v: 1 }`, and `B { v: 1 }` is a `Box[int]`), and a builtin type has them too: with `impl int { fn zero() -> int { 0 } }`,
 `int.zero()` calls it. Through an alias or a builtin, a member that names no associated fn
 leaves a type used as a value (**T0056**). An alias of an enum names its variants too, in
 an expression and a pattern (`A.V(1)`, `match e { A.V(n) -> n }`), and an alias of an enum

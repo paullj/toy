@@ -1,0 +1,2 @@
+pub struct K { pub v: int }
+type A = K

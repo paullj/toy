@@ -1,0 +1,37 @@
+# Feature: the expected type binds the type params of a generic free fn whose args do
+# not fix them: a typed binding, a return position, a typed fn arg and a generic
+# body's own annotation each make `nothing()`, `fresh()` and `wrap(..)` an instance,
+# one per type, so two calls that differ only in their result type run apart.
+# expect: stdout "1\ns\n11\n10\nr\n7\n2\n"
+# expect: exit 0
+import std/io.{println}
+import std/vec
+
+fn nothing[T]() -> Option[T] { Option.none }
+fn wrap[T, E](v: T) -> Result[T, E] { Result.ok(v) }
+fn fresh[T]() -> Vec[T] { Vec.new() }
+fn count(o: Option[bool]) -> int { if o.is_some() { 1 } else { 10 } }
+fn ret() -> Option[str] { nothing() }
+fn lift[T](v: T) -> Option[T] {
+    n: Option[T] = nothing()
+    if n.is_some() { n } else { Option.some(v) }
+}
+
+fn main() -> int {
+    a: Option[int] = nothing()
+    b: Option[str] = nothing()
+    r: Result[int, str] = wrap(5)
+    q: Result[int, bool] = wrap(6)
+    v: Vec[int] = fresh()
+    v.push(3)
+    w: Vec[str] = fresh()
+    w.push("x")
+    println(a.or(1))
+    println(b.or("s"))
+    println(r.or(0) + q.or(0))
+    println(count(nothing()))
+    println(ret().or("r"))
+    println(lift(7).or(0))
+    println(v.len() + w.len())
+    0
+}
