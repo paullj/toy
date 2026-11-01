@@ -1,0 +1,42 @@
+# Feature: an alias of a prelude or std generic instance (`Option`, `Result`, `Ref`,
+# `Vec`, `Map`, `Set`) or of `Ordering` names it in every type position: a param,
+# a return, a binding, a field, a fn type, a type argument and another alias.
+# expect: stdout "3\n4\n2\n5\n1\n6\n1\n"
+# expect: exit 0
+import std/io.{println}
+import std/ref
+import std/vec.{Vec}
+import std/map.{Map}
+import std/set.{Set}
+type OO = Option[int]
+type RR = Result[OO, str]
+type O = Ordering
+type C = Ref[int]
+type V = Vec[OO]
+type M = Map[str, int]
+type S = Set[int]
+struct W { o: OO }
+fn unwrap(x: OO) -> int { match x { Option.some(v) -> v, Option.none -> 0 } }
+fn lift(f: fn(OO) -> RR, x: OO) -> RR { f(x) }
+fn main() -> int {
+    x: OO = Option.some(3)
+    w := W { o: x }
+    println(unwrap(w.o))
+    r := lift(fn(v: OO) -> RR { Result.ok(v) }, Option.some(4))
+    println(match r { Result.ok(v) -> unwrap(v), Result.err(_) -> 0 })
+    v := V.new()
+    v.push(x)
+    v.push(Option.none)
+    println(v.len())
+    c: C = Ref.new(5)
+    println(c.get())
+    m := M.new()
+    m.set("a", 1)
+    println(m.len())
+    s := S.new()
+    s.add(6)
+    println(if s.contains(6) { 6 } else { 0 })
+    o: O = 1.cmp(2)
+    println(match o { O.lt -> 1, O.eq -> 2, O.gt -> 3 })
+    0
+}

@@ -1262,6 +1262,9 @@ pub const BodyChecker = struct {
             .identifier => {
                 if (bc.resolutions[idx.int()] != .unresolved) return .{};
                 const name = bc.nameText(r.main_token);
+                // An alias the module registered shadows a prelude or imported type of its
+                // name (a type it declares itself is a T0012 duplicate), as in a type position.
+                if (bc.activeAliasMap().contains(name)) return .{};
                 return .{ .s = bc.activeStructMap().get(name), .e = bc.activeEnumMap().get(name) };
             },
             .field_access => {
@@ -1271,6 +1274,7 @@ pub const BodyChecker = struct {
                 };
                 const g = bc.model.graph;
                 const name = bc.nameText(r.main_token);
+                if (g.mods[target].alias_ids.contains(name)) return .{};
                 return .{ .s = g.mods[target].struct_ids.get(name), .e = g.mods[target].enum_ids.get(name) };
             },
             else => return .{},
@@ -1688,18 +1692,6 @@ pub const BodyChecker = struct {
         return result;
     }
 
-    fn qualifiedEnumId(bc: *BodyChecker, node_idx: Ast.Index) ?u32 {
-        const g = bc.model.graph;
-        const n = bc.tree.nodes[(node_idx).int()];
-        if (n.tag != .field_access) return null;
-        const target = switch (bc.resolutions[n.lhs.int()]) {
-            .module => |m| m,
-            else => return null,
-        };
-        const member = bc.nameText(n.main_token);
-        return g.mods[target].enum_ids.get(member);
-    }
-
     fn typeOfFieldAccess(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!Type {
         // A qualified `mod.f` in value position: the resolver bound the access itself.
         switch (bc.resolutions[(node_idx).int()]) {
@@ -1711,17 +1703,7 @@ pub const BodyChecker = struct {
         // A qualified UNIT-variant reference `N.V`: the receiver is an enum type-name
         // identifier (resolved quietly to .unresolved). Treat it as construction.
         const recv = bc.tree.nodes[(n.lhs).int()];
-        if (recv.tag == .identifier and bc.activeEnumMap().get(bc.nameText(recv.main_token)) != null) {
-            return bc.typeOfEnumInitQualified(node_idx, .unit, n.lhs, n.main_token, Ast.none);
-        }
-        // A 3-level cross-module unit-variant `mod.Enum.Variant`: the receiver of THIS
-        // field_access is the inner `mod.Enum` field_access (graph mode). Resolve the
-        // inner to a global enum id and treat this node as a unit-variant construction.
-        if (bc.qualifiedEnumId(n.lhs)) |enum_id| {
-            const ty = try bc.checkVariant(node_idx, enum_id, n.main_token, .unit, Ast.none);
-            bc.node_types[(node_idx).int()] = ty;
-            return ty;
-        }
+        if (bc.enumNamed(n.lhs)) |r| return bc.checkVariantOf(node_idx, r, n.main_token, .unit, Ast.none);
         // An explicit generic-enum UNIT-variant `Opt[int].none`: the receiver is a
         // `type_app` resolving to an enum-`App`. Construct the unit variant through the
         // App's args and type the node as the `App` (reified to `enumT` in the mono tail).
@@ -2047,10 +2029,9 @@ pub const BodyChecker = struct {
             else => unreachable,
         };
         const args: Ast.Index = if (n.tag == .enum_init_unit) Ast.none else n.rhs;
-        // Resolve the enum id: qualified (lhs is the type-name identifier), an explicit
-        // generic-enum instance (lhs is a `type_app`), or inferred (the one-shot
-        // expected type must be an enum).
-        var enum_id: u32 = undefined;
+        // Resolve the enum id: qualified (lhs names the enum), an explicit generic-enum
+        // instance (lhs is a `type_app`), or inferred (the one-shot expected type must be
+        // an enum).
         if (n.lhs != Ast.none) {
             const lhs_node = bc.tree.nodes[(n.lhs).int()];
             // An explicit generic-enum variant `Shape[int].seg{ .. }` / `Either[int,bool].left(..)`
@@ -2071,33 +2052,29 @@ pub const BodyChecker = struct {
             // lands here too; the resolver bound its head to the module.
             if (bc.resolutions[n.lhs.int()] == .module)
                 return bc.typeOfModuleStructInit(node_idx, n, node_form, args);
-            const found = switch (lhs_node.tag) {
-                .field_access => bc.qualifiedEnumId(n.lhs),
-                else => bc.activeEnumMap().get(bc.nameText(lhs_node.main_token)),
-            };
-            enum_id = found orelse {
+            const r = bc.enumNamed(n.lhs) orelse {
                 try bc.typeArgsForEffect(node_form, args);
                 const sp = bc.spanOf(n.lhs);
                 try bc.sink.report(.{ .span = sp, .code = .T0062 }, "'{s}' is not an enum type", .{bc.source[sp.start..sp.end]});
                 return .invalid;
             };
-        } else {
-            const exp = bc.expectedTy() orelse {
-                try bc.typeArgsForEffect(node_form, args);
-                try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0062 }, "cannot infer the enum type for '.{s}' here", .{bc.nameText(n.main_token)});
-                return .invalid;
-            };
-            // The expected type may be a plain `enumT` or a generic-enum instance `App`
-            //. `checkVariant` infers the enum's type-params from the payload for the
-            // generic case (a nullary `.none` under a generic expected is uninferable ->
-            // T0016; target-typing it is deferred).
-            enum_id = bc.scrutEnumId(exp) orelse {
-                try bc.typeArgsForEffect(node_form, args);
-                if (exp.kind != .invalid)
-                    try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0062 }, "'.{s}' expects an enum type, but {f} was expected here", .{ bc.nameText(n.main_token), bc.fmtType(exp) });
-                return .invalid;
-            };
+            return bc.checkVariantOf(node_idx, r, n.main_token, node_form, args);
         }
+        const exp = bc.expectedTy() orelse {
+            try bc.typeArgsForEffect(node_form, args);
+            try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0062 }, "cannot infer the enum type for '.{s}' here", .{bc.nameText(n.main_token)});
+            return .invalid;
+        };
+        // The expected type may be a plain `enumT` or a generic-enum instance `App`
+        //. `checkVariant` infers the enum's type-params from the payload for the
+        // generic case (a nullary `.none` under a generic expected is uninferable ->
+        // T0016; target-typing it is deferred).
+        const enum_id = bc.scrutEnumId(exp) orelse {
+            try bc.typeArgsForEffect(node_form, args);
+            if (exp.kind != .invalid)
+                try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0062 }, "'.{s}' expects an enum type, but {f} was expected here", .{ bc.nameText(n.main_token), bc.fmtType(exp) });
+            return .invalid;
+        };
         return bc.checkVariant(node_idx, enum_id, n.main_token, node_form, args);
     }
 
@@ -2113,14 +2090,6 @@ pub const BodyChecker = struct {
         const sp: Span = .{ .start = bc.spanOf(n.lhs).start, .end = bc.tokSpan(n.main_token).end };
         try bc.sink.report(.{ .span = sp, .code = .T0001 }, "unknown struct type '{s}'", .{bc.source[sp.start..sp.end]});
         return .invalid;
-    }
-
-    fn typeOfEnumInitQualified(bc: *BodyChecker, node_idx: Ast.Index, node_form: InitForm, type_node: Ast.Index, vtok: u32, args: Ast.Index) error{OutOfMemory}!Type {
-        const tname = bc.nameText(bc.tree.nodes[(type_node).int()].main_token);
-        const enum_id = bc.activeEnumMap().get(tname) orelse return .invalid; // caller checked
-        const ty = try bc.checkVariant(node_idx, enum_id, vtok, node_form, args);
-        bc.node_types[(node_idx).int()] = ty;
-        return ty;
     }
 
     fn typeArgsForEffect(bc: *BodyChecker, node_form: InitForm, args: Ast.Index) error{OutOfMemory}!void {
@@ -3726,10 +3695,10 @@ pub const BodyChecker = struct {
     // method dispatch does not re-run `typeOf` on the args and double-diagnose.
     fn tryEnumConstruction(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, callee: Ast.Node) error{OutOfMemory}!?Type {
         const recv = bc.tree.nodes[(callee.lhs).int()];
-        if (recv.tag == .identifier) if (bc.activeEnumMap().get(bc.nameText(recv.main_token))) |enum_id| {
-            if (bc.isAssociatedFnOfEnum(enum_id, callee.main_token)) return null;
-            return try bc.typeOfEnumInitQualified(node_idx, .tuple, callee.lhs, callee.main_token, n.rhs);
-        };
+        if (bc.enumNamed(callee.lhs)) |r| {
+            if (bc.isAssociatedFnOfEnum(r.id, callee.main_token)) return null;
+            return try bc.checkVariantOf(node_idx, r, callee.main_token, .tuple, n.rhs);
+        }
         // An explicit generic-enum tuple-variant construction `Either[int,bool].left(42)`
         //: the callee field_access's receiver is a `type_app` resolving to an
         // enum-`App`. Substitute the variant payload patterns through the App's args
@@ -3750,14 +3719,6 @@ pub const BodyChecker = struct {
                 return Type.invalid;
             }
             // A struct-`App` receiver (`Box[int].m(..)`) is a method call; fall through.
-        }
-        // A cross-module tuple-variant `mod.Enum.Variant(args)` (graph mode): the
-        // callee field_access's receiver is the inner `mod.Enum`.
-        if (bc.qualifiedEnumId(callee.lhs)) |enum_id| {
-            if (bc.isAssociatedFnOfEnum(enum_id, callee.main_token)) return null;
-            const ty = try bc.checkVariant(node_idx, enum_id, callee.main_token, .tuple, n.rhs);
-            bc.node_types[(node_idx).int()] = ty;
-            return ty;
         }
         return null;
     }
@@ -3799,16 +3760,54 @@ pub const BodyChecker = struct {
         return if (ty.isApp()) null else ty;
     }
 
-    /// The type a bare builtin type or alias name names (`int`, or `A` of `type A = K`),
-    /// which the resolver leaves unresolved as a receiver; null for anything else.
+    /// The type a builtin type or alias name names as a receiver: `int`, `A` of
+    /// `type A = K`, or a qualified `lib.A`. Null for anything else. A non-pub `lib.A`
+    /// still names its type, as a non-pub `lib.E` does: the resolver reported it, and a
+    /// null here would cascade into "module is not a value".
     fn aliasTypeNamed(bc: *const BodyChecker, idx: Ast.Index) ?Type {
         const n = bc.tree.nodes[idx.int()];
-        if (n.tag != .identifier or bc.resolutions[idx.int()] != .unresolved) return null;
-        const name = bc.nameText(n.main_token);
-        if (bc.activeStructMap().contains(name) or bc.activeEnumMap().contains(name)) return null;
-        if (Typecheck.type_names.get(name)) |t| return t;
-        const ty = bc.activeAliasMap().get(name) orelse return null;
+        const ty = switch (n.tag) {
+            .identifier => blk: {
+                if (bc.resolutions[idx.int()] != .unresolved) return null;
+                const name = bc.nameText(n.main_token);
+                if (bc.activeAliasMap().get(name)) |t| break :blk t;
+                if (bc.activeStructMap().contains(name) or bc.activeEnumMap().contains(name)) return null;
+                return Typecheck.type_names.get(name);
+            },
+            .field_access => blk: {
+                const target = switch (bc.resolutions[n.lhs.int()]) {
+                    .module => |m| m,
+                    else => return null,
+                };
+                break :blk bc.model.graph.mods[target].alias_ids.get(bc.nameText(n.main_token)) orelse return null;
+            },
+            else => return null,
+        };
         return if (ty.kind == .invalid) null else ty;
+    }
+
+    /// The enum a variant's receiver names, with the instance args when it names a
+    /// generic-enum instance through an alias (`type OI = Option[int]`). A bare or
+    /// qualified enum name, or an alias of an enum or enum instance; null otherwise.
+    const EnumRecv = struct { id: u32, args: ?[]const Type = null };
+    fn enumNamed(bc: *const BodyChecker, idx: Ast.Index) ?EnumRecv {
+        if (bc.typeIdsNamed(idx).e) |id| return .{ .id = id };
+        const ty = bc.aliasTypeNamed(idx) orelse return null;
+        if (ty.kind == .@"enum") return .{ .id = ty.enum_id };
+        if (!ty.isApp()) return null;
+        const e = bc.composite.at(ty.appIdx());
+        return if (e.ctor_is_enum) .{ .id = e.ctor, .args = e.args } else null;
+    }
+
+    /// A variant construction through the enum `r` names: an alias of an instance
+    /// fixes the args, as `Option[int].some(..)` does; otherwise they are inferred.
+    fn checkVariantOf(bc: *BodyChecker, site: Ast.Index, r: EnumRecv, vtok: u32, node_form: InitForm, args: Ast.Index) error{OutOfMemory}!Type {
+        const ty = if (r.args) |targs|
+            try bc.checkVariantPayloads(site, r.id, vtok, node_form, args, targs, null)
+        else
+            try bc.checkVariant(site, r.id, vtok, node_form, args);
+        bc.node_types[site.int()] = ty;
+        return ty;
     }
 
     /// The generic-type instance a receiver names: a `Box[int]` type application, or an
@@ -5936,4 +5935,43 @@ test "a poisoned payload leaves the type params it would bind to the poison, not
     try Typecheck.expectDiagCodes("fn go(v: int) -> int {\n bad := v + true\n _o := Option.some(bad)\n 0\n}\n", &.{.T0044});
     // The payload erred inside but still has a type, so it binds T and E stays open.
     try Typecheck.expectDiagCodes("fn id(x: int) -> int { x }\nfn go() -> int {\n _r := Result.ok(id(1 + true))\n 0\n}\n", &.{ .T0016, .T0044 });
+}
+
+test "an enum variant is built through an alias of an enum or of an enum instance" {
+    try Typecheck.expectDiagCodes(
+        \\enum E { X(int), Y, S { a: int } }
+        \\type A = E
+        \\type OI = Option[int]
+        \\fn g(e: A) -> int { match e { A.X(n) -> n, A.Y -> 0, A.S { a } -> a } }
+        \\fn main() -> int {
+        \\    o := OI.some(5)
+        \\    p: OI = OI.none
+        \\    q := match o { OI.some(v) -> v, OI.none -> 0 }
+        \\    g(A.X(2)) + g(A.Y) + g(A.S { a: 1 }) + q + p.or(0)
+        \\}
+        \\
+    , &.{});
+    // An instance alias fixes the args, as `Option[int].some(..)` does.
+    try Typecheck.expectDiagCodes(
+        \\type OI = Option[int]
+        \\fn main() -> int {
+        \\    _o := OI.some(true)
+        \\    0
+        \\}
+        \\
+    , &.{.T0040});
+}
+
+test "a variant through an alias of a non-enum is a type used as a value" {
+    try Typecheck.expectDiagCodes(
+        \\struct K { v: int }
+        \\type B = K
+        \\type I = int
+        \\fn main() -> int {
+        \\    _p := B.X(1)
+        \\    _q := I.Y
+        \\    0
+        \\}
+        \\
+    , &.{ .T0056, .T0056 });
 }

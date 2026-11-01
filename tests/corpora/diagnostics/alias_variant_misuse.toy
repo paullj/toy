@@ -1,0 +1,17 @@
+# A variant through an alias is checked as through its target: an alias of a struct
+# or a builtin type names no variant (T0056), an enum alias names only the enum's
+# variants (T0061), and an instance alias fixes the payload type (T0040).
+struct K { v: int }
+enum E { X(int), Y }
+type B = K
+type I = int
+type A = E
+type OI = Option[int]
+
+fn main() -> int {
+    _p := B.X(1)  #~ ERROR [T0056] type 'B' is not a value
+    _q := I.Y  #~ ERROR [T0056] type 'I' is not a value
+    _r := A.Z  #~ ERROR [T0061] enum 'E' has no variant 'Z'
+    _s := OI.some(true)  #~ ERROR [T0040] expected int, got bool
+    return 0
+}

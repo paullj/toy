@@ -1031,14 +1031,19 @@ const GraphResolve = struct {
             if (!is_pub) try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0005, .scope = g.cur_mod }, "enum '{s}' is not exported by module '{s}'", .{ member, g.graph.modules[target_mod].path });
             return;
         }
-        if (g.graph.exportOf(target_mod, member)) |found| if (found.decl != Ast.none and
-            g.graph.modules[found.mod].nodes[found.decl.int()].tag == .type_alias_decl)
-        {
-            // A pub import that fails to re-export reports at that import; its importers need not.
-            if (!found.exported and found.withheld_by == target_mod) try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0005, .scope = g.cur_mod }, "type alias '{s}' is not exported by module '{s}'", .{ member, g.graph.modules[target_mod].path });
-            return;
-        };
+        if (try g.resolveAliasMember(n, target_mod)) return;
         try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0006, .scope = g.cur_mod }, "module '{s}' has no type '{s}'", .{ g.graph.modules[target_mod].path, member });
+    }
+
+    /// Whether `target.member` of the qualified `n` names a type alias, reporting R0005
+    /// when the alias is not exported. The checker binds the alias's type.
+    fn resolveAliasMember(g: *GraphResolve, n: Ast.Node, target: u32) error{OutOfMemory}!bool {
+        const member = g.nameText(n.main_token);
+        const found = g.graph.exportOf(target, member) orelse return false;
+        if (found.decl == Ast.none or g.graph.modules[found.mod].nodes[found.decl.int()].tag != .type_alias_decl) return false;
+        // A pub import that fails to re-export reports at that import; its importers need not.
+        if (!found.exported and found.withheld_by == target) try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0005, .scope = g.cur_mod }, "type alias '{s}' is not exported by module '{s}'", .{ member, g.graph.modules[target].path });
+        return true;
     }
 
     fn resolveBlock(g: *GraphResolve, block_idx: Ast.Index) error{OutOfMemory}!void {
@@ -1558,6 +1563,8 @@ const GraphResolve = struct {
             try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0005, .scope = g.cur_mod }, "enum '{s}' is not exported by module '{s}'", .{ member, g.graph.modules[target].path });
             return;
         }
+        // An alias receiver (`lib.A.V`, `lib.A.mk()`) is bound by the checker, as a type.
+        if (try g.resolveAliasMember(n, target)) return;
         // A private fn referenced cross-module: distinguish "exists but not pub" from
         // "no such member" for a clearer message. A namespace a plain `import` binds is
         // the module's own, like a private item.

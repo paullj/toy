@@ -1,0 +1,8 @@
+# Feature: a type alias without `pub` names no variant through its module.
+# expect: compile-error "type alias 'Way' is not exported by module 'hidden'"
+import hidden
+
+fn main() -> int {
+    _d := hidden.Way.up
+    0
+}

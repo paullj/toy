@@ -1,0 +1,13 @@
+pub enum Dir { up, down }
+pub type D2 = Dir
+
+pub enum E { X(int), Y }
+pub type E2 = E
+
+pub type OI = Option[int]
+
+pub struct I { pub v: int }
+impl I {
+    fn new() -> I { I { v: 7 } }
+}
+pub type IV = I

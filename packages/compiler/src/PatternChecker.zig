@@ -227,7 +227,11 @@ fn checkVariantPattern(bc: *BodyChecker, pat_idx: Ast.Index, expected: Type, cov
                 break :blk null;
             }
             break :blk bc.scrutEnumId(q);
-        } else bc.activeEnumMap().get(tname) orelse if (bc.activeAliasMap().get(tname)) |t| bc.scrutEnumId(t) else null;
+        } else if (bc.genericParamType(tname) != null)
+            // The fn's type param is the innermost scope, as in a type position, and it
+            // names no enum even when its instance would.
+            null
+        else if (bc.activeAliasMap().get(tname)) |t| bc.scrutEnumId(t) else bc.activeEnumMap().get(tname);
         if (qid) |id| {
             if (id != enum_id) {
                 bad_qualifier = true;

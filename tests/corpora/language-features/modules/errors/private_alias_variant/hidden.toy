@@ -1,0 +1,2 @@
+pub enum Dir { up, down }
+type Way = Dir
