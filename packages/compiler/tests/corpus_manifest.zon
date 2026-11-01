@@ -3,6 +3,7 @@
     .{ .path = "tests/corpora/language-features", .mode = .expect, .unit = .single_file, .prune = .{"modules"}, .count = 549 },
     .{ .path = "tests/corpora/language-features/modules", .mode = .expect, .unit = .module_dir, .count = 53 },
     .{ .path = "tests/corpora/regression", .mode = .expect, .unit = .single_file, .count = 9 },
-    .{ .path = "tests/corpora/benchmark", .mode = .expect, .unit = .single_file, .prune = .{"medium"}, .count = 7 },
-    .{ .path = "tests/corpora/benchmark/medium", .mode = .expect, .unit = .module_dir, .count = 1 },
+    .{ .path = "tests/corpora/opt", .mode = .expect, .unit = .single_file, .count = 7 },
+    .{ .path = "bench/compiler/medium", .mode = .expect, .unit = .module_dir, .count = 1 },
+    .{ .path = "bench/runtime", .mode = .expect, .unit = .single_file, .count = 5 },
 }

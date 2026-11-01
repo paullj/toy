@@ -1,0 +1,32 @@
+# The Benchmarks Game binary-trees at a small depth: many short-lived trees and one
+# long-lived tree, so the collector runs with a live set.
+# expect: stdout "1348958\n"
+
+import std/vec
+import std/io
+
+struct Tree { kids: Vec[Tree] }
+
+fn make(d: int) -> Tree {
+    if d == 0 { return Tree { kids: [] } }
+    return Tree { kids: [make(d - 1), make(d - 1)] }
+}
+
+fn check(t: Tree) -> int {
+    n := 1
+    for k in t.kids { n = n + check(k) }
+    return n
+}
+
+fn main() {
+    max_depth := 13
+    total := check(make(max_depth + 1))
+    long_lived := make(max_depth)
+    d := 4
+    while d <= max_depth {
+        iters := 1 << (max_depth - d + 4)
+        for _i in 0..iters { total = total + check(make(d)) }
+        d = d + 2
+    }
+    io.println(total + check(long_lived))
+}

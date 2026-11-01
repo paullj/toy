@@ -1,0 +1,9 @@
+[
+  { "name": "loops", "kind": "runtime", "source": "runtime/loops.toy" },
+  { "name": "binary_trees", "kind": "runtime", "source": "runtime/binary_trees.toy" },
+  { "name": "alloc", "kind": "runtime", "source": "runtime/alloc.toy" },
+  { "name": "closures", "kind": "runtime", "source": "runtime/closures.toy" },
+  { "name": "strings", "kind": "runtime", "source": "runtime/strings.toy" },
+  { "name": "check_cold_200x50", "kind": "compiler", "project": [200, 50], "args": ["check", "main.toy"] },
+  { "name": "build_cold_200x50", "kind": "compiler", "project": [200, 50], "args": ["build", "-o", "out.bin", "main.toy"] }
+]

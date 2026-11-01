@@ -1,0 +1,24 @@
+# str and collections together: to_string, concat, join, split and chars, with a
+# Map[str, int] word count and a Vec[str].
+# expect: stdout "1558000\n"
+
+import std/vec
+import std/map
+import std/str
+import std/io
+
+fn main() {
+    words: Vec[str] = []
+    for i in 0..2000 { words.push("w".concat((i % 97).to_string())) }
+    text := " ".join(words)
+    counts := Map[str, int].new()
+    total := 0
+    for _round in 0..200 {
+        for w in text.split(" ") {
+            counts.set(w, counts.get(w).or(0) + 1)
+        }
+        for c in text.chars() { if c == 'w' { total = total + 1 } }
+    }
+    for k, v in counts { total = total + k.len() * v }
+    io.println(total)
+}

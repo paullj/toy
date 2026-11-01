@@ -2,14 +2,14 @@
 # Per-stage compile-time profile + a -j scaling sweep, using toyc's `--timings`.
 #   usage: profile.sh <entry.toy> [jobs-list]   (default jobs: 1 2 4 8)
 #
-# Build a RELEASE toyc first for realistic ABSOLUTE numbers — a Debug build is
-# dominated by safety/allocator overhead:
-#   mise exec -- zig build -Doptimize=ReleaseFast
+# Uses the ReleaseFast toyc that `mise run bench` builds into zig-out/bench, since a
+# Debug build is dominated by safety/allocator overhead. Build it alone with:
+#   mise exec -- zig build -Doptimize=ReleaseFast -p zig-out/bench
 # (`--timings` reports the per-stage split: discover=lex+parse, resolve, typecheck,
 #  lower=codegen+link tail, image+sign. Front-end stages are serial at any -j; only
 #  `lower` scales — so `-j1` is the clean "where does the time go" breakdown.)
 set -eu
-toyc="$(cd "$(dirname "$0")/../../.." && pwd)/zig-out/bin/toy"
+toyc="$(cd "$(dirname "$0")/.." && pwd)/zig-out/bench/bin/toy"
 entry="${1:?usage: profile.sh <entry.toy> [jobs...]}"; shift || true
 jobs=("$@"); [ "${#jobs[@]}" -eq 0 ] && jobs=(1 2 4 8)
 dir="$(cd "$(dirname "$entry")" && pwd)"; base="$(basename "$entry")"
