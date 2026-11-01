@@ -392,8 +392,9 @@ const Expect = struct {
     any: bool = false,
     exit: ?u8 = null,
     stdout: ?[]const u8 = null,
-    /// Substrings stderr must contain. Not an exact match: a panic's backtrace ends in
-    /// unsymbolized frames whose addresses move with ASLR.
+    /// Substrings stderr must contain. Not an exact match: a panic's backtrace holds
+    /// frame offsets that change with layout, and `<C>` frames whose addresses move
+    /// with ASLR.
     stderr: std.ArrayList([]const u8) = .empty,
     cerr_expected: bool = false,
     cerr: []const u8 = "",
@@ -1259,7 +1260,7 @@ test "expect harness: judge matches stderr by substring" {
     var e: Expect = .{ .any = true };
     defer e.stderr.deinit(gpa);
     try e.stderr.append(gpa, "boom\n");
-    const backtrace = "boom\n0x0000000000000054 main\n0x000000008f4fbbbc \n";
+    const backtrace = "boom\n0x0000000000000054 main\n";
     try testing.expect((try judge(gpa, "t.toy", e, .{ .ran = .{ .term = .{ .exited = 1 }, .stdout = "", .stderr = backtrace } })) == null);
     try expectJudgeFailure(gpa, e, .{ .ran = .{ .term = .{ .exited = 1 }, .stdout = "", .stderr = "bang\n" } }, "stderr lacks");
 }

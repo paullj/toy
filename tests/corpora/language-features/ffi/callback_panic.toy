@@ -1,7 +1,10 @@
 # expect: exit 1
 # expect: stderr "panic in a C callback"
+# expect: stderr "\n0x0000000000000000 <C>\n"
+# expect: stderr " main\n"
 # A panic inside a callback ends the program as any panic does, with C frames still on
-# the stack: the message and backtrace go to stderr and the process exits with 1.
+# the stack: the message and backtrace go to stderr and the process exits with 1. The
+# backtrace names the C frames <C> and ends at main.
 extern struct Two { a: int, b: int }
 
 extern {

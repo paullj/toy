@@ -235,8 +235,8 @@ it and call it later.
 
 **Panics.** A panic inside a callback ends the program as any panic does: the message and
 a backtrace go to stderr and the process exits with 1. It does not unwind through the C
-frames, so C code above it gets no chance to clean up. The backtrace prints C frames as
-bare addresses.
+frames, so C code above it gets no chance to clean up. The backtrace names each C frame
+`<C>` and, like every backtrace, ends at `main`.
 
 **Collections.** A callback may allocate and collect. The collector walks the frame chain
 through the C frames (Apple's arm64 code keeps a frame record in every function), finds

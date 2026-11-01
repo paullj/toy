@@ -318,8 +318,8 @@ pub const Linked = struct {
     data_relocs: []Reloc,
     /// The backtrace symbol side-table (empty unless `link` was asked to emit it):
     /// `[u64 count][ {u64 text_off, u64 name_off} × count ][name blob]`, entries
-    /// sorted ascending by `text_off` with a final `{text_size, ""}` sentinel (so a
-    /// frame past __text names nothing). `name_off` is a byte offset from the table
+    /// sorted ascending by `text_off` with a final `{text_size, "<C>"}` sentinel (so a
+    /// frame outside __text, i.e. foreign code, names `<C>`). `name_off` is a byte offset from the table
     /// base to a NUL-terminated name. Owned by the caller. A pure function of the fn
     /// set (offsets are stable-sort-ranked), so it is `-jN` byte-identical.
     sym_table: []u8 = &.{},
@@ -649,15 +649,18 @@ fn buildSideTable(gpa: std.mem.Allocator, rows: []const SideRow, blob: []const u
 }
 
 /// Build the backtrace symbol table (see `Linked.sym_table`) as a `buildSideTable`
-/// payload: one row per fn `{text offset, name}` plus a final `{text_size, ""}`
-/// sentinel (frames past __text name nothing), sorted by (off, name) — a total
+/// payload: one row per fn `{text offset, name}` plus a final `{text_size, "<C>"}`
+/// sentinel, sorted by (off, name) — a total
 /// order — with the blob a NUL-terminated name per row. `site_h[i]` is fn i's
 /// handle (→ `offsets`).
 fn buildSymTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32) ![]u8 {
     const ents = try gpa.alloc(SymEnt, fns.len + 1);
     defer gpa.free(ents);
     for (fns, 0..) |f, i| ents[i] = .{ .off = offsets[site_h[i]], .name = f.sym.name };
-    ents[fns.len] = .{ .off = text_size, .name = "" }; // sentinel: frames past __text name nothing
+    // An address below text_base wraps to a huge unsigned offset, so every frame
+    // outside __text lands on this row: the only foreign frames a panic walks
+    // before reaching `main` are the C code a callback was entered through.
+    ents[fns.len] = .{ .off = text_size, .name = "<C>" };
     std.mem.sortUnstable(SymEnt, ents, {}, symEntLess);
 
     var names_len: usize = 0;
@@ -1203,15 +1206,14 @@ test "buildSymTable: header + (off,name) rows sorted, trailing text-size sentine
         prev_off = off;
         try testing.expect(noff < tab.len);
         const name = std.mem.sliceTo(tab[noff..], 0);
-        // Every non-sentinel row names one of the fns "f0".."f2"; the sentinel is empty.
+        // Every non-sentinel row names one of the fns "f0".."f2"; the sentinel is "<C>".
         if (i + 1 < count) try testing.expect(name.len == 2 and name[0] == 'f');
     }
 
-    // The last row is the sentinel: offset == total __text size, empty name.
     const last_off = std.mem.readInt(u64, tab[8 + (count - 1) * 16 ..][0..8], .little);
     const last_noff = std.mem.readInt(u64, tab[8 + (count - 1) * 16 + 8 ..][0..8], .little);
     try testing.expectEqual(@as(u64, linked.text.len), last_off);
-    try testing.expectEqual(@as(u8, 0), tab[last_noff]); // empty string → immediate NUL
+    try testing.expectEqualStrings("<C>", std.mem.sliceTo(tab[last_noff..], 0));
 }
 
 test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn + sentinel are conservative" {
