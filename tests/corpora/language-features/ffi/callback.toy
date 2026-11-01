@@ -3,7 +3,7 @@
 # libdir: "@harness"
 # A toy fn with no captures passes to C as a plain function pointer: a named fn, a
 # lambda or a local fn. C calls it in the C convention (narrow ints with only their low
-# bits set, f32 in s registers, stack arguments packed, extern structs in C layout), and
+# bits set, float32 in s registers, stack arguments packed, extern structs in C layout), and
 # a collection inside the callback keeps what the toy frames under the C frame hold.
 import std/io
 import std/ffi
@@ -13,14 +13,14 @@ import std/vec
 extern struct Small { a: int32, b: int8, c: int16 }
 extern struct Vec4d { x: float, y: float, z: float, w: float }
 extern struct Big { a: int, b: int, c: int, d: int8 }
-extern struct Vec2f { x: f32, y: f32 }
+extern struct Vec2f { x: float32, y: float32 }
 extern struct Pair { x: int, y: int32, z: bool }
 
 extern "toyffi" {
     fn toyffi_each(n: int, cb: fn(int) -> int) -> int
-    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, f32) -> int32) -> int
+    fn toyffi_cb_narrow(cb: fn(int8, uint16, int32, bool, float32) -> int32) -> int
     fn toyffi_cb_stack(cb: fn(int, int, int, int, int, int, int, int, int, int8) -> int) -> int
-    fn toyffi_cb_floats(cb: fn(f32, f32, f32, f32, f32, f32, f32, f32, f32) -> f32) -> float
+    fn toyffi_cb_floats(cb: fn(float32, float32, float32, float32, float32, float32, float32, float32, float32) -> float32) -> float
     fn toyffi_cb_small(cb: fn(Small, int32) -> Small) -> int
     fn toyffi_cb_vec4d(cb: fn(Vec4d, float) -> Vec4d) -> float
     fn toyffi_cb_big(cb: fn(Big) -> Big) -> int
@@ -31,7 +31,7 @@ extern "toyffi" {
 
 fn square(i: int) -> int { i * i }
 
-fn narrow(a: int8, b: uint16, c: int32, d: bool, e: f32) -> int32 {
+fn narrow(a: int8, b: uint16, c: int32, d: bool, e: float32) -> int32 {
     io.println("narrow ".concat(a.to_string()).concat(" ").concat(b.to_string()).concat(" ").concat(c.to_string()).concat(" ").concat(d.to_string()).concat(" ").concat(e.to_string()))
     c - 1
 }
@@ -40,7 +40,7 @@ fn stack(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int,
     a + b + c + d + e + f + g + h + i + if j == -10 { -1000 } else { 0 }
 }
 
-fn floats(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32, i: f32) -> f32 {
+fn floats(a: float32, b: float32, c: float32, d: float32, e: float32, f: float32, g: float32, h: float32, i: float32) -> float32 {
     a +. b +. c +. d +. e +. f +. g +. h +. i *. 10.0
 }
 

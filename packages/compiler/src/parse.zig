@@ -4190,7 +4190,7 @@ test "mut params parse on fns, externs and inherent (incl. static) methods; lamb
 
 test "extern struct parses as a struct decl marked by its keywords; a generic one is P0003" {
     const gpa = testing.allocator;
-    const src = "pub extern struct S { a: int32, b: f32 }\nstruct T { a: int }\nextern struct G[X] { x: X }\n";
+    const src = "pub extern struct S { a: int32, b: float32 }\nstruct T { a: int }\nextern struct G[X] { x: X }\n";
     const tokens = try Lexer.tokenize(gpa, src);
     defer gpa.free(tokens);
     const res = try parse(gpa, tokens, src);

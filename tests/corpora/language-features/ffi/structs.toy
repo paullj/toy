@@ -10,9 +10,9 @@ import std/io
 extern struct Small { a: int32, b: int8, c: int16 }
 extern struct Pair { x: int, y: int32, z: bool }
 extern struct Big { a: int, b: int, c: int, d: int8 }
-extern struct Vec2f { x: f32, y: f32 }
+extern struct Vec2f { x: float32, y: float32 }
 extern struct Vec4d { x: float, y: float, z: float, w: float }
-extern struct Mixed { r: uint8, g: uint8, b: uint8, alpha: f32 }
+extern struct Mixed { r: uint8, g: uint8, b: uint8, alpha: float32 }
 extern struct Rect { min: Vec2f, max: Vec2f }
 
 extern "toyffi" {
@@ -24,9 +24,9 @@ extern "toyffi" {
     fn toyffi_vec2f_add(a: Vec2f, b: Vec2f) -> Vec2f
     fn toyffi_vec4d_scale(v: Vec4d, k: float) -> Vec4d
     fn toyffi_vec4d_dot(a: Vec4d, b: Vec4d) -> float
-    fn toyffi_mixed_dim(m: Mixed, k: f32) -> Mixed
-    fn toyffi_rect_area(r: Rect) -> f32
-    fn toyffi_rect_grow(r: Rect, d: f32) -> Rect
+    fn toyffi_mixed_dim(m: Mixed, k: float32) -> Mixed
+    fn toyffi_rect_area(r: Rect) -> float32
+    fn toyffi_rect_grow(r: Rect, d: float32) -> Rect
     fn toyffi_spill(a: int, b: int, c: int, d: int, e: int, f: int, g: int, p: Pair, v: Vec4d, w: Vec4d, q: Vec2f) -> float
 }
 

@@ -433,7 +433,7 @@ test "grammar agreement: struct pattern renames, literals and comma-less struct 
         .{ .src = "fn f(s: S) -> int {\n  match s {\n    .Rect { w: 0 } -> 1\n    S.Rect { w: .some(n), h: _ } -> n\n    _ -> 0\n  }\n}\n", .has = "(struct_pattern_field (identifier) (literal_pattern (number)))" },
         .{ .src = "fn f(s: S) -> int {\n  match s {\n    .box {\n      w\n      h: high\n    } -> w\n    _ -> 0\n  }\n}\n", .has = "(struct_pattern_field (identifier) (identifier))" },
         .{ .src = "struct Name {\n  id: int\n  c: cstr\n}\n", .has = "(struct_field_block (struct_field (identifier) type: (type_name (identifier))) (struct_field (identifier)" },
-        .{ .src = "extern struct P {\n  pub x: int,\n  y: f32\n  z: Vec[int]\n}\n", .has = "(struct_field_block (struct_field" },
+        .{ .src = "extern struct P {\n  pub x: int,\n  y: float32\n  z: Vec[int]\n}\n", .has = "(struct_field_block (struct_field" },
         .{ .src = "enum S {\n  Rect {\n    w: int\n    h: int\n  },\n  N,\n}\n", .has = "(enum_variant (identifier) (struct_field_block" },
     };
     for (cases) |c| {

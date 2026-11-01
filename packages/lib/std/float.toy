@@ -10,16 +10,16 @@ impl float has Display {
     }
 }
 
-# An f32 widens to float exactly; the fewest significant digits (at most 9, which always
-# suffice) that round back to the same f32 are its shortest form.
-impl f32 has Display {
+# A float32 widens to float exactly; the fewest significant digits (at most 9, which always
+# suffice) that round back to the same float32 are its shortest form.
+impl float32 has Display {
     fn display(self) -> str {
         d: float = self.into()
         s := fmt.shortest(d)
         if s.point == 9999 { return render(s) }
         for n in 1..9 {
             r := fmt.rounded(d, n)
-            back: f32 = fmt.parse("0.".concat(r.digits).concat("e").concat(r.point.to_string())).expect("dtoa digits").into()
+            back: float32 = fmt.parse("0.".concat(r.digits).concat("e").concat(r.point.to_string())).expect("dtoa digits").into()
             if back == self || back == 0.0 -. self { return render(r) }
         }
         return render(fmt.rounded(d, 9))

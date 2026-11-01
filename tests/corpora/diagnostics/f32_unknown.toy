@@ -1,0 +1,6 @@
+# The single-precision float is spelled float32; f32 is no type name at all.
+fn main() -> int {
+    _x: f32 = 1.5  #~ ERROR [T0001] unknown type 'f32'
+    _y: float32 = 1.5
+    return 0
+}

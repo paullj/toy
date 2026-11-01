@@ -9,10 +9,10 @@ impl Acc {
 
 extern {
     fn heapsort(n: int, cb: fn(int) -> int) -> int
-    fn mergesort(cb: fn(str) -> int)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn radixsort(cb: fn(int) -> Acc)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn bsearch(cb: fn(fn(int) -> int))  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn signal() -> fn(int) -> int  #~ ERROR [T0037] extern function parameter/return type must be int, float, f32, rawptr, cstr, bool, or an extern struct
+    fn mergesort(cb: fn(str) -> int)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, float32, float, bool, rawptr, cstr, or an extern struct
+    fn radixsort(cb: fn(int) -> Acc)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, float32, float, bool, rawptr, cstr, or an extern struct
+    fn bsearch(cb: fn(fn(int) -> int))  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, float32, float, bool, rawptr, cstr, or an extern struct
+    fn signal() -> fn(int) -> int  #~ ERROR [T0037] extern function parameter/return type must be int, float, float32, rawptr, cstr, bool, or an extern struct
     fn atexit(mut cb: fn(int) -> int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
 }
 

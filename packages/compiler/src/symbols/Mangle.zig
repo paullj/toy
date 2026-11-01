@@ -153,7 +153,7 @@ test "each family spells its names" {
         .{ .got = instance(gpa, "id", &.{Type.int8}), .want = "id$int8" },
         .{ .got = instance(gpa, "id", &.{Type.uint32}), .want = "id$uint32" },
         .{ .got = instance(gpa, "id", &.{Type.cstr}), .want = "id$cstr" },
-        .{ .got = instance(gpa, "id", &.{Type.float32}), .want = "id$f32" },
+        .{ .got = instance(gpa, "id", &.{Type.float32}), .want = "id$float32" },
         .{ .got = lambda(gpa, "f", 0), .want = "f$l0" },
         .{ .got = lambda(gpa, "f", 12), .want = "f$l12" },
         .{ .got = adapter(gpa, "geometry/rect.area", .fn_value), .want = "geometry/rect.area$fnval" },

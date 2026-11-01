@@ -7,7 +7,7 @@ const KEYWORDS = new Set([
 ]);
 
 const TYPES = new Set([
-	'int', 'uint', 'byte', 'char', 'str', 'bool', 'float',
+	'int', 'uint', 'byte', 'char', 'str', 'bool', 'float', 'float32',
 	'uint8', 'uint16', 'uint32', 'uint64', 'int8', 'int16', 'int32', 'int64',
 	'Option', 'Result'
 ]);
