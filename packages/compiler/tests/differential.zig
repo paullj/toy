@@ -527,7 +527,7 @@ test "sibling protocol reusing eq/cmp: build+run yields the derive result (exit 
         try writeFixture(io, dir, &.{.{ "main.toy", src }});
         defer Io.Dir.cwd().deleteTree(io, dir) catch {};
         const chk = try spawnExit(gpa, io, &.{ "check", dir ++ "/main.toy" });
-        const runt = try spawnExit(gpa, io, &.{ "run", dir ++ "/main.toy" });
+        const runt = try spawnExit(gpa, io, &.{ "run", dir ++ "/main.toy", "-o", dir ++ "/prog" });
         try testing.expectEqual(@as(?u8, 0), exitCode(chk));
         try testing.expectEqual(@as(?u8, 111), exitCode(runt));
     }

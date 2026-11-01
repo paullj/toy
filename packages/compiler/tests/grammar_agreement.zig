@@ -421,6 +421,40 @@ test "grammar agreement: both engines index a call, a group, a block value and a
     }
 }
 
+test "grammar agreement: struct pattern renames, literals and comma-less struct fields parse in both engines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parser = ts.Parser.create();
+    defer parser.destroy();
+    try parser.setLanguage(tree_sitter_toy());
+    const cases = [_]struct { src: []const u8, has: []const u8 }{
+        .{ .src = "fn f(s: S) -> int {\n  match s {\n    .box { w, h: high } -> w + high,\n    _ -> 0,\n  }\n}\n", .has = "(variant_pattern (identifier) (struct_pattern_field (identifier)) (struct_pattern_field (identifier) (identifier)))" },
+        .{ .src = "fn f(s: S) -> int {\n  match s {\n    .Rect { w: 0 } -> 1\n    S.Rect { w: .some(n), h: _ } -> n\n    _ -> 0\n  }\n}\n", .has = "(struct_pattern_field (identifier) (literal_pattern (number)))" },
+        .{ .src = "fn f(s: S) -> int {\n  match s {\n    .box {\n      w\n      h: high\n    } -> w\n    _ -> 0\n  }\n}\n", .has = "(struct_pattern_field (identifier) (identifier))" },
+        .{ .src = "struct Name {\n  id: int\n  c: cstr\n}\n", .has = "(struct_field_block (struct_field (identifier) type: (type_name (identifier))) (struct_field (identifier)" },
+        .{ .src = "extern struct P {\n  pub x: int,\n  y: f32\n  z: Vec[int]\n}\n", .has = "(struct_field_block (struct_field" },
+        .{ .src = "enum S {\n  Rect {\n    w: int\n    h: int\n  },\n  N,\n}\n", .has = "(enum_variant (identifier) (struct_field_block" },
+    };
+    for (cases) |c| {
+        if (try scope(a, c.src) != .in) {
+            std.debug.print("compiler rejects {s}\n", .{c.src});
+            return error.CompilerParseError;
+        }
+        _ = compareFile(a, c.src, classifyTag, true) catch |err| {
+            std.debug.print("agreement failure ({s}): {s}\n", .{ @errorName(err), c.src });
+            return err;
+        };
+        const tree = parser.parseString(c.src, null) orelse return error.TreeSitterParseReturnedNull;
+        defer tree.destroy();
+        const sexp = try tree.rootNode().toSexp(a);
+        if (std.mem.indexOf(u8, sexp, c.has) == null) {
+            std.debug.print("unexpected parse of {s}\n  {s}\n", .{ c.src, sexp });
+            return error.UnexpectedGrammarShape;
+        }
+    }
+}
+
 // ---- One-sided negative control (liveness of the comparator) ---------------
 
 test "grammar agreement: a one-sided wrong classifier DISAGREES, the true one AGREES" {
