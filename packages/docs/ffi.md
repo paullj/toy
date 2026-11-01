@@ -384,6 +384,17 @@ install name (its `LC_ID_DYLIB`), as the system linker does:
   `-install_name`) would make dyld look in the working directory, so the absolute path
   the library was found at is recorded instead.
 
+Each `LC_LOAD_DYLIB` also carries the library's current and compatibility versions
+from its `LC_ID_DYLIB`, which dyld checks at launch: a library on disk supplies them
+from its file, and a shared-cache library from its image in the running system's
+cache. So `-l z` records `/usr/lib/libz.1.dylib (compatibility version 1.0.0, current
+version 1.2.12)`, as `clang -lz` does. The system linker reads a shared-cache
+library's versions from the SDK instead, so a current version can be newer than the
+one `clang` records; the compatibility version is the same.
+
+libSystem is always recorded with fixed versions, so a program's bytes do not depend
+on the macOS it was built on unless it links another shared-cache library.
+
 The libraries are worked out again on every build from the sources and flags; the
 linked image is never cached, so a warm build after changing `-l`, `-L` or a block's
 library relinks against the new set.

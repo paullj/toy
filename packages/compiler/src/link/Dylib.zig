@@ -107,11 +107,12 @@ pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []
 }
 
 /// A shared-cache library, recorded by its install name so that two paths to one
-/// library (`/usr/lib/libz.dylib` and `/usr/lib/libz.1.dylib`) load it once.
+/// library (`/usr/lib/libz.dylib` and `/usr/lib/libz.1.dylib`) load it once, and
+/// with the versions of its LC_ID_DYLIB, as the system linker records them.
 fn cached(arena: std.mem.Allocator, path: []const u8) !Found {
-    const install_name = if (try cachedInstallName(arena, path)) |n| n else path;
-    if (std.mem.eql(u8, install_name, libsystem_path)) return .libsystem;
-    return .{ .dylib = .{ .dylib = .{ .install_name = install_name }, .rpath = null, .exports = .{ .cached = path } } };
+    const dylib: MachO.Dylib = (try cachedId(arena, path)) orelse .{ .install_name = path };
+    if (std.mem.eql(u8, dylib.install_name, libsystem_path)) return .libsystem;
+    return .{ .dylib = .{ .dylib = dylib, .rpath = null, .exports = .{ .cached = path } } };
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -133,7 +134,7 @@ fn open(arena: std.mem.Allocator, io: Io, path: []const u8) !Found {
     const choice = try record(arena, id.install_name, real);
     if (std.mem.eql(u8, choice.install_name, libsystem_path)) return .libsystem;
     return .{ .dylib = .{
-        .dylib = .{ .install_name = choice.install_name, .current_version = id.current_version, .compat_version = id.compat_version },
+        .dylib = id.recordAs(choice.install_name),
         .rpath = choice.rpath,
         .exports = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } },
     } };
@@ -162,6 +163,12 @@ pub const Id = struct {
     compat_version: u32,
     exports: []const u8 = &.{},
     cmds: []const u8 = &.{},
+
+    /// The load command for this library under `install_name`, which may differ from
+    /// the library's own (see `record`).
+    pub fn recordAs(id: Id, install_name: []const u8) MachO.Dylib {
+        return .{ .install_name = install_name, .current_version = id.current_version, .compat_version = id.compat_version };
+    }
 };
 
 /// Where the linker looks up the C symbols a library exports.
@@ -440,10 +447,10 @@ fn cachedHas(path: []const u8, sym: []const u8) bool {
     return dyld.dlsym(h, cstr(&buf, sym) orelse return true) != null;
 }
 
-/// The install name in the LC_ID_DYLIB of the shared-cache library at `path`. dyld
-/// has no call from a path to its image, so the library is opened and the loaded
-/// image whose handle matches is read in memory; null when none does.
-fn cachedInstallName(arena: std.mem.Allocator, path: []const u8) !?[]const u8 {
+/// The load command for the shared-cache library at `path`, from its LC_ID_DYLIB,
+/// its install name owned by `arena`. dyld has no call from a path to its image, so the library is opened and
+/// the loaded image whose handle matches is read in memory; null when none does.
+fn cachedId(arena: std.mem.Allocator, path: []const u8) !?MachO.Dylib {
     if (comptime builtin.os.tag != .macos) return null;
     const h = openCached(path, 0) orelse return null;
     defer _ = dyld.dlclose(h);
@@ -455,7 +462,7 @@ fn cachedInstallName(arena: std.mem.Allocator, path: []const u8) !?[]const u8 {
         const header: [*]const u8 = @ptrCast(dyld._dyld_get_image_header(@intCast(i)) orelse return null);
         const sizeofcmds = std.mem.readInt(u32, header[20..24], .little);
         return switch (readThin(header[0 .. 32 + sizeofcmds])) {
-            .ok => |id| try arena.dupe(u8, id.install_name),
+            .ok => |id| id.recordAs(try arena.dupe(u8, id.install_name)),
             .bad => null,
         };
     }
@@ -672,7 +679,7 @@ test "trieHas follows shared prefixes" {
     try testing.expect(!trieHas(&trie, "_ad"));
 }
 
-test "shared-cache libraries: dyld answers exports, and aliases share one install name" {
+test "shared-cache libraries: dyld answers exports, and aliases share one install name and versions" {
     if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -691,6 +698,9 @@ test "shared-cache libraries: dyld answers exports, and aliases share one instal
     try testing.expect(!try z.exports.has(a, io, &cache, "puts"));
     const z1 = (try find(a, io, "/usr/lib/libz.1.dylib", &.{})).dylib;
     try testing.expectEqualStrings(z1.dylib.install_name, z.dylib.install_name);
+    try testing.expectEqual(@as(u32, 0x10000), z.dylib.compat_version);
+    try testing.expect(z.dylib.current_version >= 0x10200);
+    try testing.expectEqual(z1.dylib.current_version, z.dylib.current_version);
     try testing.expect(try find(a, io, "/usr/lib/libc.dylib", &.{}) == .libsystem);
 }
 
