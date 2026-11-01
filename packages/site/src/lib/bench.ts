@@ -175,3 +175,74 @@ export function changesAt(records: BenchRecord[], sha: string, metric: MetricKey
 
 export const formatChange = (pct: number | undefined) =>
 	pct === undefined ? '–' : `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`;
+
+export type PeerResult = {
+	name: string;
+	lang: string;
+	source: string;
+	metrics: Metrics;
+	checksum: string;
+	checksum_ok: boolean;
+};
+
+export type PeerRun = {
+	date: string;
+	toy_commit: string;
+	toy_dirty: boolean;
+	runs: number;
+	machine: Machine;
+	toolchains: Record<string, { version: string; flags: string }>;
+	results: PeerResult[];
+};
+
+export function parsePeers(text: string): PeerRun {
+	let run: PeerRun;
+	try {
+		run = JSON.parse(text);
+	} catch {
+		throw new Error('peers.json: not JSON');
+	}
+	for (const field of ['date', 'toy_commit', 'machine', 'toolchains', 'results'] as const) {
+		if (run[field] === undefined) throw new Error(`peers.json: no ${field}`);
+	}
+	run.results.forEach((r, i) => {
+		for (const field of ['name', 'lang', 'source', 'metrics'] as const) {
+			if (r[field] === undefined) throw new Error(`peers.json: result ${i + 1} has no ${field}`);
+		}
+	});
+	return run;
+}
+
+export type PeerBar = { lang: string; value: number; vsToy: number | undefined; result: PeerResult };
+
+/** Toy leads each chart so the eye has one fixed reference; the peers keep the runner's order. */
+export function peerCharts(run: PeerRun, metric: MetricKey): { name: string; bars: PeerBar[] }[] {
+	const byName = new Map<string, PeerResult[]>();
+	for (const r of run.results) byName.set(r.name, [...(byName.get(r.name) ?? []), r]);
+	return [...byName].map(([name, results]) => {
+		const ordered = [...results.filter((r) => r.lang === 'toy'), ...results.filter((r) => r.lang !== 'toy')];
+		const toy = results.find((r) => r.lang === 'toy')?.metrics[metric];
+		return {
+			name,
+			bars: ordered.map((r) => ({
+				lang: r.lang,
+				value: r.metrics[metric],
+				vsToy: toy ? r.metrics[metric] / toy : undefined,
+				result: r
+			}))
+		};
+	});
+}
+
+const BETTER: Record<MetricKey, string> = {
+	instructions: 'fewer instructions',
+	wall_median_s: 'faster',
+	peak_footprint_bytes: 'less memory'
+};
+
+const times = (x: number) => `${x.toFixed(x < 10 ? 2 : 0)}×`;
+
+export function vsToyLabel(ratio: number | undefined, metric: MetricKey): string {
+	if (ratio === undefined) return '';
+	return ratio >= 1 ? `${times(ratio)} toy` : `${times(1 / ratio)} ${BETTER[metric]} than toy`;
+}

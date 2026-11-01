@@ -1,0 +1,278 @@
+{
+  "date": "2026-11-01T23:13:44Z",
+  "toy_commit": "58926572e259bf665e4aca97fc0380e37b15f55f",
+  "toy_dirty": false,
+  "runs": 5,
+  "machine": {
+    "id": "55a38e8f",
+    "chip": "Apple M2 Pro",
+    "model": "Mac14,9",
+    "p_cores": 6,
+    "e_cores": 4,
+    "ram_bytes": 34359738368,
+    "macos": "27.0.1",
+    "zig": "0.16.0",
+    "power": "ac",
+    "load_avg_1m": 13.79
+  },
+  "toolchains": {
+    "toy": {
+      "version": "zig 0.16.0",
+      "flags": "zig build -Doptimize=ReleaseFast; toy build --release"
+    },
+    "c": {
+      "version": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+      "flags": "cc -O2"
+    },
+    "go": {
+      "version": "go version go1.27.3 darwin/arm64",
+      "flags": "go build"
+    },
+    "python": {
+      "version": "Python 3.15.2",
+      "flags": "python3"
+    }
+  },
+  "results": [
+    {
+      "name": "loops",
+      "lang": "toy",
+      "source": "bench/runtime/loops.toy",
+      "metrics": {
+        "instructions": 5051479171,
+        "cycles": 2424054588,
+        "max_rss_bytes": 1654784,
+        "peak_footprint_bytes": 1261976,
+        "wall_median_s": 0.856617583,
+        "wall_mean_s": 0.8456531998000001,
+        "wall_stddev_s": 0.06809226919750624,
+        "wall_min_s": 0.730703125,
+        "wall_max_s": 0.8999722920000001,
+        "user_s": 0.7342974,
+        "sys_s": 0.008478
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "c",
+      "source": "bench/peers/c/loops.c",
+      "metrics": {
+        "instructions": 520472971,
+        "cycles": 239089013,
+        "max_rss_bytes": 1638400,
+        "peak_footprint_bytes": 1212776,
+        "wall_median_s": 0.0774985,
+        "wall_mean_s": 0.0771336416,
+        "wall_stddev_s": 0.002260522635301693,
+        "wall_min_s": 0.074116708,
+        "wall_max_s": 0.07950829200000001,
+        "user_s": 0.0706456,
+        "sys_s": 0.0020886000000000004
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "go",
+      "source": "bench/peers/go/loops.go",
+      "metrics": {
+        "instructions": 573340076,
+        "cycles": 324036693,
+        "max_rss_bytes": 4505600,
+        "peak_footprint_bytes": 3113464,
+        "wall_median_s": 0.10985475,
+        "wall_mean_s": 0.11065169160000002,
+        "wall_stddev_s": 0.0035437254251554674,
+        "wall_min_s": 0.106924583,
+        "wall_max_s": 0.116525,
+        "user_s": 0.0980522,
+        "sys_s": 0.0044274
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "python",
+      "source": "bench/peers/python/loops.py",
+      "metrics": {
+        "instructions": 47603065738,
+        "cycles": 11248459713,
+        "max_rss_bytes": 17547264,
+        "peak_footprint_bytes": 7176672,
+        "wall_median_s": 3.8268755,
+        "wall_mean_s": 3.9846764918000006,
+        "wall_stddev_s": 0.5902113942687821,
+        "wall_min_s": 3.527095333,
+        "wall_max_s": 5.008018792,
+        "user_s": 3.4805433999999997,
+        "sys_s": 0.048195600000000005
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "toy",
+      "source": "bench/runtime/binary_trees.toy",
+      "metrics": {
+        "instructions": 7598753937,
+        "cycles": 2307940779,
+        "max_rss_bytes": 14958592,
+        "peak_footprint_bytes": 14615008,
+        "wall_median_s": 0.7423207500000001,
+        "wall_mean_s": 0.7450341668000001,
+        "wall_stddev_s": 0.038455972666232845,
+        "wall_min_s": 0.6923161670000001,
+        "wall_max_s": 0.793334292,
+        "user_s": 0.46279839999999994,
+        "sys_s": 0.2394892
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "c",
+      "source": "bench/peers/c/binary_trees.c",
+      "metrics": {
+        "instructions": 374229832,
+        "cycles": 63404495,
+        "max_rss_bytes": 2211840,
+        "peak_footprint_bytes": 1786240,
+        "wall_median_s": 0.022912709,
+        "wall_mean_s": 0.043139300000000005,
+        "wall_stddev_s": 0.040651812788178227,
+        "wall_min_s": 0.0215055,
+        "wall_max_s": 0.115265,
+        "user_s": 0.021338799999999998,
+        "sys_s": 0.0023938
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "go",
+      "source": "bench/peers/go/binary_trees.go",
+      "metrics": {
+        "instructions": 293542245,
+        "cycles": 65088235,
+        "max_rss_bytes": 10502144,
+        "peak_footprint_bytes": 8995368,
+        "wall_median_s": 0.019034667,
+        "wall_mean_s": 0.0199732164,
+        "wall_stddev_s": 0.0024497815555405743,
+        "wall_min_s": 0.017645333000000003,
+        "wall_max_s": 0.023398708,
+        "user_s": 0.0173992,
+        "sys_s": 0.0047718
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "python",
+      "source": "bench/peers/python/binary_trees.py",
+      "metrics": {
+        "instructions": 1438661097,
+        "cycles": 288301468,
+        "max_rss_bytes": 18628608,
+        "peak_footprint_bytes": 8323576,
+        "wall_median_s": 0.09183395800000001,
+        "wall_mean_s": 0.09173638340000001,
+        "wall_stddev_s": 0.0022974920883324745,
+        "wall_min_s": 0.088357959,
+        "wall_max_s": 0.09408408300000001,
+        "user_s": 0.08196,
+        "sys_s": 0.005197599999999999
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "toy",
+      "source": "bench/runtime/alloc.toy",
+      "metrics": {
+        "instructions": 7411727431,
+        "cycles": 2181207763,
+        "max_rss_bytes": 13271040,
+        "peak_footprint_bytes": 12911072,
+        "wall_median_s": 0.658534791,
+        "wall_mean_s": 0.6737421582,
+        "wall_stddev_s": 0.039007953844168615,
+        "wall_min_s": 0.637797375,
+        "wall_max_s": 0.724654209,
+        "user_s": 0.40983479999999994,
+        "sys_s": 0.23891779999999999
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "c",
+      "source": "bench/peers/c/alloc.c",
+      "metrics": {
+        "instructions": 253644976,
+        "cycles": 40328945,
+        "max_rss_bytes": 3817472,
+        "peak_footprint_bytes": 3359080,
+        "wall_median_s": 0.013657041000000002,
+        "wall_mean_s": 0.0135643332,
+        "wall_stddev_s": 0.00030849205691670545,
+        "wall_min_s": 0.013222833000000002,
+        "wall_max_s": 0.013977292,
+        "user_s": 0.0106516,
+        "sys_s": 0.0013495999999999998
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "go",
+      "source": "bench/peers/go/alloc.go",
+      "metrics": {
+        "instructions": 278300949,
+        "cycles": 75794332,
+        "max_rss_bytes": 12500992,
+        "peak_footprint_bytes": 11010576,
+        "wall_median_s": 0.015924792,
+        "wall_mean_s": 0.0188413168,
+        "wall_stddev_s": 0.004743523627721138,
+        "wall_min_s": 0.015820792,
+        "wall_max_s": 0.02674825,
+        "user_s": 0.017605799999999998,
+        "sys_s": 0.0063094
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "python",
+      "source": "bench/peers/python/alloc.py",
+      "metrics": {
+        "instructions": 1757033028,
+        "cycles": 342455238,
+        "max_rss_bytes": 27541504,
+        "peak_footprint_bytes": 17367544,
+        "wall_median_s": 0.112275125,
+        "wall_mean_s": 0.12530916660000002,
+        "wall_stddev_s": 0.0279463693547545,
+        "wall_min_s": 0.109160958,
+        "wall_max_s": 0.174764041,
+        "user_s": 0.1002116,
+        "sys_s": 0.006955600000000001
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    }
+  ]
+}

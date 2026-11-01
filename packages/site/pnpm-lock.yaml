@@ -81,12 +81,18 @@ importers:
       '@tailwindcss/vite':
         specifier: ^4.0.0
         version: 4.3.2(vite@6.4.3(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.32.0))
+      '@types/d3-scale':
+        specifier: 4.0.9
+        version: 4.0.9
       '@types/node':
         specifier: ^24
         version: 24.19.0
       binaryen:
         specifier: ^132.0.0
         version: 132.0.0
+      d3-scale:
+        specifier: 4.0.2
+        version: 4.0.2
       layerchart:
         specifier: 2.9.2
         version: 2.9.2(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.4)(vite@6.4.3(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.4)(typescript@5.9.3)(vite@6.4.3(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.4)
@@ -646,6 +652,12 @@ packages:
 
   '@types/d3-contour@3.0.6':
     resolution: {integrity: sha512-BjzLgXGnCWjUSYGfH1cpdo41/hgdWETu4YxpezoztawmqsvCeep+8QGfiY6YbDvfgHz/DkjeIkkZVJavB4a3rg==}
+
+  '@types/d3-scale@4.0.9':
+    resolution: {integrity: sha512-dLmtwB8zkAeO/juAMfnV+sItKjlsw2lKdZVVy6LRr0cBmegxSABiLEpGVmSJJ8O08i4+sGR6qQtb6WtuwJdvVw==}
+
+  '@types/d3-time@3.0.4':
+    resolution: {integrity: sha512-yuzZug1nkAAaBlBBikKZTgzCeA+k1uy4ZFwWANOfKw5z5LRhV0gNA7gNkKm7HoK+HRN0wX3EkxGk0fpbWhmB7g==}
 
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
@@ -1838,6 +1850,12 @@ snapshots:
     dependencies:
       '@types/d3-array': 3.2.2
       '@types/geojson': 7946.0.16
+
+  '@types/d3-scale@4.0.9':
+    dependencies:
+      '@types/d3-time': 3.0.4
+
+  '@types/d3-time@3.0.4': {}
 
   '@types/deep-eql@4.0.2': {}
 

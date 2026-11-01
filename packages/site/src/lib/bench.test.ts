@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changesAt, commits, machines, parseHistory, series, summary, trend, type BenchRecord } from './bench';
+import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, type BenchRecord } from './bench';
 
 const machine = (id: string) => ({
 	id,
@@ -139,5 +139,93 @@ describe('derived views', () => {
 			{ name: 'alloc', kind: 'runtime', pct: expect.closeTo(-75) }
 		]);
 		expect(changesAt(m1, 'a', 'instructions')).toEqual([]);
+	});
+});
+
+function peerRun(results: { name: string; lang: string; wall: number; ok?: boolean }[]) {
+	return JSON.stringify({
+		date: '2026-11-01T23:13:44Z',
+		toy_commit: 'abcdef0123456789',
+		toy_dirty: false,
+		runs: 5,
+		machine: machine('m1'),
+		toolchains: { toy: { version: 'zig 0.16.0', flags: 'toy build --release' }, c: { version: 'clang 17', flags: 'cc -O2' } },
+		results: results.map((r) => ({
+			name: r.name,
+			lang: r.lang,
+			source: `bench/peers/${r.lang}/${r.name}.src`,
+			metrics: { instructions: 1, cycles: 1, max_rss_bytes: 1, peak_footprint_bytes: r.wall * 1000, wall_median_s: r.wall, wall_mean_s: 1, wall_stddev_s: 0, wall_min_s: 1, wall_max_s: 1, user_s: 1, sys_s: 0 },
+			checksum: '42',
+			checksum_ok: r.ok ?? true
+		}))
+	});
+}
+
+describe('parsePeers', () => {
+	it('reads the run, its machine and toolchains', () => {
+		const run = parsePeers(peerRun([{ name: 'loops', lang: 'toy', wall: 0.5 }]));
+		expect(run.toy_commit).toBe('abcdef0123456789');
+		expect(run.machine.chip).toBe('Apple M2 Pro');
+		expect(run.toolchains.c.version).toBe('clang 17');
+		expect(run.results[0].metrics.wall_median_s).toBe(0.5);
+	});
+
+	it('names what is missing or broken', () => {
+		expect(() => parsePeers('{oops')).toThrow('peers.json: not JSON');
+		expect(() => parsePeers('{"date":"x"}')).toThrow('peers.json: no toy_commit');
+		const bad = JSON.parse(peerRun([{ name: 'loops', lang: 'toy', wall: 1 }]));
+		delete bad.results[0].metrics;
+		expect(() => parsePeers(JSON.stringify(bad))).toThrow('peers.json: result 1 has no metrics');
+		const sourceless = JSON.parse(peerRun([{ name: 'loops', lang: 'toy', wall: 1 }]));
+		delete sourceless.results[0].source;
+		expect(() => parsePeers(JSON.stringify(sourceless))).toThrow('peers.json: result 1 has no source');
+	});
+});
+
+describe('peerCharts', () => {
+	const run = parsePeers(
+		peerRun([
+			{ name: 'loops', lang: 'c', wall: 0.1 },
+			{ name: 'loops', lang: 'toy', wall: 0.8 },
+			{ name: 'loops', lang: 'python', wall: 4, ok: false },
+			{ name: 'alloc', lang: 'toy', wall: 2 },
+			{ name: 'alloc', lang: 'c', wall: 0.2 }
+		])
+	);
+
+	it('gives one chart per benchmark in file order, toy first then the peers in file order', () => {
+		const charts = peerCharts(run, 'wall_median_s');
+		expect(charts.map((c) => c.name)).toEqual(['loops', 'alloc']);
+		expect(charts[0].bars.map((b) => [b.lang, b.value, b.result.checksum_ok])).toEqual([
+			['toy', 0.8, true],
+			['c', 0.1, true],
+			['python', 4, false]
+		]);
+		expect(charts[1].bars.map((b) => b.lang)).toEqual(['toy', 'c']);
+	});
+
+	it('reads the chosen metric', () => {
+		expect(peerCharts(run, 'peak_footprint_bytes')[1].bars.map((b) => b.value)).toEqual([2000, 200]);
+	});
+
+	it('gives each bar its ratio to toy', () => {
+		expect(peerCharts(run, 'wall_median_s')[0].bars.map((b) => b.vsToy)).toEqual([1, 0.125, 5]);
+	});
+});
+
+describe('vsToyLabel', () => {
+	it('reads a peer that does worse as a multiple of toy', () => {
+		expect(vsToyLabel(5, 'wall_median_s')).toBe('5.00× toy');
+		expect(vsToyLabel(12, 'peak_footprint_bytes')).toBe('12× toy');
+	});
+
+	it('words a peer that does better in the terms of the metric', () => {
+		expect(vsToyLabel(0.125, 'wall_median_s')).toBe('8.00× faster than toy');
+		expect(vsToyLabel(0.5, 'peak_footprint_bytes')).toBe('2.00× less memory than toy');
+		expect(vsToyLabel(0.05, 'instructions')).toBe('20× fewer instructions than toy');
+	});
+
+	it('is empty without a toy result to compare with', () => {
+		expect(vsToyLabel(undefined, 'wall_median_s')).toBe('');
 	});
 });
