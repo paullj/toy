@@ -1,0 +1,31 @@
+# Closure creation and calls: a captured adder, a bound method and lambdas through a
+# map/filter/fold chain.
+# expect: stdout "8995500000\n"
+
+import std/vec
+import std/io
+
+struct Scale { k: int }
+
+impl Scale {
+    fn apply(self, x: int) -> int { x * self.k }
+}
+
+fn make_adder(n: int) -> fn(int) -> int { fn(x) { x + n } }
+
+fn main() {
+    xs: Vec[int] = []
+    for i in 0..1000 { xs.push(i) }
+    scale := Scale { k: 3 }
+    total := 0
+    for round in 0..3000 {
+        add := make_adder(round)
+        sum := xs
+            |> .map(add)
+            |> .map(scale.apply)
+            |> .filter(fn(x) { x % 2 == 0 })
+            |> .fold(0, fn(a, x) { a + x })
+        total = total + sum
+    }
+    io.println(total)
+}

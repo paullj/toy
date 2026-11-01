@@ -1,0 +1,18 @@
+# The #75 shape: small Vecs allocated in a loop, every 20th one kept, so the live heap
+# grows with the input. Collection cost that grows with live heap times allocations
+# shows here first.
+# expect: stdout "500000550000\n"
+
+import std/vec
+import std/io
+
+fn main() {
+    keep := Vec[Vec[int]].new()
+    total := 0
+    for i in 0..1000000 {
+        v := [i, i + 1, i + 2]
+        total = total + v[1]
+        if i % 20 == 0 { keep.push(v) }
+    }
+    io.println(total + keep.len())
+}

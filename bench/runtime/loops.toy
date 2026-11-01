@@ -1,0 +1,26 @@
+# Plain compute, no heap: recursive calls (fib) and a tight loop (Collatz step counts).
+# The baseline for call and register-allocation work (#38).
+# expect: stdout "64312953\n"
+
+import std/io
+
+fn fib(n: int) -> int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn collatz_steps(start: int) -> int {
+    n := start
+    steps := 0
+    while n != 1 {
+        n = if n % 2 == 0 { n / 2 } else { 3 * n + 1 }
+        steps = steps + 1
+    }
+    return steps
+}
+
+fn main() {
+    total := fib(32)
+    for i in 1..500000 { total = total + collatz_steps(i) }
+    io.println(total)
+}
