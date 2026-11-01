@@ -19,6 +19,7 @@
 		{ href: resolve('/tour/'), label: 'Tour →' },
 		{ href: resolve('/playground/'), label: 'Playground →' },
 		{ href: resolve('/docs/'), label: 'Reference →' },
+		{ href: resolve('/benchmarks/'), label: 'Benchmarks →' },
 		{ href: 'https://github.com/paullj/toy-compiler', label: 'Source →' }
 	];
 

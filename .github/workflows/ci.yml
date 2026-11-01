@@ -60,6 +60,9 @@ jobs:
       # -O0 against -O1 over the corpus (exit code and stdout), and each opt pass's win.
       - name: Opt-level differential
         run: bash bench/opt-check.sh
+      # When `mise run bench` appends to bench/history.jsonl, on a scratch repo.
+      - name: Bench history rules
+        run: bash bench/record-test.sh
 
   fuzz:
     name: Bounded fuzz (${{ matrix.os }})

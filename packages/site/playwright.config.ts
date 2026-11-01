@@ -8,6 +8,12 @@ const url = 'http://127.0.0.1:4173';
 // Playwright then waits forever on the orphan's open pipes.
 export default defineConfig({
 	testDir: 'e2e',
-	webServer: { command: 'pnpm build && exec vite preview --host 127.0.0.1 --port 4173 --strictPort', url, timeout: 120_000 },
+	webServer: {
+		command: 'pnpm build && exec vite preview --host 127.0.0.1 --port 4173 --strictPort',
+		url,
+		timeout: 120_000,
+		// The benchmarks page is built from a fixture, not the real (possibly empty) history.
+		env: { BENCH_HISTORY: 'e2e/fixtures/history.jsonl' }
+	},
 	use: { baseURL: url }
 });
