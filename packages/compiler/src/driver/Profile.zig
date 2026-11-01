@@ -30,6 +30,12 @@ pub fn trapsOverflow(p: Profile) bool {
     return p.name == .debug;
 }
 
+/// Whether the image carries an LC_SYMTAB naming every function. Release ships without
+/// it, as "debug info for debug builds" rules, so its binary stays minimal.
+pub fn debugSymtab(p: Profile) bool {
+    return p.name == .debug;
+}
+
 const all_passes: Opt.Config = blk: {
     var c: Opt.Config = .{};
     for (std.enums.values(Opt.Pass)) |p| c.set(p, true);

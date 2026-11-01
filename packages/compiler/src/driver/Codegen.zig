@@ -29,6 +29,7 @@ const Fingerprint = @import("../query/Fingerprint.zig");
 const Link = @import("../link/Link.zig");
 const link = @import("../link/emit.zig");
 const Dylib = @import("../link/Dylib.zig");
+const MachO = @import("../link/MachO.zig");
 const Abi = @import("../codegen/abi/Abi.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
@@ -81,6 +82,8 @@ pub const LinkedProgram = struct {
     /// vmaddrs. Owned; empty for reloc-free programs. The dyld import set is DERIVED
     /// from these (`.import` targets) in `assembleAndSign`.
     data_relocs: []Link.Reloc = &.{},
+    /// The debug symbol table, empty unless the profile asks for it. Owned.
+    symtab: MachO.Symtab = .{},
     /// Incremental counters: how many functions were freshly lowered vs served
     /// from the codegen cache this build. Surfaced via `--codegen-stats`.
     codegen_compiled: usize = 0,
@@ -104,6 +107,7 @@ pub const LinkedProgram = struct {
         // FnCodes were freed by the relink tail); `.cstr` targets are offsets.
         for (self.data_relocs) |rl| if (rl.target.name()) |nm| gpa.free(nm);
         gpa.free(self.data_relocs);
+        self.symtab.deinit(gpa);
         self.* = undefined;
     }
 };
@@ -148,6 +152,7 @@ fn relink(
     opt_stats: Opt.Stats,
     ir_instrs: usize,
     desc_plan: []const Link.DescEntry,
+    debug_symtab: bool,
 ) !LowerProgramResult {
     // Gather the lowered fns into a contiguous slice in source order. `linkAndTail`
     // CONSUMES the elements (frees each FnCode on every path), so we only free the
@@ -159,7 +164,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug_symtab) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -180,8 +185,8 @@ fn relink(
 /// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
 /// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan);
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug_symtab: bool) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug_symtab);
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -189,6 +194,7 @@ fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []cons
         .owned_msgs = &.{},
         .cstrings = lk.cstrings,
         .data_relocs = lk.data_relocs,
+        .symtab = lk.symtab,
     };
 }
 
@@ -579,7 +585,7 @@ pub fn lowerGraphProgram(
     }
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items);
+    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, profile.debugSymtab());
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -679,8 +685,9 @@ pub fn buildImage(
     cstrings: []const u8,
     data_relocs: []const Link.Reloc,
     libs: Dylib.Linking,
+    symtab: MachO.Symtab,
 ) ![]u8 {
-    return link.assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs);
+    return link.assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, symtab);
 }
 
 const testing = std.testing;

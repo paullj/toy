@@ -352,3 +352,116 @@ test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps (
         }
     }
 }
+
+const symtab_util =
+    \\pub fn sq(x: int) -> int { x * x }
+    \\pub fn ident[T](x: T) -> T { x }
+    \\
+;
+
+/// A module fn, a generic instance and a closure, so every kind of unit name is listed.
+const symtab_prog =
+    \\import util
+    \\fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+    \\fn main() -> int {
+    \\    k := 3
+    \\    g := fn(x: int) -> int { x + k }
+    \\    return apply(g, util.sq(util.ident(2)))
+    \\}
+    \\
+;
+
+/// `tool args...` with both streams captured, or null when the tool is not installed.
+fn runTool(gpa: std.mem.Allocator, io: Io, argv: []const []const u8) !?Out {
+    var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe }) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    var rdr = child.stdout.?.readerStreaming(io, &.{});
+    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 22));
+    errdefer gpa.free(out);
+    var erdr = child.stderr.?.readerStreaming(io, &.{});
+    const err = try erdr.interface.allocRemaining(gpa, .limited(1 << 22));
+    return .{ .out = out, .err = err, .term = try child.wait(io) };
+}
+
+test "profiles: a debug build lists its functions to nm and lldb, release has no symbols (#156)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const dir = ".toy-test-profiles-symtab";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lldb_broken = false;
+    for (debug_cases) |c| {
+        const sub = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, c.name });
+        defer gpa.free(sub);
+        try Io.Dir.cwd().createDirPath(io, sub);
+        const util_path = try std.fmt.allocPrint(gpa, "{s}/util.toy", .{sub});
+        defer gpa.free(util_path);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = util_path, .data = symtab_util });
+        const exe = try harness.compile(gpa, io, sub, symtab_prog, c.flags);
+        defer gpa.free(exe);
+
+        try testing.expectEqual(@as(u8, 7), try harness.runExit(gpa, io, exe));
+        if (try runTool(gpa, io, &.{ "codesign", "-v", exe })) |cs| {
+            defer freeOut(gpa, cs);
+            errdefer std.debug.print("codesign: {s}\n", .{cs.err});
+            try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs.term);
+        }
+
+        const nm = (try runTool(gpa, io, &.{ "nm", exe })) orelse return error.SkipZigTest;
+        defer freeOut(gpa, nm);
+        errdefer std.debug.print("{s} nm:\n{s}{s}\n", .{ c.name, nm.out, nm.err });
+        if (!c.debug) {
+            try testing.expectEqualStrings("", nm.out);
+            continue;
+        }
+        for ([_][]const u8{ " t _main\n", " t _main.apply\n", " t _util.sq\n", " t _util.ident$int\n", " t _main$l0\n" }) |want| {
+            try testing.expect(std.mem.indexOf(u8, nm.out, want) != null);
+        }
+
+        // Crash reports symbolicate as atos does, from the same table.
+        const sq_line = std.mem.indexOf(u8, nm.out, " t _util.sq\n").?;
+        const line_start = if (std.mem.lastIndexOfScalar(u8, nm.out[0..sq_line], '\n')) |n| n + 1 else 0;
+        const addr = try std.fmt.allocPrint(gpa, "0x{s}", .{nm.out[line_start..sq_line]});
+        defer gpa.free(addr);
+        if (try runTool(gpa, io, &.{ "atos", "-o", exe, "-l", "0x100000000", addr })) |atos| {
+            defer freeOut(gpa, atos);
+            errdefer std.debug.print("atos {s}:\n{s}{s}\n", .{ addr, atos.out, atos.err });
+            try testing.expect(std.mem.startsWith(u8, atos.out, "util.sq (in prog)"));
+        }
+
+        const lldb = (try runTool(gpa, io, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -n util.sq", exe })) orelse {
+            lldb_broken = true;
+            continue;
+        };
+        defer freeOut(gpa, lldb);
+        if (lldbCrashed(lldb)) {
+            lldb_broken = true;
+            continue;
+        }
+        errdefer std.debug.print("lldb:\n{s}{s}\n", .{ lldb.out, lldb.err });
+        try testing.expect(std.mem.indexOf(u8, lldb.out, "prog`util.sq") != null);
+    }
+    // Every other check ran; the skip marks that the lldb one could not.
+    if (lldb_broken) return error.SkipZigTest;
+}
+
+/// The profiles debug info is checked under: debug at its own -O0 and at -O1 (`-O` stays
+/// an override), and release, which carries none.
+const debug_cases = [_]struct { name: []const u8, flags: []const []const u8, debug: bool }{
+    .{ .name = "debug", .flags = &.{ "--profile", "debug" }, .debug = true },
+    .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1" }, .debug = true },
+    .{ .name = "release", .flags = &.{ "--profile", "release" }, .debug = false },
+};
+
+/// Some hosts ship an lldb that crashes on any target. Only a crash is that; a working lldb
+/// that exits non-zero failed the check.
+fn lldbCrashed(o: Out) bool {
+    return o.term != .exited or std.mem.indexOf(u8, o.err, "PLEASE submit a bug report") != null;
+}
