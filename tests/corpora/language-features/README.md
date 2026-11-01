@@ -44,7 +44,8 @@ Every file starts with a `# Feature:` line and one or more `# expect:` lines:
 ```
 
 `# expect: stderr` is a substring match, not an exact one: a panic's backtrace
-ends in unsymbolized frames whose addresses change with ASLR.
+holds frame offsets that change with code layout, and C frames (`<C>`) whose
+addresses change with ASLR.
 
 A program's run can also be given input:
 

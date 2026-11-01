@@ -29,7 +29,7 @@ Index bounds, division and remainder by zero, and `expect` are checked in both p
 
 In a debug build, integer `+`, `-`, `*`, unary `-` and the compound forms `+=`, `-=` and
 `*=` panic when the result does not fit the operand type, for every width and
-signedness. The panic names the operator and prints the backtrace:
+signedness. The panic names the operator and prints the backtrace, which ends at `main`:
 
 ```toy
 fn big(n: int) -> int { n * 4611686018427387904 }

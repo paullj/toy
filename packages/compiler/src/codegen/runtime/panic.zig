@@ -20,7 +20,7 @@ const deinitBuiltinRelocs = em.deinitBuiltinRelocs;
 // panic(str) builtin body — hand-written, AST/IR-independent. Appended once at link
 // time (emit.zig) when any fn references `panic`. Writes the message {ptr,len} to fd 2
 // (STDERR), then a symbolized-backtrace dump — one `0x<offset> <name>` line per frame
-// walked off the x29 FP chain — then exits NONZERO via SYS_exit(1) (raw `svc`, no libc):
+// walked off the x29 FP chain, up to and including `main` — then exits NONZERO via SYS_exit(1) (raw `svc`, no libc):
 // a deterministic, uncatchable abort. Never returns; the trailing brk #0 is an
 // unreachable backstop.
 //
@@ -35,7 +35,8 @@ const deinitBuiltinRelocs = em.deinitBuiltinRelocs;
 /// read the return address, resolve it to a `0x<call-site-offset> <name>` line
 /// against the symbol table in x27, and write that line to STDERR. Reads the
 /// callee-saved state `lowerPanic` seeds (x19 text_base, x22 buffer, x23/x24 hex
-/// shifts, x26 &write, x27 &symtab); x4-x15/x25/x28 are scratch. Runs inside
+/// shifts, x26 &write, x27 &symtab) and ends the walk at `main` by lowering
+/// the x21 frame cap; x4-x15/x25/x28 are scratch. Runs inside
 /// `emitFpWalk`'s per-frame slot, so it does its own intra-body backpatching only.
 fn emitPanicFrame(code: *std.ArrayList(u8), gpa: std.mem.Allocator) error{OutOfMemory}!void {
     const A = Aarch64;
@@ -68,6 +69,10 @@ fn emitPanicFrame(code: *std.ArrayList(u8), gpa: std.mem.Allocator) error{OutOfM
     const scan_b: u32 = @intCast(code.items.len);
     try emit(code, gpa, A.b(0)); // -> scan_top
     const scan_done: u32 = @intCast(code.items.len);
+    // A scan that ran off the end landed on the `<C>` sentinel: a foreign frame, whose
+    // offset from text_base moves with ASLR, so it prints a fixed zero instead.
+    try emit(code, gpa, A.cmpReg(6, 4));
+    try emit(code, gpa, A.csel(25, A.XZR, 25, .hs));
 
     // Prefix "0x" into the buffer.
     try emit(code, gpa, A.movz(9, '0', 0));
@@ -127,6 +132,28 @@ fn emitPanicFrame(code: *std.ArrayList(u8), gpa: std.mem.Allocator) error{OutOfM
     try emit(code, gpa, A.movReg(1, 22)); // buf
     try emit(code, gpa, A.movz(0, 2, 0)); // fd 2
     try emit(code, gpa, A.blr(26)); // write '\n'
+
+    // Stop after `main`: the frames above it are the C runtime's start code, which
+    // only adds unnamed noise. Compared byte by byte with an early exit, so the scan
+    // never reads past the name's NUL (the last name ends the table). Setting the cap
+    // to 1 lets the walk's own decrement end the loop, after its `fp = *fp` load of a
+    // still-valid frame.
+    var not_main: [6]u32 = undefined;
+    not_main[0] = @intCast(code.items.len);
+    try emit(code, gpa, A.cbz(28, 0)); // no entry -> not main
+    for ("main\x00", 0..) |ch, i| {
+        try emit(code, gpa, A.ldrbRegUoff(9, 28, @intCast(i)));
+        try emit(code, gpa, A.cmpImm(9, ch));
+        not_main[i + 1] = @intCast(code.items.len);
+        try emit(code, gpa, A.bCond(.ne, 0));
+    }
+    try emit(code, gpa, A.movz(21, 1, 0)); // x21 = frame cap -> last frame
+    // The hex loop shifted x25 to 0; 1 tells the cap-trip check after the walk that
+    // main was reached.
+    try emit(code, gpa, A.movz(25, 1, 0));
+    const after_main: u32 = @intCast(code.items.len);
+    patchCbzTo(code.items, not_main[0], after_main);
+    for (not_main[1..]) |site| patchBCondTo(code.items, site, after_main);
 
     patchCbzTo(code.items, cbnz_hex, hex_top);
     patchBCondTo(code.items, scan_bhs, scan_done);
@@ -204,8 +231,28 @@ pub fn lowerPanic(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.movz(24, 60, 0)); // x24 = 60
 
     // Walk the x29 chain, symbolizing each live frame; the loop falls through
-    // when fp hits 0 (or the 64-frame cap trips), leaving x20 == 0.
+    // after `main`'s frame, when fp hits 0, or when the 64-frame cap trips.
     try emitFpWalk(&code, gpa, .each_frame, 20, 21, undefined, emitPanicFrame);
+
+    // A walk that spent its cap on a live frame chain without reaching main ends with
+    // a "..." line, so a cut-off backtrace does not pass for a whole one.
+    var not_cut: [3]u32 = undefined;
+    not_cut[0] = @intCast(code.items.len);
+    try emit(&code, gpa, A.cbz(20, 0)); // chain ended
+    not_cut[1] = @intCast(code.items.len);
+    try emit(&code, gpa, A.cbnz(21, 0)); // cap left
+    not_cut[2] = @intCast(code.items.len);
+    try emit(&code, gpa, A.cbnz(25, 0)); // main reached
+    for ("...\n", 0..) |ch, i| {
+        try emit(&code, gpa, A.movz(9, ch, 0));
+        try emit(&code, gpa, A.strb(9, 22, @intCast(i)));
+    }
+    try emit(&code, gpa, A.movz(2, 4, 0)); // len 4
+    try emit(&code, gpa, A.movReg(1, 22)); // buf
+    try emit(&code, gpa, A.movz(0, 2, 0)); // fd 2
+    try emit(&code, gpa, A.blr(26)); // write "...\n"
+    const cut_done: u32 = @intCast(code.items.len);
+    for (not_cut) |at| patchCbzTo(code.items, at, cut_done);
 
     // SYS_exit(1): x0 = status, x16 = SYS_exit, svc #0x80. Never returns.
     try emit(&code, gpa, A.movz(0, 1, 0));
@@ -240,6 +287,18 @@ test "lowerPanic: prologue, self-locate movw relocs, hex frame loop, then SYS_ex
     }
     try testing.expect(saw_adr);
     try testing.expect(saw_csel);
+    // The stop-at-main check compares the frame's name against "main\0" and drops
+    // the frame cap to 1 on a match.
+    var saw_cmp_m = false;
+    var saw_cap_1 = false;
+    i = 0;
+    while (i < fc.code.len) : (i += 4) {
+        const word = std.mem.readInt(u32, fc.code[i..][0..4], .little);
+        if (word == Aarch64.cmpImm(9, 'm')) saw_cmp_m = true;
+        if (word == Aarch64.movz(21, 1, 0)) saw_cap_1 = true;
+    }
+    try testing.expect(saw_cmp_m);
+    try testing.expect(saw_cap_1);
     // Six relocs: two `write` imports (adrp_page + ldr_lo12) reached via the GOT, the
     // two self-relative movw relocs that bake the text-base offset, then the adrp+add
     // pair that loads the backtrace symbol table base (a `.cstr` to the reserved hash).

@@ -536,10 +536,10 @@ test "sibling protocol reusing eq/cmp: build+run yields the derive result (exit 
 test "panic: div/mod/expect traps + user panic() write msg + a symbolized-backtrace dump to STDERR and exit nonzero at BOTH -O levels; nonzero controls exit normally" {
     // `__panic` writes the message to fd 2, then a symbolized backtrace — one `0x<hex>`
     // line per frame walked off the x29 chain (each is the call site's slide-independent
-    // __text offset) — then SYS_exit(1): a clean nonzero exit, no SIGILL/brk. A panicking
-    // program yields >= 2 frames (the panic-site fn + at least its caller up to the C
-    // runtime). The -O1 legs are the SOLE proof fold's const-0 skip held (that -O1 did
-    // not fold `/0`/`%0` to a value and erase the panic). The control legs (nonzero
+    // __text offset) — then SYS_exit(1): a clean nonzero exit, no SIGILL/brk. The walk
+    // stops at `main`, so the last frame line names `main`. The -O1 legs are the SOLE
+    // proof fold's const-0 skip held (that -O1 did not fold `/0`/`%0` to a value and
+    // erase the panic). The control legs (nonzero
     // divisor) run to their normal exit with NO backtrace — their panic block is now
     // `bl panic` but never reached (or DCE'd at -O1 for the const divisor).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -578,10 +578,8 @@ test "panic: div/mod/expect traps + user panic() write msg + a symbolized-backtr
             const frames = countBacktraceFrames(r.stderr);
             if (fx.err.len > 0) {
                 try testing.expect(std.mem.indexOf(u8, r.stderr, fx.err) != null);
-                try testing.expect(frames >= 2); // panic dumps >= 2 walked frames
-                // Every fixture panics in `main`, so its symbolized name appears on a
-                // frame line (` main` follows the offset — the symbol-table hit).
-                try testing.expect(std.mem.indexOf(u8, r.stderr, " main\n") != null);
+                try testing.expect(frames >= 1);
+                try testing.expect(std.mem.endsWith(u8, r.stderr, " main\n"));
             } else {
                 try testing.expectEqual(@as(usize, 0), frames); // a clean run prints no backtrace
             }
@@ -624,13 +622,86 @@ test "dfe: after the link drops an unreachable fn, a panic backtrace names only 
         try testing.expectEqual(@as(?u8, 1), exitCode(r.term));
         try testing.expect(std.mem.indexOf(u8, r.stderr, "division by zero") != null);
         try testing.expect(std.mem.indexOf(u8, r.stderr, "explode_dfe\n") != null);
-        try testing.expect(std.mem.indexOf(u8, r.stderr, " main\n") != null);
+        try testing.expect(std.mem.endsWith(u8, r.stderr, " main\n"));
         try testing.expect(std.mem.indexOf(u8, r.stderr, "never_called_dfe") == null);
 
         const image = try Io.Dir.cwd().readFileAlloc(io, abs, gpa, .limited(1 << 24));
         defer gpa.free(image);
         try testing.expect(std.mem.indexOf(u8, image, "never_called_dfe") == null);
         try testing.expect(std.mem.indexOf(u8, image, "explode_dfe") != null);
+    }
+}
+
+test "panic: a backtrace through a C callback names the C frames <C> and still stops at main" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-panic-c-callback";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\extern struct Two { a: int, b: int }
+        \\extern {
+        \\    fn qsort(mut base: Two, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+        \\}
+        \\fn boom(_a: rawptr, _b: rawptr) -> int32 {
+        \\    panic("panic in a C callback")
+        \\}
+        \\fn main() -> int {
+        \\    t := Two { a: 2, b: 1 }
+        \\    unsafe { qsort(t, 2, 8, boom) }
+        \\    return 0
+        \\}
+        \\
+    ;
+    inline for (.{ "-O0", "-O1" }) |lvl| {
+        try writeFixture(io, dir, &.{.{ "main.toy", src }});
+        const bld = try spawnExit(gpa, io, &.{ "build", lvl, dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
+        try testing.expectEqual(@as(?u8, 0), exitCode(bld));
+        const abs = try Io.Dir.cwd().realPathFileAlloc(io, dir ++ "/prog" ++ lvl, gpa);
+        defer gpa.free(abs);
+        const r = try spawnBinaryTermStderr(gpa, io, abs);
+        defer gpa.free(r.stderr);
+        try testing.expectEqual(@as(?u8, 1), exitCode(r.term));
+        const boom_at = std.mem.indexOf(u8, r.stderr, " main.boom\n") orelse return error.TestUnexpectedResult;
+        const c_at = std.mem.indexOf(u8, r.stderr, " <C>\n") orelse return error.TestUnexpectedResult;
+        try testing.expect(boom_at < c_at);
+        // A C frame's address moves with ASLR, so it prints a fixed zero offset.
+        try testing.expect(std.mem.indexOf(u8, r.stderr, "\n0x0000000000000000 <C>\n") != null);
+        try testing.expect(std.mem.endsWith(u8, r.stderr, " main\n"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stderr, " main\n"));
+    }
+}
+
+test "panic: a backtrace cut off by the frame cap before main ends with a '...' line" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-panic-frame-cap";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\fn r(n: int) -> int { if n == 0 { 1 / n } else { r(n - 1) + 0 } }
+        \\fn main() -> int { r(100) }
+        \\
+    ;
+    inline for (.{ "-O0", "-O1" }) |lvl| {
+        try writeFixture(io, dir, &.{.{ "main.toy", src }});
+        const bld = try spawnExit(gpa, io, &.{ "build", lvl, dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
+        try testing.expectEqual(@as(?u8, 0), exitCode(bld));
+        const abs = try Io.Dir.cwd().realPathFileAlloc(io, dir ++ "/prog" ++ lvl, gpa);
+        defer gpa.free(abs);
+        const r = try spawnBinaryTermStderr(gpa, io, abs);
+        defer gpa.free(r.stderr);
+        try testing.expectEqual(@as(?u8, 1), exitCode(r.term));
+        try testing.expect(std.mem.endsWith(u8, r.stderr, " main.r\n...\n"));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, r.stderr, " main\n"));
     }
 }
 
