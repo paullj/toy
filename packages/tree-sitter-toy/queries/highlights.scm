@@ -59,7 +59,7 @@
 
 ; ---- Punctuation ----
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
-["," ":" "." "@"] @punctuation.delimiter
+["," ":" "." "@" "..."] @punctuation.delimiter
 
 ; ---- Identifier roles ----
 ((identifier) @type.builtin

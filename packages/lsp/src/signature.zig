@@ -539,7 +539,7 @@ test "renderLabel: matches renderSig and spans the correct param occurrences" {
     const a = arena.allocator();
 
     const int = Type.int;
-    const Sig = struct { name: []const u8, params: []const Type, ret: Type, mut_mask: u64 = 0 };
+    const Sig = struct { name: []const u8, params: []const Type, ret: Type, mut_mask: u64 = 0, variadic: bool = false };
     const sig: Sig = .{ .name = "m.add", .params = &.{ int, int }, .ret = int };
 
     const no_layouts: []const Layout = &.{};
@@ -568,7 +568,7 @@ test "renderLabel: a zero-param sig has no ranges" {
     const a = arena.allocator();
 
     const int = Type.int;
-    const Sig = struct { name: []const u8, params: []const Type, ret: Type, mut_mask: u64 = 0 };
+    const Sig = struct { name: []const u8, params: []const Type, ret: Type, mut_mask: u64 = 0, variadic: bool = false };
     const sig: Sig = .{ .name = "foo", .params = &.{}, .ret = int };
 
     const no_layouts: []const Layout = &.{};

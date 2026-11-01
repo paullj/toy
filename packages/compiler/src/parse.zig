@@ -688,6 +688,15 @@ fn parseFnDecl(p: *Parser, kind: FnKind) Error!Ast.Index {
     }
     while (!p.at(.r_paren) and !p.at(.eof)) {
         const entry = p.index;
+        // A C variadic extern's `...` is a marker, not a param node: `Ast.isVariadicExtern`
+        // finds it by token, so the node shape stays as it was.
+        if (p.at(.ellipsis)) {
+            if (kind != .extern_top_level) try p.warn(p.peek(), .P0006, "'...' (C varargs) is only allowed in an extern function's parameters");
+            p.bump(.ellipsis);
+            _ = p.eat(.comma);
+            if (!p.at(.r_paren)) try p.warn(p.peek(), .P0006, "'...' must be the last parameter");
+            continue;
+        }
         if (p.at(.kw_mut) and p.peek2().tag == .identifier) {
             if (mutParamRejection(kind)) |msg|
                 try p.warn(p.peek(), .P0006, msg)
@@ -3497,6 +3506,29 @@ test "an extern block recovers per member, and 'pub' on the block is a P0003" {
     };
     try testing.expectEqual(@as(usize, 1), fns);
     try testing.expect(externs >= 1);
+}
+
+test "a variadic extern's trailing '...' parses after its params, and a block member may take one" {
+    try expectProgram(
+        "extern fn printf(f: cstr, ...) -> int32\nextern {\n    fn snprintf(b: cstr, n: int, f: cstr, ...) -> int32\n}\n",
+        "(program (extern-fn printf ((param f cstr) ...) int32) (extern-fn snprintf ((param b cstr) (param n int) (param f cstr) ...) int32))",
+    );
+}
+
+test "'...' outside an extern, or before another param, is a P0006" {
+    const gpa = testing.allocator;
+    const cases = [_][]const u8{
+        "fn f(a: int, ...) -> int {\n    a\n}\n",
+        "extern fn g(..., a: int) -> int\n",
+        "fn main() -> int {\n    h := fn(a: int, ...) -> int { a }\n    return 0\n}\n",
+    };
+    for (cases) |src| {
+        const res = try parseResult(gpa, src);
+        defer gpa.free(@constCast(res.diags));
+        defer freeTree(gpa, res.tree);
+        try testing.expect(res.diags.len >= 1);
+        try testing.expectEqual(codes.Code.P0006, res.diags[0].code);
+    }
 }
 
 test "pub extern fn parses and records the export" {

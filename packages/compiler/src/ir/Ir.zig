@@ -103,6 +103,14 @@ pub const Call = struct {
     /// callee's signature because the operand's type cannot tell: the address of a
     /// closure-captured local is its box pointer, a `rawptr`.
     by_ptr: u64 = 0,
+    /// A C variadic callee: the args past `params` are its varargs, each in an 8-byte
+    /// stack slot (Apple arm64), typed by its operand.
+    variadic: bool = false,
+
+    /// How many args take the C convention's register/stack walk; the rest are varargs.
+    pub fn fixedArgs(c: Call) usize {
+        return if (c.variadic) @min(c.params.len, c.args.len) else c.args.len;
+    }
 };
 
 /// An indirect call. `target` is a computed value holding the callee's runtime
@@ -297,7 +305,7 @@ pub const Function = struct {
     /// The type call argument `i` is passed as: its declared type when the callee has
     /// `params` (an `extern`), else its operand's type.
     pub fn argType(func: *const Function, args: []const Operand, params: []const Type, by_ptr: u64, i: usize) Type {
-        if (params.len != args.len) return func.operandType(args[i]);
+        if (i >= params.len) return func.operandType(args[i]);
         return if (isByPtrArg(by_ptr, i)) Type.rawptr else params[i];
     }
 

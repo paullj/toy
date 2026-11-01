@@ -4,7 +4,7 @@ A program calls a C function by declaring it as an `extern` and calling it insid
 `unsafe { }`. Run examples: `tests/corpora/language-features/ffi/` (`cstr.toy` and `cstr_libc.toy`
 for C strings, `f32.toy`, `structs.toy`, `struct_ptr.toy` and `struct_libc.toy` for `f32`
 and C structs, `callback.toy`, `callback_qsort.toy` and `callback_panic.toy` for
-callbacks) and
+callbacks, `varargs.toy` for varargs) and
 `tests/corpora/language-features/modules/ffi_extern/` and `ffi_dylib/`.
 
 ```toy
@@ -26,7 +26,8 @@ fn main() -> int {
 
 - A bare `extern fn name(params) -> R` declares one C function. It has no body and no
   type parameters, and its name is the C symbol, never qualified by the module. A `mut`
-  param must be an extern struct; it is a C pointer (see [Structs](#structs)).
+  param must be an extern struct; it is a C pointer (see [Structs](#structs)). A
+  trailing `...` declares a C variadic function (see [Varargs](#varargs)).
 - An `extern "lib" { .. }` block declares several functions of one library, one per
   line, and links that library (see [Libraries](#libraries)). A block without a name,
   `extern { .. }`, and a bare `extern fn` both bind to libSystem, which holds libc and
@@ -244,6 +245,53 @@ conservatively, so what the toy caller of the extern holds stays alive. A pointe
 gc heap that only C keeps (in a register, or in its own memory after the call returns) is
 not a root: keep the value alive in toy code while C uses it.
 
+## Varargs
+
+A C variadic function such as `printf` declares its named params, then `...` last:
+
+```toy
+import std/io
+import std/ffi
+
+extern {
+    fn printf(f: cstr, ...) -> int32
+    fn fflush(f: int) -> int32
+    fn snprintf(buf: cstr, n: int, f: cstr, ...) -> int32
+    fn malloc(n: int) -> cstr
+    fn free(p: cstr)
+}
+
+fn main() -> int {
+    unsafe { printf("%lld %s %.2f\n".to_cstr(), 42, "hi".to_cstr(), 2.5) }
+    unsafe { fflush(0) }       # printf buffers; flush before toy writes to stdout
+    buf := unsafe { malloc(64) }
+    unsafe { snprintf(buf, 64, "%d-%g".to_cstr(), 7, 0.25) }
+    io.println(buf.to_str())   # 7-0.25
+    unsafe { free(buf) }
+    return 0
+}
+```
+
+- `...` is allowed only as the last param of an extern, bare or in a block (P0006
+  anywhere else). A call to a variadic extern still needs `unsafe`.
+- A call passes the named params as any extern call does, then any number of extra
+  args. Fewer args than named params is T0039.
+- Each extra arg must be a type C has already promoted: `int`, `int64` or `uint64`, `float`
+  (a C `double`), `cstr` or `rawptr`. Anything else is T0081 at the arg: a narrower int,
+  `bool`, `f32`, `str`, a struct. Widen first, as in `w: int = n.into()` or
+  `d: float = x.into()`, and pass a `str` as `s.to_cstr()`.
+- The extra args have no expected type, so an integer literal is an `int` and a float
+  literal a `float`, which is what `%d`, `%lld`, `%f` and `%g` read.
+
+**How it is called.** Apple's arm64 convention for variadic functions differs from
+standard AAPCS64: the named params go in registers and on the stack as for any C call,
+but every extra arg goes on the stack, in its own 8-byte slot, even when argument
+registers are left. Toy follows it, so `printf` reads its args where it expects them.
+
+**Output order.** `printf` writes into libc's stdout buffer, while `io.print` writes to
+the file descriptor directly. Call `fflush(0)` (all streams) after `printf` when the
+program also prints with `io`, or format into a buffer with `snprintf` and print that.
+
 ## unsafe
 
 The compiler cannot check what a C function does with its arguments, so every call to
@@ -344,6 +392,5 @@ library relinks against the new set.
 - Static libraries (`.a`, `.o`), and libraries in a project manifest.
 - Fixed-size arrays in an extern struct, and a C pointer to a struct that C returns or
   keeps (a `rawptr` toy cannot read).
-- Varargs (`printf`): #153.
 - A callback with captures, or one a C function returns (a C function pointer toy can
   call).

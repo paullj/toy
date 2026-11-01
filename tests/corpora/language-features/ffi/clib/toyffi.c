@@ -1,5 +1,6 @@
 // The C library the FFI fixtures link. build.zig builds it as libtoyffi.dylib into
 // zig-out/test-lib, with the @rpath install name a Zig-built dylib gets.
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -242,4 +243,45 @@ double toyffi_cb_spill(double (*cb)(long, long, long, long, long, long, long, st
     struct toyffi_vec4d v = {0.5, 0, 0, 0}, w = {0, 0, 0, 2};
     struct toyffi_vec2f q = {2.0f, 0.5f};
     return cb(1, 2, 3, 4, 5, 6, 7, p, v, w, q);
+}
+
+// Variadic drivers: each vararg is a long ('i') or a double ('f') as `kinds` spells it.
+double toyffi_va_sum(double scale, const char *kinds, ...) {
+    va_list ap;
+    va_start(ap, kinds);
+    double s = 0;
+    for (const char *k = kinds; *k; k++) s += *k == 'f' ? va_arg(ap, double) : (double)va_arg(ap, long);
+    va_end(ap);
+    return s * scale;
+}
+
+// A struct by value among the named params, then `n` longs.
+long toyffi_va_pair(struct toyffi_pair p, int32_t n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    long s = p.x + p.y + p.z;
+    for (int32_t i = 0; i < n; i++) s += va_arg(ap, long) * (i + 1);
+    va_end(ap);
+    return s;
+}
+
+// The ninth named param goes on the stack at its C size, the varargs after it.
+long toyffi_va_spill(long a, long b, long c, long d, long e, long f, long g, long h, int32_t i, ...) {
+    va_list ap;
+    va_start(ap, i);
+    long x = va_arg(ap, long);
+    double y = va_arg(ap, double);
+    const char *z = va_arg(ap, const char *);
+    va_end(ap);
+    return a + b + c + d + e + f + g + h + i + x + (long)(y * 10) + z[0];
+}
+
+// A callback among the named params, applied to each of the `n` long varargs.
+long toyffi_va_map(long (*cb)(long), long n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    long s = 0;
+    for (long i = 0; i < n; i++) s += cb(va_arg(ap, long));
+    va_end(ap);
+    return s;
 }

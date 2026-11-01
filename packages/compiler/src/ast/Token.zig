@@ -238,6 +238,9 @@ pub const Tag = enum(u8) {
     star_dot_eq, // *.=
     slash_dot_eq, // /.=
 
+    /// `...` marks a C variadic extern's trailing parameters.
+    ellipsis,
+
     /// The binary operator a compound assignment applies, or null for any other tag.
     pub fn compoundBase(tag: Tag) ?Tag {
         return switch (tag) {
@@ -293,6 +296,7 @@ comptime {
     // Every `kw_*` tag must appear in `keywords` exactly once, so a keyword cannot
     // be added to `Tag` without registering its spelling here (nor be registered
     // twice). The lexer's `keywords` lookup is then the sole keyword-spelling table.
+    @setEvalBranchQuota(2000);
     for (@typeInfo(Tag).@"enum".fields) |f| {
         if (!std.mem.startsWith(u8, f.name, "kw_")) continue;
         const want: Tag = @enumFromInt(f.value);

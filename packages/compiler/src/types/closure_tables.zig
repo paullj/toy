@@ -6,7 +6,8 @@
 const std = @import("std");
 const Ast = @import("../ast/Ast.zig");
 const Resolution = @import("../symbols/Resolution.zig").Resolution;
-const Sig = @import("../symbols/Sig.zig").Sig;
+const SigMod = @import("../symbols/Sig.zig");
+const Sig = SigMod.Sig;
 const Callee = @import("../symbols/Callee.zig").Callee;
 const Closure = @import("../symbols/Closure.zig");
 const Modes = @import("../symbols/Modes.zig");
@@ -174,10 +175,9 @@ pub fn appendCallbackAdapters(
                     else => return,
                 };
                 if (self.fns[gid].kind != .import) return;
-                const params = self.sigs[gid].params;
-                const args = Ast.rangeSlice(self.tree, n.rhs.int());
-                if (args.len != params.len) return;
-                for (args, params) |arg, p| {
+                const sig = self.sigs[gid];
+                const args = SigMod.fixedArgs(Ast.Index, Ast.rangeSlice(self.tree, n.rhs.int()), sig.params.len, sig.variadic) orelse return;
+                for (args, sig.params) |arg, p| {
                     if (!Closure.isFnType(p, self.layouts)) continue;
                     if (Closure.callbackKey(self.tree, self.resolutions, self.body.nodes, self.owner, self.units, arg)) |k|
                         try self.keys.append(self.gpa, .{ .kind = k.kind, .key = k.key });

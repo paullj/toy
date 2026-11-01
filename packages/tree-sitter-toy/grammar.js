@@ -129,7 +129,18 @@ module.exports = grammar({
     type_parameter: ($) =>
       seq($.identifier, optional(seq("has", sepBy1("+", $._type)))),
 
-    parameter_list: ($) => seq("(", optional(commaList($.parameter)), ")"),
+    // A trailing `...` marks a C variadic extern; the compiler rejects it anywhere else.
+    parameter_list: ($) =>
+      seq(
+        "(",
+        optional(
+          choice(
+            seq(sepBy1(",", $.parameter), optional(seq(",", "...")), optional(",")),
+            seq("...", optional(",")),
+          ),
+        ),
+        ")",
+      ),
 
     // Covers `self`, `mut self`, and `name: Type` uniformly. `self`/`Self` are plain
     // identifiers (never keywords), exactly as the compiler lexer treats them.
