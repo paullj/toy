@@ -11,7 +11,7 @@ fn twice(mut n: int) {
     bump(n)
 }
 
-fn wrap(mut w: int8) { w = w + 1 }
+fn wrap(mut w: int8) { w = w +% 1 }
 
 fn flip(mut b: bool) { b = !b }
 

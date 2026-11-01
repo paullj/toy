@@ -27,6 +27,13 @@ pub fn complement(v: i128, t: Type) i128 {
     return if (t.int_desc.signed) -v - 1 else @as(i128, @intCast(maxMagnitude(t))) - v;
 }
 
+/// `v` wrapped to integer type `t`: its low `t` bits, read signed or unsigned as `t` is.
+pub fn wrap(v: i128, t: Type) i128 {
+    const low: u128 = @as(u128, @bitCast(v)) & (@as(u128, std.math.maxInt(u64)) >> @intCast(64 - t.intBits()));
+    if (!t.int_desc.signed or low >> @intCast(t.intBits() - 1) == 0) return @intCast(low);
+    return @as(i128, @intCast(low)) - (@as(i128, 1) << @intCast(t.intBits()));
+}
+
 /// Pack a numeric-literal token into `buf`, dropping `_` digit separators, and return
 /// the packed slice (or null if it overflows `buf`). The one base-0 grammar both the
 /// range gate and codegen decode, so they can't disagree on well-formedness.
@@ -420,4 +427,13 @@ test "decodeChar: raw scalars, escapes, and every malformed kind" {
     try testing.expectEqual(CharDecode.bad_hex_escape, decodeChar("'\\xZZ'"));
     try testing.expectEqual(CharDecode.bad_codepoint, decodeChar("'\\u{D800}'")); // surrogate
     try testing.expectEqual(CharDecode.bad_codepoint, decodeChar("'\\u{110000}'")); // > 0x10FFFF
+}
+
+test "wrap reduces a value to the width and signedness of its type" {
+    try std.testing.expectEqual(@as(i128, -56), wrap(200, Type.int8));
+    try std.testing.expectEqual(@as(i128, 44), wrap(300, Type.uint8));
+    try std.testing.expectEqual(@as(i128, 255), wrap(-1, Type.uint8));
+    try std.testing.expectEqual(@as(i128, std.math.minInt(i64)), wrap(@as(i128, std.math.maxInt(i64)) + 1, Type.int));
+    try std.testing.expectEqual(@as(i128, std.math.maxInt(u64)), wrap(-1, Type.uint64));
+    try std.testing.expectEqual(@as(i128, 0), wrap(@as(i128, 1) << 64, Type.int));
 }

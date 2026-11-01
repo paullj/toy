@@ -30,10 +30,10 @@ fn main() -> int {
     x = x - k * 10
     io.println(x)
     b: int8 = 127
-    b = b + 1
+    b = b +% 1
     lo: int8 = 0
     u: uint8 = 250
-    u = u + 10
+    u = u +% 10
     small: uint8 = 5
     if b < lo && u < small { x = x + 24 }
     return x

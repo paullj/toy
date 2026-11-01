@@ -25,6 +25,11 @@ pub fn of(name: Name) Profile {
     };
 }
 
+/// Whether integer `+`, `-`, `*` and unary `-` panic on overflow; otherwise they wrap.
+pub fn trapsOverflow(p: Profile) bool {
+    return p.name == .debug;
+}
+
 const all_passes: Opt.Config = blk: {
     var c: Opt.Config = .{};
     for (std.enums.values(Opt.Pass)) |p| c.set(p, true);

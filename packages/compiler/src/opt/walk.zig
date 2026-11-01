@@ -41,6 +41,10 @@ fn eachInstrUseOperand(op: *Ir.Op, ctx: anytype, comptime each: anytype) void {
             each(ctx, &c.lhs);
             each(ctx, &c.rhs);
         },
+        .overflow => |*o| {
+            each(ctx, &o.lhs);
+            each(ctx, &o.rhs);
+        },
         .field_addr => |*fa| each(ctx, &fa.base),
         .load => |*l| each(ctx, &l.addr),
         .store => |*s| {

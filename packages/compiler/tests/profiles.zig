@@ -61,17 +61,26 @@ test "profiles: release runs every pass, debug none, and -O overrides the profil
     const o1 = try harness.emitIr(gpa, io, path, &.{"-O1"});
     defer gpa.free(o1);
     try testing.expect(!std.mem.eql(u8, o0, o1));
-    const o1_nofold = try harness.emitIr(gpa, io, path, &.{ "-O1", "--no-opt", "fold" });
-    defer gpa.free(o1_nofold);
+    // Release drops debug's overflow tests whatever passes run.
+    const r0 = try harness.emitIr(gpa, io, path, &.{ "--release", "-O0" });
+    defer gpa.free(r0);
+    const r1 = try harness.emitIr(gpa, io, path, &.{ "--release", "-O1" });
+    defer gpa.free(r1);
+    try testing.expect(!std.mem.eql(u8, r0, r1));
+    try testing.expect(!std.mem.eql(u8, o0, r0));
+    try testing.expect(std.mem.indexOf(u8, o0, "overflow mul") != null);
+    try testing.expect(std.mem.indexOf(u8, r0, "overflow") == null);
+    const r1_nofold = try harness.emitIr(gpa, io, path, &.{ "-O1", "--release", "--no-opt", "fold" });
+    defer gpa.free(r1_nofold);
 
     const same = [_]struct { flags: []const []const u8, want: []const u8 }{
         .{ .flags = &.{}, .want = o0 },
         .{ .flags = &.{ "--profile", "debug" }, .want = o0 },
-        .{ .flags = &.{"--release"}, .want = o1 },
-        .{ .flags = &.{"--profile=release"}, .want = o1 },
-        .{ .flags = &.{ "--release", "-O0" }, .want = o0 },
+        .{ .flags = &.{"--release"}, .want = r1 },
+        .{ .flags = &.{"--profile=release"}, .want = r1 },
+        .{ .flags = &.{ "--profile", "release", "-O0" }, .want = r0 },
         .{ .flags = &.{ "--profile", "debug", "-O1" }, .want = o1 },
-        .{ .flags = &.{ "--release", "--no-opt", "fold" }, .want = o1_nofold },
+        .{ .flags = &.{ "--release", "--no-opt", "fold" }, .want = r1_nofold },
     };
     for (same) |c| {
         const got = try harness.emitIr(gpa, io, path, c.flags);
@@ -174,4 +183,172 @@ test "profiles: debug and release never reuse each other's cache entries or outp
         found = true;
     }
     try testing.expect(found);
+}
+
+/// One function per checked operator, width and signedness, each called from `main` on
+/// the case its first argument names, so one build covers every case without -O1 folding
+/// the operands away. `folded` multiplies two literals with no width to range-check them
+/// against, which -O1 does fold.
+const overflow_prog =
+    \\import std/io
+    \\import std/os
+    \\import std/str
+    \\import std/vec
+    \\fn add8(a: int8, b: int8) -> int8 { a + b }
+    \\fn sub8(a: int8, b: int8) -> int8 { a - b }
+    \\fn mul8(a: int8, b: int8) -> int8 { a * b }
+    \\fn neg8(a: int8) -> int8 { -a }
+    \\fn addu8(a: uint8, b: uint8) -> uint8 { a + b }
+    \\fn subu8(a: uint8, b: uint8) -> uint8 { a - b }
+    \\fn mulu8(a: uint8, b: uint8) -> uint8 { a * b }
+    \\fn negu8(a: uint8) -> uint8 { -a }
+    \\fn add(a: int, b: int) -> int { a + b }
+    \\fn sub(a: int, b: int) -> int { a - b }
+    \\fn mul(a: int, b: int) -> int { a * b }
+    \\fn neg(a: int) -> int { -a }
+    \\fn addu(a: uint64, b: uint64) -> uint64 { a + b }
+    \\fn subu(a: uint64, b: uint64) -> uint64 { a - b }
+    \\fn mulu(a: uint64, b: uint64) -> uint64 { a * b }
+    \\fn inc32(mut x: int32) { x += 1 }
+    \\fn dec16u(mut x: uint16) { x -= 1 }
+    \\fn triple(mut x: int) { x *= 3 }
+    \\fn div8(a: int8, b: int8) -> int8 { a / b }
+    \\fn rem8(a: int8, b: int8) -> int8 { a % b }
+    \\fn div(a: int, b: int) -> int { a / b }
+    \\fn divby16(mut x: int16, d: int16) { x /= d }
+    \\fn folded() -> int {
+    \\    x := 4 * 4611686018427387904
+    \\    return x
+    \\}
+    \\fn main() {
+    \\    c := os.args()[1].parse_int().or(-1)
+    \\    if c == 0 { io.println(add8(127, 1)) }
+    \\    if c == 1 { io.println(sub8(-128, 1)) }
+    \\    if c == 2 { io.println(mul8(64, 2)) }
+    \\    if c == 3 { io.println(mul8(-128, -1)) }
+    \\    if c == 4 { io.println(neg8(-128)) }
+    \\    if c == 5 { io.println(addu8(255, 1)) }
+    \\    if c == 6 { io.println(subu8(0, 1)) }
+    \\    if c == 7 { io.println(mulu8(16, 16)) }
+    \\    if c == 8 { io.println(negu8(1)) }
+    \\    if c == 9 { io.println(add(9223372036854775807, 1)) }
+    \\    if c == 10 { io.println(sub(-9223372036854775808, 1)) }
+    \\    if c == 11 { io.println(mul(4, 4611686018427387904)) }
+    \\    if c == 12 { io.println(mul(-1, -9223372036854775808)) }
+    \\    if c == 13 { io.println(neg(-9223372036854775808)) }
+    \\    if c == 14 { io.println(addu(18446744073709551615, 1)) }
+    \\    if c == 15 { io.println(subu(0, 1)) }
+    \\    if c == 16 { io.println(mulu(4294967296, 4294967296)) }
+    \\    if c == 17 {
+    \\        x: int32 = 2147483647
+    \\        inc32(x)
+    \\        io.println(x)
+    \\    }
+    \\    if c == 18 {
+    \\        x: uint16 = 0
+    \\        dec16u(x)
+    \\        io.println(x)
+    \\    }
+    \\    if c == 19 {
+    \\        x := 4611686018427387904
+    \\        triple(x)
+    \\        io.println(x)
+    \\    }
+    \\    if c == 20 { io.println(folded()) }
+    \\    if c == 21 { io.println(mul(-1, 9223372036854775807)) }
+    \\    if c == 22 { io.println(div8(-128, -1)) }
+    \\    if c == 23 { io.println(div(-9223372036854775808, -1)) }
+    \\    if c == 24 {
+    \\        x: int16 = -32768
+    \\        divby16(x, -1)
+    \\        io.println(x)
+    \\    }
+    \\    if c == 25 { io.println(div8(-128, 1)) }
+    \\    if c == 26 { io.println(div(-9223372036854775807, -1)) }
+    \\    if c == 27 { io.println(rem8(-128, -1)) }
+    \\}
+    \\
+;
+
+/// Each case's panic message in a debug build (null: it does not overflow) and its output
+/// in a release build, which wraps.
+const overflow_cases = [_]struct { panic: ?[]const u8, wraps_to: []const u8 }{
+    .{ .panic = "'+'", .wraps_to = "-128" },
+    .{ .panic = "'-'", .wraps_to = "127" },
+    .{ .panic = "'*'", .wraps_to = "-128" },
+    .{ .panic = "'*'", .wraps_to = "-128" },
+    .{ .panic = "negation", .wraps_to = "-128" },
+    .{ .panic = "'+'", .wraps_to = "0" },
+    .{ .panic = "'-'", .wraps_to = "255" },
+    .{ .panic = "'*'", .wraps_to = "0" },
+    .{ .panic = "negation", .wraps_to = "255" },
+    .{ .panic = "'+'", .wraps_to = "-9223372036854775808" },
+    .{ .panic = "'-'", .wraps_to = "9223372036854775807" },
+    .{ .panic = "'*'", .wraps_to = "0" },
+    .{ .panic = "'*'", .wraps_to = "-9223372036854775808" },
+    .{ .panic = "negation", .wraps_to = "-9223372036854775808" },
+    .{ .panic = "'+'", .wraps_to = "0" },
+    .{ .panic = "'-'", .wraps_to = "18446744073709551615" },
+    .{ .panic = "'*'", .wraps_to = "0" },
+    .{ .panic = "'+'", .wraps_to = "-2147483648" },
+    .{ .panic = "'-'", .wraps_to = "65535" },
+    .{ .panic = "'*'", .wraps_to = "-4611686018427387904" },
+    .{ .panic = "'*'", .wraps_to = "0" },
+    .{ .panic = null, .wraps_to = "-9223372036854775807" },
+    .{ .panic = "'/'", .wraps_to = "-128" },
+    .{ .panic = "'/'", .wraps_to = "-9223372036854775808" },
+    .{ .panic = "'/'", .wraps_to = "-32768" },
+    .{ .panic = null, .wraps_to = "-128" },
+    .{ .panic = null, .wraps_to = "9223372036854775807" },
+    .{ .panic = null, .wraps_to = "0" },
+};
+
+fn runCase(gpa: std.mem.Allocator, io: Io, exe: []const u8, case: usize) !Out {
+    var arg_buf: [8]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&arg_buf, "{d}", .{case});
+    var child = try std.process.spawn(io, .{ .argv = &.{ exe, arg }, .stdout = .pipe, .stderr = .pipe });
+    var rdr = child.stdout.?.readerStreaming(io, &.{});
+    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    errdefer gpa.free(out);
+    var erdr = child.stderr.?.readerStreaming(io, &.{});
+    const err = try erdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    return .{ .out = out, .err = err, .term = try child.wait(io) };
+}
+
+test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps (#155)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const dir = ".toy-test-profiles-overflow";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    const builds = [_]struct { sub: []const u8, flags: []const []const u8, traps: bool }{
+        .{ .sub = dir ++ "/debug", .flags = &.{}, .traps = true },
+        .{ .sub = dir ++ "/debug-O1", .flags = &.{"-O1"}, .traps = true },
+        .{ .sub = dir ++ "/release", .flags = &.{"--release"}, .traps = false },
+        .{ .sub = dir ++ "/release-O0", .flags = &.{ "--release", "-O0" }, .traps = false },
+    };
+    for (builds) |b| {
+        const exe = try harness.compile(gpa, io, b.sub, overflow_prog, b.flags);
+        defer gpa.free(exe);
+        for (overflow_cases, 0..) |c, i| {
+            const res = try runCase(gpa, io, exe, i);
+            defer freeOut(gpa, res);
+            errdefer std.debug.print("{s} case {d}: exit {any} stdout '{s}' stderr '{s}'\n", .{ b.sub, i, res.term, res.out, res.err });
+            if (b.traps and c.panic != null) {
+                const want = try std.fmt.allocPrint(gpa, "integer overflow in {s}\n", .{c.panic.?});
+                defer gpa.free(want);
+                try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, res.term);
+                try testing.expect(std.mem.startsWith(u8, res.err, want));
+                try testing.expectEqualStrings("", res.out);
+            } else {
+                try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+                try testing.expectEqualStrings(c.wraps_to, std.mem.trimEnd(u8, res.out, "\n"));
+            }
+        }
+    }
 }

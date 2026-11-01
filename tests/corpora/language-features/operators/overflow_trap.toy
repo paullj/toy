@@ -1,0 +1,11 @@
+# Feature: a debug build panics when an integer `*` overflows, where a release build
+# wraps it to 0. The issue's example: 4 * 2^62 does not fit an int.
+# expect: exit 1
+# expect: stderr "integer overflow in '*'"
+import std/io
+
+fn big(n: int) -> int { n * 4611686018427387904 }
+
+fn main() {
+    io.println(big(4))
+}

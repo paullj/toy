@@ -2724,6 +2724,9 @@ const infix_bp_table = std.enums.directEnumArrayDefault(token.Tag, i16, -1, 0, .
     .minus_dot = 10,
     .star_dot = 11,
     .slash_dot = 11,
+    .plus_percent = 10,
+    .minus_percent = 10,
+    .star_percent = 11,
 });
 
 /// Infix binding power, or null if the tag is not an infix operator. Higher
@@ -2738,16 +2741,18 @@ fn infixBp(tag: token.Tag) ?u8 {
 /// match exactly the tags the precedence-climbing loop recognizes. Returns an
 /// error string on violation, else null.
 fn checkInfixTable() ?[]const u8 {
+    @setEvalBranchQuota(4000);
     const infix_ops = [_]token.Tag{
-        .pipe_gt,   .pipe_pipe, .amp_amp,
-        .pipe,      .caret,     .amp,
-        .eq_eq,     .bang_eq,   .lt,
-        .lt_eq,     .gt,        .gt_eq,
-        .lt_lt,     .gt_gt,     .plus,
-        .minus,     .star,      .slash,
-        .percent,   .lt_dot,    .gt_dot,
-        .le_dot,    .ge_dot,    .plus_dot,
-        .minus_dot, .star_dot,  .slash_dot,
+        .pipe_gt,      .pipe_pipe,     .amp_amp,
+        .pipe,         .caret,         .amp,
+        .eq_eq,        .bang_eq,       .lt,
+        .lt_eq,        .gt,            .gt_eq,
+        .lt_lt,        .gt_gt,         .plus,
+        .minus,        .star,          .slash,
+        .percent,      .lt_dot,        .gt_dot,
+        .le_dot,       .ge_dot,        .plus_dot,
+        .minus_dot,    .star_dot,      .slash_dot,
+        .plus_percent, .minus_percent, .star_percent,
     };
     // Every listed operator has a positive bp, below the prefix bp (a unary operand
     // must never swallow an infix operator: `-a * b` is `(-a) * b`).
@@ -3182,6 +3187,13 @@ fn expectProgram(source: []const u8, want: []const u8) !void {
 
 test "precedence: * binds tighter than +" {
     try expectSexpr("1 + 2 * 3", "(+ 1 (* 2 3))");
+}
+
+test "wrapping operators bind as their checked twins do" {
+    try expectSexpr("1 +% 2 *% 3", "(+% 1 (*% 2 3))");
+    try expectSexpr("1 -% 2 + 3", "(+ (-% 1 2) 3)");
+    try expectSexpr("a *% b < c", "(< (*% a b) c)");
+    try expectProgram("fn f() {\n x +%= 1\n}\n", "(program (fn f () _ (block (+%= x 1))))");
 }
 
 test "left associativity" {

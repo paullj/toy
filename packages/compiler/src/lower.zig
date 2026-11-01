@@ -110,6 +110,9 @@ pub const Inputs = struct {
     /// names a fn as a value must find its thunk, so every build site threads this,
     /// passing `ClosureInputs.none` only for a unit that reads no AST.
     closure: ClosureInputs,
+    /// A source `+`, `-`, `*` or unary `-` on integers panics when it overflows (a debug
+    /// build); otherwise it wraps, as the `+%` family always does.
+    trap_overflow: bool = false,
 
     pub fn bodyView(in: *const Inputs) Body.BodyView {
         return .{ .tree = in.tree, .resolutions = in.resolutions, .nodes = in.nodes };
@@ -893,10 +896,17 @@ fn lowerUnary(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!
     const op = b.in.tokens[n.main_token].tag;
     switch (op) {
         .minus => {
-            const v = try lowerExpr(b, n.lhs);
+            const v = operandValue(try lowerExpr(b, n.lhs));
+            const ty = b.in.nodes.typeOf(node_idx);
+            // A negated literal is a constant the checker range-checks (T0034), and the most
+            // negative int is only spelled that way, so it never gets a run-time test.
+            if (b.in.trap_overflow and b.in.tree.nodes[n.lhs.int()].tag != .literal_number) {
+                const zero = try b.emit(.{ .iconst = 0 }, ty);
+                try emitOverflowGuard(b, .sub, zero, v, ty, .neg_overflow);
+            }
             // The checked type of the negation node carries its integer width, so
             // codegen re-canonicalizes a narrow `neg` (sxtb/and) at the right size.
-            return .{ .value = try b.emit(.{ .neg = operandValue(v) }, b.in.nodes.typeOf(node_idx)) };
+            return .{ .value = try b.emit(.{ .neg = v }, ty) };
         },
         .bang => {
             const v = try lowerExpr(b, n.lhs);
@@ -922,9 +932,34 @@ fn lowerUnary(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!
 fn emitZeroGuard(b: *Builder, rhs: Ir.ValueId, ty: Typecheck.Type, reason: Ir.Terminator.PanicReason) error{OutOfMemory}!void {
     const zero = try b.emit(.{ .iconst = 0 }, ty);
     const is_zero = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = rhs, .rhs = zero } }, Typecheck.Type.bool);
+    try panicIf(b, is_zero, reason);
+}
+
+/// Panic with `reason` when `lhs op rhs` overflows `ty`. The op itself is emitted after,
+/// wrapping as ever, so release and debug compute the same value where both run on.
+fn emitOverflowGuard(b: *Builder, kind: Ir.Overflow.Kind, lhs: Ir.ValueId, rhs: Ir.ValueId, ty: Typecheck.Type, reason: Ir.Terminator.PanicReason) error{OutOfMemory}!void {
+    const over = try b.emit(.{ .overflow = .{ .kind = kind, .lhs = lhs, .rhs = rhs, .ty = ty } }, Typecheck.Type.bool);
+    try panicIf(b, over, reason);
+}
+
+/// Panic when signed `lhs / rhs` is `min / -1`, the one quotient that does not fit `ty`
+/// (the machine `sdiv` gives `min`). Built from plain compares so no `Overflow.Kind`
+/// needs a division case that only this guard would use.
+fn emitDivOverflowGuard(b: *Builder, lhs: Ir.ValueId, rhs: Ir.ValueId, ty: Typecheck.Type) error{OutOfMemory}!void {
+    const min = try b.emit(.{ .iconst = @as(i64, std.math.minInt(i64)) >> @intCast(64 - ty.intBits()) }, ty);
+    const neg_one = try b.emit(.{ .iconst = -1 }, ty);
+    const is_min = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = lhs, .rhs = min } }, Typecheck.Type.bool);
+    const is_neg_one = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = rhs, .rhs = neg_one } }, Typecheck.Type.bool);
+    const both = try b.emit(.{ .band = .{ .lhs = is_min, .rhs = is_neg_one } }, Typecheck.Type.bool);
+    try panicIf(b, both, .div_overflow);
+}
+
+fn panicIf(b: *Builder, cond: Ir.ValueId, reason: Ir.Terminator.PanicReason) error{OutOfMemory}!void {
+    // An operand that never returns left nothing to test, and fresh blocks would be live.
+    if (b.termSet()) return;
     const cont = try b.addBlock();
     const panic_blk = try b.addBlock();
-    b.setTerm(.{ .cond_br = .{ .cond = is_zero, .t = panic_blk, .f = cont } });
+    b.setTerm(.{ .cond_br = .{ .cond = cond, .t = panic_blk, .f = cont } });
     b.switchTo(panic_blk);
     b.setTerm(.{ .panic = reason });
     b.switchTo(cont);
@@ -952,32 +987,36 @@ fn lowerBinary(b: *Builder, n: Ast.Node) error{OutOfMemory}!Ir.Operand {
 fn lowerBinOp(b: *Builder, op_tok: u32, op: TokenTag, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutOfMemory}!Ir.Operand {
     if (try lowerNeverOperands(b, op, lhs_node, rhs_node)) return .none;
     switch (op) {
-        .plus, .minus, .star, .slash => {
-            // int stays an inline machine add/sub/mul/sdiv (bytes unchanged); a struct/enum
-            // operand desugars to the resolved Add/Sub/Mul/Div witness via `lowerArithValue`
-            //. The checker (T0028) has already proven a same-type conforming operand.
+        .plus, .minus, .star, .slash, .plus_percent, .minus_percent, .star_percent => {
+            // A struct/enum operand desugars to the resolved Add/Sub/Mul/Div witness via
+            // `lowerArithValue`; the checker (T0028) has already proven a same-type
+            // conforming operand, and only lets an int reach a wrapping op.
             const lt = b.in.nodes.typeOf(lhs_node);
-            if (isInlineArith(lt.kind)) {
-                const lhs = operandValue(try lowerExpr(b, lhs_node));
-                const rhs = operandValue(try lowerExpr(b, rhs_node));
-                const bin: Ir.Bin = .{ .lhs = lhs, .rhs = rhs };
-                // `/` gains a runtime zero-divisor guard; `+`/`-`/`*` stay byte-identical.
-                if (op == .slash) {
-                    try emitZeroGuard(b, rhs, lt, .div_by_zero);
-                    const ir_op: Ir.Op = if (lt.isUnsignedInt()) Ir.Op{ .udiv = bin } else Ir.Op{ .sdiv = bin };
-                    return .{ .value = try b.emit(ir_op, lt) };
-                }
-                const ir_op: Ir.Op = switch (op) {
-                    .plus => .{ .add = bin },
-                    .minus => .{ .sub = bin },
-                    .star => .{ .mul = bin },
-                    else => unreachable,
-                };
-                // `lt` is the operand width; the checker proved `eql(lt,rt)` and
-                // returns it as the result type, so it is also the result width.
-                return .{ .value = try b.emit(ir_op, lt) };
+            if (!isInlineArith(lt.kind)) return try lowerArithValue(b, lt, lhs_node, rhs_node, op);
+            const lhs = operandValue(try lowerExpr(b, lhs_node));
+            const rhs = operandValue(try lowerExpr(b, rhs_node));
+            const bin: Ir.Bin = .{ .lhs = lhs, .rhs = rhs };
+            if (op == .slash) {
+                try emitZeroGuard(b, rhs, lt, .div_by_zero);
+                if (lt.isUnsignedInt()) return .{ .value = try b.emit(.{ .udiv = bin }, lt) };
+                if (b.in.trap_overflow) try emitDivOverflowGuard(b, lhs, rhs, lt);
+                return .{ .value = try b.emit(.{ .sdiv = bin }, lt) };
             }
-            return try lowerArithValue(b, lt, lhs_node, rhs_node, op);
+            const kind: Ir.Overflow.Kind = switch (op) {
+                .plus, .plus_percent => .add,
+                .minus, .minus_percent => .sub,
+                .star, .star_percent => .mul,
+                else => unreachable,
+            };
+            const wraps = op == .plus_percent or op == .minus_percent or op == .star_percent;
+            if (b.in.trap_overflow and !wraps) try emitOverflowGuard(b, kind, lhs, rhs, lt, switch (kind) {
+                .add => .add_overflow,
+                .sub => .sub_overflow,
+                .mul => .mul_overflow,
+            });
+            // `lt` is the operand width; the checker proved `eql(lt,rt)` and
+            // returns it as the result type, so it is also the result width.
+            return .{ .value = try b.emit(wrapOp(kind, bin), lt) };
         },
         .lt, .lt_eq, .gt, .gt_eq => {
             // int/bool stay an inline `icmp` (bytes unchanged); str/struct/enum desugar to a
@@ -1062,6 +1101,15 @@ fn lowerBinOp(b: *Builder, op_tok: u32, op: TokenTag, lhs_node: Ast.Index, rhs_n
             return .none;
         },
     }
+}
+
+/// The IR op for `kind`, which wraps at the result width.
+fn wrapOp(kind: Ir.Overflow.Kind, bin: Ir.Bin) Ir.Op {
+    return switch (kind) {
+        .add => .{ .add = bin },
+        .sub => .{ .sub = bin },
+        .mul => .{ .mul = bin },
+    };
 }
 
 /// `a && b` / `a || b` as a VALUE: short-circuit via blocks. The merge is a bool
@@ -4855,14 +4903,18 @@ fn expectLowered(src: []const u8, fn_name: []const u8, want: []const u8) !void {
     try testing.expectEqualStrings(want, w.buffered());
 }
 
+const Profile = @import("driver/Profile.zig");
+
 /// How `renderUnit` lowers: frame storage on (as any opt pass turns it on, here with no
 /// pass rewriting the IR), and generic calls with a known fn argument sent to spec units.
-const UnitOptions = struct { frame: bool = false, specialize: bool = false };
+/// The profile defaults to release at -O0 so debug's overflow tests do not bury the IR
+/// shape a test pins; a test of those tests asks for debug.
+const UnitOptions = struct { frame: bool = false, specialize: bool = false, profile: Profile = .{ .name = .release, .opt = .O0 } };
 
 /// Check `src` as a one-module program, lower every unit through the driver's own path
-/// (`Codegen.renderIr` at -O0), and return the rendered IR of the unit named `name`, or of
-/// the first whose last dotted segment is `name` (a method `main.P.bump` is `bump`).
-/// gpa-owned.
+/// (`Codegen.renderIr` under `o.profile`), and return the rendered IR of the unit named
+/// `name`, or of the first whose last dotted segment is `name` (a method `main.P.bump` is
+/// `bump`). gpa-owned.
 fn renderUnit(gpa: std.mem.Allocator, src: []const u8, name: []const u8, o: UnitOptions) ![]u8 {
     const Codegen = @import("driver/Codegen.zig");
     const tokens = try @import("lex.zig").tokenize(gpa, src);
@@ -4878,7 +4930,7 @@ fn renderUnit(gpa: std.mem.Allocator, src: []const u8, name: []const u8, o: Unit
     defer res.deinit(gpa);
     var tc = try TypecheckGraph.checkGraph(gpa, &g, &res, null, 0);
     defer tc.deinit(gpa);
-    const ir = switch (try Codegen.renderIr(gpa, &g, &res, &tc, .{ .profile = .debug, .specialize = o.specialize, .frame = o.frame })) {
+    const ir = switch (try Codegen.renderIr(gpa, &g, &res, &tc, .{ .profile = o.profile, .specialize = o.specialize, .frame = o.frame })) {
         .ok => |text| text,
         .err => |e| {
             std.debug.print("lowering failed: {s}\n", .{e.message});
@@ -5068,6 +5120,81 @@ test "a capturing lambda allocates its env once and stores each capture at its o
         \\
     ) != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @gc_alloc("));
+}
+
+test "a debug build tests +, -, * and unary - for overflow before each; +% and release wrap" {
+    const gpa = testing.allocator;
+    const src =
+        \\fn f(a: int8, b: int8) -> int8 {
+        \\ c := a + b
+        \\ c -= a
+        \\ return -(c * b) +% a -% -1
+        \\}
+        \\
+    ;
+    const debug = try renderUnit(gpa, src, "f", .{ .profile = .debug });
+    defer gpa.free(debug);
+    try testing.expectEqualStrings(
+        \\fn main.f(s0, s1) -> int {
+        \\  slots: s0:int s1:int s2:int
+        \\b0:
+        \\  %1 = slot_addr s0
+        \\  %2 = load %1 : int
+        \\  %3 = slot_addr s1
+        \\  %4 = load %3 : int
+        \\  %5 = overflow add %2, %4 : int
+        \\  cond_br %5, b3, b2
+        \\b1(%0:int):
+        \\  ret %0
+        \\b2:
+        \\  %6 = add %2, %4
+        \\  %7 = slot_addr s2
+        \\  store %7, %6 : int
+        \\  %8 = slot_addr s2
+        \\  %9 = load %8 : int
+        \\  %10 = slot_addr s0
+        \\  %11 = load %10 : int
+        \\  %12 = overflow sub %9, %11 : int
+        \\  cond_br %12, b5, b4
+        \\b3:
+        \\  panic add_overflow
+        \\b4:
+        \\  %13 = sub %9, %11
+        \\  %14 = slot_addr s2
+        \\  store %14, %13 : int
+        \\  %15 = slot_addr s2
+        \\  %16 = load %15 : int
+        \\  %17 = slot_addr s1
+        \\  %18 = load %17 : int
+        \\  %19 = overflow mul %16, %18 : int
+        \\  cond_br %19, b7, b6
+        \\b5:
+        \\  panic sub_overflow
+        \\b6:
+        \\  %20 = mul %16, %18
+        \\  %21 = iconst 0
+        \\  %22 = overflow sub %21, %20 : int
+        \\  cond_br %22, b9, b8
+        \\b7:
+        \\  panic mul_overflow
+        \\b8:
+        \\  %23 = neg %20
+        \\  %24 = slot_addr s0
+        \\  %25 = load %24 : int
+        \\  %26 = add %23, %25
+        \\  %27 = iconst 1
+        \\  %28 = neg %27
+        \\  %29 = sub %26, %28
+        \\  br b1(%29)
+        \\b9:
+        \\  panic neg_overflow
+        \\}
+        \\
+    , debug);
+    const release = try renderUnit(gpa, src, "f", .{ .profile = .{ .name = .release, .opt = .O0 } });
+    defer gpa.free(release);
+    try testing.expect(std.mem.indexOf(u8, release, "overflow") == null);
+    try testing.expect(std.mem.indexOf(u8, release, "panic") == null);
 }
 
 test "a lambda prologue copies captures into locals" {

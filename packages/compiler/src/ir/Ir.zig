@@ -72,6 +72,17 @@ pub const ValueDef = struct {
 /// A binary op's two value operands.
 pub const Bin = struct { lhs: ValueId, rhs: ValueId };
 
+/// Whether `lhs op rhs` overflows integer type `ty`, as a bool value. `ty` is carried
+/// because an operand's own type can be another width (a literal is an `int`).
+pub const Overflow = struct {
+    kind: Kind,
+    lhs: ValueId,
+    rhs: ValueId,
+    ty: Type,
+
+    pub const Kind = enum { add, sub, mul };
+};
+
 /// One decoded string literal a function references, keyed by its content hash
 /// (the same hash a `cstr_ptr` op carries). `bytes` are the decoded runtime
 /// bytes WITHOUT a trailing NUL. lower decodes these (it holds the source); a
@@ -210,6 +221,9 @@ pub const Op = union(enum) {
     /// The code address of a function → int value. The name is borrowed (like
     /// `Call.callee`); codegen dupes it into the reloc. Pure, no operands.
     fn_addr: SymName,
+
+    /// A debug build's overflow test before a `+`/`-`/`*`, which branches to a panic. Pure.
+    overflow: Overflow,
 };
 
 /// One instruction: an op plus its result value id (`none_value` when the op
@@ -235,7 +249,7 @@ pub const Terminator = union(enum) {
     /// backstop). No successors.
     panic: PanicReason,
 
-    pub const PanicReason = enum { div_by_zero, rem_by_zero, index_oob };
+    pub const PanicReason = enum { div_by_zero, rem_by_zero, index_oob, add_overflow, sub_overflow, mul_overflow, div_overflow, neg_overflow };
 };
 
 /// A basic block: a list of block params (the merge slots), straight-line
@@ -549,6 +563,11 @@ fn renderInstr(
             try out.writeAll(")\n");
         },
         .fn_addr => |f| try out.print("fn_addr @{s}\n", .{f.name}),
+        .overflow => |o| {
+            try out.print("overflow {t} %{d}, %{d} : ", .{ o.kind, o.lhs, o.rhs });
+            try renderType(out, o.ty, layouts, enum_layouts);
+            try out.writeAll("\n");
+        },
     }
 }
 
