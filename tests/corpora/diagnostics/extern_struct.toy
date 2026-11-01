@@ -9,13 +9,13 @@ extern struct Bad {
 }
 
 extern "c" {
-    fn fill(mut n: int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
-    fn move(mut p: Point)
+    fn bzero(mut n: int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
+    fn srandom(mut p: Point)
 }
 
 fn main() -> int {
     n := 1
     p := Point { x: 1.0, y: 2.0 }
-    unsafe { move(p) }
+    unsafe { srandom(p) }
     return n
 }

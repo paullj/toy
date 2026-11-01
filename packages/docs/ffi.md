@@ -356,8 +356,8 @@ still binds to a library only through an `extern "name"` block, and a bare `exte
 always binds to libSystem. `check` resolves the libraries as `build` does, so it
 reports the same errors. A `-L` that is not a folder is a usage error.
 
-**Errors.** Each is reported once, at the block's library string, or for a `-l` as a
-usage error (exit 2) naming the flag:
+**Errors.** Each is reported once, at the block's library string (at the extern for
+R0018 and R0019), or for a `-l` as a usage error (exit 2) naming the flag:
 
 | code | when |
 |---|---|
@@ -365,6 +365,7 @@ usage error (exit 2) naming the flag:
 | R0016 | no `lib<name>.dylib` in any searched folder; the error lists them |
 | R0017 | the file is not an arm64 Mach-O dynamic library |
 | R0018 | one C symbol is bound to two different libraries, or a block binds one the toy runtime or std imports from libSystem |
+| R0019 | the library does not export the extern's C symbol (a bare `extern fn` is checked against libSystem); reported at the extern |
 
 Static linking (`.a`, `.o`) is not supported; build the library with `cc -shared`.
 

@@ -5,7 +5,13 @@
 //! dyld will look up and the versions dyld checks. A library on disk supplies both
 //! through its LC_ID_DYLIB. A system library under /usr/lib has no file on disk on
 //! current macOS (it lives in the dyld shared cache), so it is accepted when the
-//! cache holds it and recorded by its path.
+//! cache holds it and recorded by the install name dyld reports for it.
+//!
+//! The linker also checks that each extern's symbol is exported by its library, since
+//! dyld would otherwise abort the program at launch. An on-disk library is read
+//! through its export trie. A shared-cache library has no file to read, so dyld itself
+//! is asked: the library is opened with RTLD_FIRST, which makes `dlsym` search only
+//! that library and what it re-exports, the same set a two-level-namespace bind sees.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -57,7 +63,7 @@ pub const Binding = struct { name: []const u8, ordinal: u8 };
 /// Where a library name led. Strings are allocated in the allocator `find` got.
 pub const Found = union(enum) {
     libsystem,
-    dylib: struct { dylib: MachO.Dylib, rpath: ?[]const u8 },
+    dylib: struct { dylib: MachO.Dylib, rpath: ?[]const u8, exports: Exports },
     /// Only a static archive or object matched: the path of the first one.
     static: []const u8,
     not_found,
@@ -83,7 +89,7 @@ pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []
     if (isStatic(name)) return .{ .static = name };
     for (libsystem_names) |n| if (std.mem.eql(u8, n, name)) return .libsystem;
     if (isPath(name)) {
-        if (!exists(io, name)) return if (std.fs.path.isAbsolute(name) and inSharedCache(name)) cached(name) else .not_found;
+        if (!exists(io, name)) return if (std.fs.path.isAbsolute(name) and inSharedCache(name)) cached(arena, name) else .not_found;
         return open(arena, io, name);
     }
     var static: ?[]const u8 = null;
@@ -96,13 +102,16 @@ pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []
         }
     };
     const system = try std.fmt.allocPrint(arena, "/usr/lib/lib{s}.dylib", .{name});
-    if (inSharedCache(system)) return cached(system);
+    if (inSharedCache(system)) return cached(arena, system);
     return if (static) |s| .{ .static = s } else .not_found;
 }
 
-fn cached(path: []const u8) Found {
-    if (std.mem.eql(u8, path, libsystem_path)) return .libsystem;
-    return .{ .dylib = .{ .dylib = .{ .install_name = path }, .rpath = null } };
+/// A shared-cache library, recorded by its install name so that two paths to one
+/// library (`/usr/lib/libz.dylib` and `/usr/lib/libz.1.dylib`) load it once.
+fn cached(arena: std.mem.Allocator, path: []const u8) !Found {
+    const install_name = if (try cachedInstallName(arena, path)) |n| n else path;
+    if (std.mem.eql(u8, install_name, libsystem_path)) return .libsystem;
+    return .{ .dylib = .{ .dylib = .{ .install_name = install_name }, .rpath = null, .exports = .{ .cached = path } } };
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -126,6 +135,7 @@ fn open(arena: std.mem.Allocator, io: Io, path: []const u8) !Found {
     return .{ .dylib = .{
         .dylib = .{ .install_name = choice.install_name, .current_version = id.current_version, .compat_version = id.compat_version },
         .rpath = choice.rpath,
+        .exports = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } },
     } };
 }
 
@@ -145,8 +155,175 @@ pub fn record(arena: std.mem.Allocator, install_name: []const u8, real: []const 
 }
 
 /// A library's LC_ID_DYLIB: its install name (borrowed from the bytes read) and
-/// the versions dyld checks.
-pub const Id = struct { install_name: []const u8, current_version: u32, compat_version: u32 };
+/// the versions dyld checks; with its export trie and load commands, also borrowed.
+pub const Id = struct {
+    install_name: []const u8,
+    current_version: u32,
+    compat_version: u32,
+    exports: []const u8 = &.{},
+    cmds: []const u8 = &.{},
+};
+
+/// Where the linker looks up the C symbols a library exports.
+pub const Exports = union(enum) {
+    /// An on-disk library's export trie, its load commands (for its re-exports and
+    /// LC_RPATHs), and the real path of its folder, which is what `@loader_path` means.
+    trie: struct { trie: []const u8, cmds: []const u8, dir: []const u8 },
+    /// The path of a shared-cache library, opened through dyld.
+    cached: []const u8,
+
+    pub const libsystem: Exports = .{ .cached = libsystem_path };
+
+    /// Whether the library exports the C symbol `sym`. It answers true when it cannot
+    /// tell (a re-exported library it cannot find, or a host without dyld), so the
+    /// check never rejects a symbol dyld would bind.
+    pub fn has(self: Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8) !bool {
+        const mangled = try std.fmt.allocPrint(arena, "_{s}", .{sym});
+        return self.hasDepth(arena, io, cache, sym, mangled, 0);
+    }
+
+    fn hasDepth(self: Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8, mangled: []const u8, depth: u8) !bool {
+        switch (self) {
+            .cached => |path| return cachedHas(path, sym),
+            .trie => |t| {
+                if (trieHas(t.trie, mangled)) return true;
+                if (depth == 8) return true;
+                var it: CmdIter = .{ .cmds = t.cmds };
+                while (it.next()) |c| {
+                    if (c.cmd != LC_REEXPORT_DYLIB) continue;
+                    const name = c.str() orelse return true;
+                    const sub = (try reexported(arena, io, cache, t.cmds, t.dir, name)) orelse return true;
+                    if (try sub.hasDepth(arena, io, cache, sym, mangled, depth + 1)) return true;
+                }
+                return false;
+            },
+        }
+    }
+};
+
+/// Re-exported libraries read so far, by path; null for one that is not a readable
+/// dylib. Every extern is checked through it, so each library is read once per link.
+pub const Cache = std.StringHashMapUnmanaged(?Exports);
+
+/// The library a re-export names, found the way dyld would from the re-exporting
+/// library (load commands `cmds`, folder `dir`): `@loader_path/` from `dir`,
+/// `@rpath/` through its LC_RPATHs and then `dir`, which is the LC_RPATH the binary
+/// records for an `@rpath/` library it links. Null when it cannot be found.
+fn reexported(arena: std.mem.Allocator, io: Io, cache: *Cache, cmds: []const u8, dir: []const u8, name: []const u8) !?Exports {
+    if (std.fs.path.isAbsolute(name)) {
+        if (exists(io, name)) return loadCached(arena, io, cache, name);
+        return if (inSharedCache(name)) .{ .cached = name } else null;
+    }
+    if (std.mem.startsWith(u8, name, "@loader_path/")) {
+        const path = try std.fs.path.join(arena, &.{ dir, name["@loader_path/".len..] });
+        return if (exists(io, path)) loadCached(arena, io, cache, path) else null;
+    }
+    if (!std.mem.startsWith(u8, name, "@rpath/")) return null;
+    const rest = name["@rpath/".len..];
+    var it: CmdIter = .{ .cmds = cmds };
+    while (it.next()) |c| {
+        if (c.cmd != LC_RPATH) continue;
+        const rp = c.str() orelse continue;
+        const base = if (std.mem.startsWith(u8, rp, "@loader_path"))
+            try std.mem.concat(arena, u8, &.{ dir, rp["@loader_path".len..] })
+        else if (std.fs.path.isAbsolute(rp)) rp else continue;
+        const path = try std.fs.path.join(arena, &.{ base, rest });
+        if (exists(io, path)) return loadCached(arena, io, cache, path);
+    }
+    const path = try std.fs.path.join(arena, &.{ dir, rest });
+    return if (exists(io, path)) loadCached(arena, io, cache, path) else null;
+}
+
+fn loadCached(arena: std.mem.Allocator, io: Io, cache: *Cache, path: []const u8) !?Exports {
+    const gop = try cache.getOrPut(arena, path);
+    if (gop.found_existing) return gop.value_ptr.*;
+    gop.key_ptr.* = try arena.dupe(u8, path);
+    gop.value_ptr.* = null;
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return null,
+    };
+    const id = switch (readId(bytes)) {
+        .ok => |id| id,
+        .bad => return null,
+    };
+    const real = Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch try arena.dupe(u8, path);
+    gop.value_ptr.* = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } };
+    return gop.value_ptr.*;
+}
+
+/// One load command: its kind and its bytes, header included.
+const Cmd = struct {
+    cmd: u32,
+    bytes: []const u8,
+
+    /// The string a `dylib_command` or `rpath_command` holds, at the offset its
+    /// third word gives.
+    fn str(c: Cmd) ?[]const u8 {
+        if (c.bytes.len < 12) return null;
+        const off = std.mem.readInt(u32, c.bytes[8..12], .little);
+        if (off >= c.bytes.len) return null;
+        return std.mem.sliceTo(c.bytes[off..], 0);
+    }
+};
+
+const CmdIter = struct {
+    cmds: []const u8,
+    off: usize = 0,
+
+    fn next(it: *CmdIter) ?Cmd {
+        if (it.off + 8 > it.cmds.len) return null;
+        const cmd = std.mem.readInt(u32, it.cmds[it.off..][0..4], .little);
+        const size = std.mem.readInt(u32, it.cmds[it.off + 4 ..][0..4], .little);
+        if (size < 8 or it.off + size > it.cmds.len) return null;
+        defer it.off += size;
+        return .{ .cmd = cmd, .bytes = it.cmds[it.off..][0..size] };
+    }
+};
+
+fn uleb(bytes: []const u8, pos: *usize) ?usize {
+    var v: u64 = 0;
+    var shift: u7 = 0;
+    while (pos.* < bytes.len) {
+        const b = bytes[pos.*];
+        pos.* += 1;
+        if (shift >= 64) return null;
+        v |= @as(u64, b & 0x7f) << @intCast(shift);
+        if (b & 0x80 == 0) return std.math.cast(usize, v);
+        shift += 7;
+    }
+    return null;
+}
+
+/// True when the Mach-O export trie `trie` has a terminal for `name` (the mangled
+/// symbol). Every step consumes a non-empty edge of `name`, so a malformed or cyclic
+/// trie still ends.
+pub fn trieHas(trie: []const u8, name: []const u8) bool {
+    var node: usize = 0;
+    var rest = name;
+    while (true) {
+        var p = node;
+        const terminal = uleb(trie, &p) orelse return false;
+        if (rest.len == 0) return terminal != 0;
+        p = std.math.add(usize, p, terminal) catch return false;
+        if (p >= trie.len) return false;
+        const children = trie[p];
+        p += 1;
+        var next: ?usize = null;
+        for (0..children) |_| {
+            const end = std.mem.indexOfScalarPos(u8, trie, p, 0) orelse return false;
+            const edge = trie[p..end];
+            p = end + 1;
+            const child = uleb(trie, &p) orelse return false;
+            if (edge.len > 0 and std.mem.startsWith(u8, rest, edge)) {
+                rest = rest[edge.len..];
+                next = child;
+                break;
+            }
+        }
+        node = next orelse return false;
+    }
+}
 
 const MH_MAGIC_64: u32 = 0xFEEDFACF;
 const FAT_MAGIC: u32 = 0xCAFEBABE;
@@ -154,6 +331,11 @@ const FAT_MAGIC_64: u32 = 0xCAFEBABF;
 const CPU_TYPE_ARM64: u32 = 0x0100000C;
 const MH_DYLIB: u32 = 0x6;
 const LC_ID_DYLIB: u32 = 0xd;
+const LC_REEXPORT_DYLIB: u32 = 0x8000001f;
+const LC_RPATH: u32 = 0x8000001c;
+const LC_DYLD_INFO: u32 = 0x22;
+const LC_DYLD_INFO_ONLY: u32 = 0x80000022;
+const LC_DYLD_EXPORTS_TRIE: u32 = 0x80000033;
 
 /// Parse the arm64 Mach-O dylib in `bytes` (thin, or the arm64 slice of a
 /// universal file) for its LC_ID_DYLIB, or say why it is not one.
@@ -186,25 +368,98 @@ fn readThin(bytes: []const u8) Read {
     if (bytes.len < 32 or std.mem.readInt(u32, bytes[0..4], .little) != MH_MAGIC_64) return .{ .bad = not_macho };
     if (std.mem.readInt(u32, bytes[4..8], .little) != CPU_TYPE_ARM64) return .{ .bad = "it is not built for arm64" };
     if (std.mem.readInt(u32, bytes[12..16], .little) != MH_DYLIB) return .{ .bad = "it is not a dynamic library" };
-    const ncmds = std.mem.readInt(u32, bytes[16..20], .little);
-    var off: usize = 32;
-    for (0..ncmds) |_| {
-        if (off + 8 > bytes.len) break;
-        const cmd = std.mem.readInt(u32, bytes[off..][0..4], .little);
-        const size = std.mem.readInt(u32, bytes[off + 4 ..][0..4], .little);
-        if (size < 8 or off + size > bytes.len) break;
-        if (cmd == LC_ID_DYLIB and size >= 24) {
-            const name_off = std.mem.readInt(u32, bytes[off + 8 ..][0..4], .little);
-            if (name_off >= size) break;
-            return .{ .ok = .{
-                .install_name = std.mem.sliceTo(bytes[off + name_off .. off + size], 0),
-                .current_version = std.mem.readInt(u32, bytes[off + 16 ..][0..4], .little),
-                .compat_version = std.mem.readInt(u32, bytes[off + 20 ..][0..4], .little),
-            } };
-        }
-        off += size;
+    const sizeofcmds = std.mem.readInt(u32, bytes[20..24], .little);
+    const cmds = bytes[32..][0..@min(sizeofcmds, bytes.len - 32)];
+    var id: ?Id = null;
+    var exports: []const u8 = &.{};
+    var it: CmdIter = .{ .cmds = cmds };
+    while (it.next()) |c| switch (c.cmd) {
+        LC_ID_DYLIB => if (id == null and c.bytes.len >= 24) {
+            const name = c.str() orelse continue;
+            id = .{
+                .install_name = name,
+                .current_version = std.mem.readInt(u32, c.bytes[16..20], .little),
+                .compat_version = std.mem.readInt(u32, c.bytes[20..24], .little),
+            };
+        },
+        LC_DYLD_INFO, LC_DYLD_INFO_ONLY => if (c.bytes.len >= 48) {
+            exports = fileRange(bytes, std.mem.readInt(u32, c.bytes[40..44], .little), std.mem.readInt(u32, c.bytes[44..48], .little));
+        },
+        LC_DYLD_EXPORTS_TRIE => if (c.bytes.len >= 16) {
+            exports = fileRange(bytes, std.mem.readInt(u32, c.bytes[8..12], .little), std.mem.readInt(u32, c.bytes[12..16], .little));
+        },
+        else => {},
+    };
+    if (id) |*found| {
+        found.exports = exports;
+        found.cmds = cmds;
+        return .{ .ok = found.* };
     }
     return .{ .bad = "it has no install name (LC_ID_DYLIB)" };
+}
+
+fn fileRange(bytes: []const u8, off: u32, size: u32) []const u8 {
+    if (off > bytes.len or size > bytes.len - off) return &.{};
+    return bytes[off..][0..size];
+}
+
+const dyld = struct {
+    const RTLD_LAZY: c_int = 0x1;
+    const RTLD_LOCAL: c_int = 0x4;
+    const RTLD_NOLOAD: c_int = 0x10;
+    const RTLD_FIRST: c_int = 0x100;
+    extern "c" fn _dyld_shared_cache_contains_path(p: [*:0]const u8) bool;
+    extern "c" fn _dyld_image_count() u32;
+    extern "c" fn _dyld_get_image_name(i: u32) ?[*:0]const u8;
+    extern "c" fn _dyld_get_image_header(i: u32) ?*const anyopaque;
+    extern "c" fn dlopen(path: [*:0]const u8, mode: c_int) ?*anyopaque;
+    extern "c" fn dlsym(handle: *anyopaque, sym: [*:0]const u8) ?*anyopaque;
+    extern "c" fn dlclose(handle: *anyopaque) c_int;
+};
+
+/// `s` as a NUL-terminated string in `buf`, or null when it does not fit.
+fn cstr(buf: *[std.fs.max_path_bytes:0]u8, s: []const u8) ?[*:0]const u8 {
+    if (s.len >= buf.len) return null;
+    @memcpy(buf[0..s.len], s);
+    buf[s.len] = 0;
+    return buf;
+}
+
+fn openCached(path: []const u8, extra: c_int) ?*anyopaque {
+    var buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    return dyld.dlopen(cstr(&buf, path) orelse return null, dyld.RTLD_LAZY | dyld.RTLD_LOCAL | dyld.RTLD_FIRST | extra);
+}
+
+/// Whether the shared-cache library at `path` exports `sym`; true when dyld cannot
+/// open it, which `find` has already ruled out.
+fn cachedHas(path: []const u8, sym: []const u8) bool {
+    if (comptime builtin.os.tag != .macos) return true;
+    const h = openCached(path, 0) orelse return true;
+    defer _ = dyld.dlclose(h);
+    var buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    return dyld.dlsym(h, cstr(&buf, sym) orelse return true) != null;
+}
+
+/// The install name in the LC_ID_DYLIB of the shared-cache library at `path`. dyld
+/// has no call from a path to its image, so the library is opened and the loaded
+/// image whose handle matches is read in memory; null when none does.
+fn cachedInstallName(arena: std.mem.Allocator, path: []const u8) !?[]const u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+    const h = openCached(path, 0) orelse return null;
+    defer _ = dyld.dlclose(h);
+    for (0..dyld._dyld_image_count()) |i| {
+        const name = dyld._dyld_get_image_name(@intCast(i)) orelse continue;
+        const other = openCached(std.mem.span(name), dyld.RTLD_NOLOAD) orelse continue;
+        _ = dyld.dlclose(other);
+        if (other != h) continue;
+        const header: [*]const u8 = @ptrCast(dyld._dyld_get_image_header(@intCast(i)) orelse return null);
+        const sizeofcmds = std.mem.readInt(u32, header[20..24], .little);
+        return switch (readThin(header[0 .. 32 + sizeofcmds])) {
+            .ok => |id| try arena.dupe(u8, id.install_name),
+            .bad => null,
+        };
+    }
+    return null;
 }
 
 /// True when the dyld shared cache holds `path`. Only macOS has one; elsewhere (the
@@ -212,33 +467,61 @@ fn readThin(bytes: []const u8) Read {
 fn inSharedCache(path: []const u8) bool {
     if (comptime builtin.os.tag != .macos) return false;
     var buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= buf.len) return false;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    const dyld = struct {
-        extern "c" fn _dyld_shared_cache_contains_path(p: [*:0]const u8) bool;
-    };
-    return dyld._dyld_shared_cache_contains_path(&buf);
+    return dyld._dyld_shared_cache_contains_path(cstr(&buf, path) orelse return false);
 }
 
 const testing = std.testing;
 
 /// A minimal thin arm64 Mach-O header with one LC_ID_DYLIB naming `name`, for tests.
 pub fn fakeDylib(buf: []u8, name: []const u8, filetype: u32) []u8 {
+    return fakeDylibExporting(buf, name, filetype, &.{});
+}
+
+/// `fakeDylib` with an LC_DYLD_EXPORTS_TRIE whose trie exports the C symbols `syms`.
+pub fn fakeDylibExporting(buf: []u8, name: []const u8, filetype: u32, syms: []const []const u8) []u8 {
     @memset(buf, 0);
     const cmdsize: u32 = @intCast(std.mem.alignForward(usize, 24 + name.len + 1, 8));
+    const sizeofcmds = cmdsize + 16;
     std.mem.writeInt(u32, buf[0..4], MH_MAGIC_64, .little);
     std.mem.writeInt(u32, buf[4..8], CPU_TYPE_ARM64, .little);
     std.mem.writeInt(u32, buf[12..16], filetype, .little);
-    std.mem.writeInt(u32, buf[16..20], 1, .little);
-    std.mem.writeInt(u32, buf[20..24], cmdsize, .little);
+    std.mem.writeInt(u32, buf[16..20], 2, .little);
+    std.mem.writeInt(u32, buf[20..24], sizeofcmds, .little);
     std.mem.writeInt(u32, buf[32..36], LC_ID_DYLIB, .little);
     std.mem.writeInt(u32, buf[36..40], cmdsize, .little);
     std.mem.writeInt(u32, buf[40..44], 24, .little);
     std.mem.writeInt(u32, buf[48..52], 0x10203, .little);
     std.mem.writeInt(u32, buf[52..56], 0x10000, .little);
     @memcpy(buf[56..][0..name.len], name);
-    return buf[0 .. 32 + cmdsize];
+
+    // A root with one edge per symbol, each to a leaf whose terminal holds flags 0 and
+    // address 0; every offset stays below 128, so each uleb is one byte.
+    const trie_off = 32 + sizeofcmds;
+    var p: usize = trie_off;
+    buf[p] = 0;
+    buf[p + 1] = @intCast(syms.len);
+    p += 2;
+    var root_len: usize = 2;
+    for (syms) |sym| root_len += sym.len + 3;
+    var leaf: usize = root_len;
+    for (syms) |sym| {
+        buf[p] = '_';
+        @memcpy(buf[p + 1 ..][0..sym.len], sym);
+        buf[p + 1 + sym.len] = 0;
+        buf[p + 2 + sym.len] = @intCast(leaf);
+        p += sym.len + 3;
+        leaf += 4;
+    }
+    for (syms) |_| {
+        buf[p..][0..4].* = .{ 2, 0, 0, 0 };
+        p += 4;
+    }
+    const lc = 32 + cmdsize;
+    std.mem.writeInt(u32, buf[lc..][0..4], LC_DYLD_EXPORTS_TRIE, .little);
+    std.mem.writeInt(u32, buf[lc + 4 ..][0..4], 16, .little);
+    std.mem.writeInt(u32, buf[lc + 8 ..][0..4], @intCast(trie_off), .little);
+    std.mem.writeInt(u32, buf[lc + 12 ..][0..4], @intCast(p - trie_off), .little);
+    return buf[0..p];
 }
 
 test "readId reads a thin arm64 dylib's install name and versions" {
@@ -322,6 +605,93 @@ test "find searches -L folders for lib<name>.dylib and reports a folder that hol
     try testing.expect(std.mem.endsWith(u8, (try find(a, io, "toyarc", &.{dir})).static, "/libtoyarc.a"));
     try testing.expectEqualStrings("it is not a dynamic library", (try find(a, io, "toyexe", &.{dir})).not_dylib.why);
     try testing.expect(try find(a, io, "toy-no-such-lib", &.{dir}) == .not_found);
+}
+
+test "a dylib's export trie answers which C symbols it exports" {
+    var buf: [512]u8 = undefined;
+    const id = readId(fakeDylibExporting(&buf, "/opt/libq.dylib", MH_DYLIB, &.{ "q_one", "q_two", "q" })).ok;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const e: Exports = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = "/opt" } };
+    var cache: Cache = .empty;
+    for ([_][]const u8{ "q_one", "q_two", "q" }) |sym| try testing.expect(try e.has(arena.allocator(), threaded.io(), &cache, sym));
+    for ([_][]const u8{ "q_on", "q_three", "", "q_one_" }) |sym| try testing.expect(!try e.has(arena.allocator(), threaded.io(), &cache, sym));
+    try testing.expect(!trieHas(&.{}, "_q"));
+}
+
+test "re-exports through @rpath and @loader_path are followed, each library read once" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try tmp.dir.writeFile(io, .{ .sub_path = "m.c", .data = "int mine(int x) { return x; }\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "w.c", .data = "int wrap(int x) { return x; }\n" });
+    const cc = [_][]const []const u8{
+        &.{ "cc", "-dynamiclib", "-o", "libmy.dylib", "m.c", "-install_name", "@rpath/libmy.dylib" },
+        &.{ "cc", "-dynamiclib", "-o", "librw.dylib", "w.c", "-L.", "-Wl,-reexport_library,libmy.dylib", "-install_name", "@rpath/librw.dylib", "-Wl,-rpath,@loader_path" },
+        &.{ "cc", "-dynamiclib", "-o", "liblw.dylib", "w.c", "-L.", "-Wl,-reexport_library,libmy.dylib", "-install_name", "@rpath/liblw.dylib" },
+    };
+    for (cc) |argv| {
+        var child = std.process.spawn(io, .{ .argv = argv, .cwd = .{ .path = dir }, .stdout = .ignore, .stderr = .ignore }) catch return error.SkipZigTest;
+        if (!std.meta.eql(try child.wait(io), std.process.Child.Term{ .exited = 0 })) return error.SkipZigTest;
+    }
+    var cache: Cache = .empty;
+    for ([_][]const u8{ "librw.dylib", "liblw.dylib" }) |lib| {
+        const path = try std.fs.path.join(a, &.{ dir, lib });
+        const e = (try find(a, io, path, &.{})).dylib.exports;
+        for (0..3) |_| {
+            try testing.expect(try e.has(a, io, &cache, "wrap"));
+            try testing.expect(try e.has(a, io, &cache, "mine"));
+            try testing.expect(!try e.has(a, io, &cache, "nope"));
+        }
+    }
+    try testing.expectEqual(@as(u32, 1), cache.count());
+}
+
+test "trieHas follows shared prefixes" {
+    // "_" -> { "ab" -> terminal, "a" -> { "c" -> terminal } } in the trie layout ld writes.
+    const trie = [_]u8{
+        0, 1, '_', 0, 5, // root: no terminal, one edge "_" to node 5
+        0, 1, 'a', 0, 10, // node 5: edge "a" to node 10
+        0, 2, 'b', 0, 20, 'c', 0, 24, // node 10: edges "b" and "c"
+        0, 0, // padding
+        2, 0, 0, 0, // node 20: terminal
+        2, 0, 0, 0, // node 24: terminal
+    };
+    try testing.expect(trieHas(&trie, "_ab"));
+    try testing.expect(trieHas(&trie, "_ac"));
+    try testing.expect(!trieHas(&trie, "_a"));
+    try testing.expect(!trieHas(&trie, "_ad"));
+}
+
+test "shared-cache libraries: dyld answers exports, and aliases share one install name" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const a = arena.allocator();
+    const io = threaded.io();
+    var cache: Cache = .empty;
+    try testing.expect(try Exports.libsystem.has(a, io, &cache, "puts"));
+    // libm is re-exported by libSystem, which is how a bare extern reaches sqrt.
+    try testing.expect(try Exports.libsystem.has(a, io, &cache, "sqrt"));
+    try testing.expect(!try Exports.libsystem.has(a, io, &cache, "putz_toy_nope"));
+    // RTLD_FIRST: libz depends on libSystem but does not export its symbols.
+    const z = (try find(a, io, "z", &.{})).dylib;
+    try testing.expect(try z.exports.has(a, io, &cache, "crc32"));
+    try testing.expect(!try z.exports.has(a, io, &cache, "puts"));
+    const z1 = (try find(a, io, "/usr/lib/libz.1.dylib", &.{})).dylib;
+    try testing.expectEqualStrings(z1.dylib.install_name, z.dylib.install_name);
+    try testing.expect(try find(a, io, "/usr/lib/libc.dylib", &.{}) == .libsystem);
 }
 
 test "ordinalOf finds a bound symbol and defaults to libSystem" {

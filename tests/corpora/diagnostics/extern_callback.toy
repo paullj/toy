@@ -1,3 +1,5 @@
+# Each bare extern names a real libSystem function (R0019 checks that it exists); the
+# signatures are the fixture's own.
 struct Acc { n: int }
 
 impl Acc {
@@ -6,33 +8,33 @@ impl Acc {
 }
 
 extern {
-    fn each(n: int, cb: fn(int) -> int) -> int
-    fn bad_param(cb: fn(str) -> int)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn bad_ret(cb: fn(int) -> Acc)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn nested(cb: fn(fn(int) -> int))  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
-    fn ret_fn() -> fn(int) -> int  #~ ERROR [T0037] extern function parameter/return type must be int, float, f32, rawptr, cstr, bool, or an extern struct
-    fn mut_cb(mut cb: fn(int) -> int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
+    fn heapsort(n: int, cb: fn(int) -> int) -> int
+    fn mergesort(cb: fn(str) -> int)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    fn radixsort(cb: fn(int) -> Acc)  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    fn bsearch(cb: fn(fn(int) -> int))  #~ ERROR [T0037] a callback's parameters and return must be C types: an int of any width, f32, float, bool, rawptr, cstr, or an extern struct
+    fn signal() -> fn(int) -> int  #~ ERROR [T0037] extern function parameter/return type must be int, float, f32, rawptr, cstr, bool, or an extern struct
+    fn atexit(mut cb: fn(int) -> int)  #~ ERROR [T0037] a 'mut' extern parameter is a C pointer, so its type must be an extern struct
 }
 
 fn sq(x: int) -> int { x * x }
 
 fn main() -> int {
     k := 3
-    a := unsafe { each(2, sq) }
-    b := unsafe { each(2, fn(x) { x + k }) }  #~ ERROR [T0080] a C callback cannot capture: this lambda captures 'k', and C calls only its code
+    a := unsafe { heapsort(2, sq) }
+    b := unsafe { heapsort(2, fn(x) { x + k }) }  #~ ERROR [T0080] a C callback cannot capture: this lambda captures 'k', and C calls only its code
     f := sq
-    c := unsafe { each(2, f) }  #~ ERROR [T0080] a C callback must be a top-level fn named directly, an associated fn, or a lambda or local fn that captures nothing: C gets only a code pointer, not this value's environment
+    c := unsafe { heapsort(2, f) }  #~ ERROR [T0080] a C callback must be a top-level fn named directly, an associated fn, or a lambda or local fn that captures nothing: C gets only a code pointer, not this value's environment
     acc := Acc { n: 1 }
-    d := unsafe { each(2, acc.get) }  #~ ERROR [T0080] a C callback must be a top-level fn named directly, an associated fn, or a lambda or local fn that captures nothing: C gets only a code pointer, not this value's environment
+    d := unsafe { heapsort(2, acc.get) }  #~ ERROR [T0080] a C callback must be a top-level fn named directly, an associated fn, or a lambda or local fn that captures nothing: C gets only a code pointer, not this value's environment
     fn add_k(x: int) -> int { x + k }
-    e := unsafe { each(2, add_k) }  #~ ERROR [T0080] a C callback cannot capture: 'add_k' captures 'k', and C calls only its code
+    e := unsafe { heapsort(2, add_k) }  #~ ERROR [T0080] a C callback cannot capture: 'add_k' captures 'k', and C calls only its code
     fn plain(x: int) -> int { x * 2 }
-    g := unsafe { each(2, plain) }
-    h := unsafe { each(2, fn(x) { x }) }
-    i := unsafe { each(2, Acc.tri) }
-    j := unsafe { each(2, 5) }  #~ ERROR [T0040] argument 2: expected fn(int) -> int, got int; 'each' takes (int, fn(int) -> int)
+    g := unsafe { heapsort(2, plain) }
+    h := unsafe { heapsort(2, fn(x) { x }) }
+    i := unsafe { heapsort(2, Acc.tri) }
+    j := unsafe { heapsort(2, 5) }  #~ ERROR [T0040] argument 2: expected fn(int) -> int, got int; 'heapsort' takes (int, fn(int) -> int)
     fn shared(x: int) -> int { x * 2 }
     fn uses(x: int) -> int { shared(x) + k }
-    l := unsafe { each(2, shared) }  #~ ERROR [T0080] a C callback cannot capture: 'shared' shares its environment with 'uses', which captures 'k', and C calls only its code
+    l := unsafe { heapsort(2, shared) }  #~ ERROR [T0080] a C callback cannot capture: 'shared' shares its environment with 'uses', which captures 'k', and C calls only its code
     return a + b + c + d + e + g + h + i + j + l + uses(1)
 }

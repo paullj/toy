@@ -1,0 +1,16 @@
+# Each extern's C symbol must be exported by the library it binds to: a bare extern by
+# libSystem (and what it re-exports, such as libm), a block's by its library, here a
+# shared-cache one that dyld answers for.
+extern fn labs(x: int) -> int
+extern fn sqrt(x: float) -> float
+extern fn putz(s: cstr) -> int32  #~ ERROR [R0019] C symbol 'putz' is not exported by libSystem; a bare 'extern fn' binds to libSystem
+
+extern "z" {
+    fn crc32(crc: int, p: rawptr, n: int) -> int
+    fn crc_32(crc: int, p: rawptr, n: int) -> int  #~ ERROR [R0019] C symbol 'crc_32' is not exported by library 'z'
+    fn puts(s: cstr) -> int32  #~ ERROR [R0019] C symbol 'puts' is not exported by library 'z'
+}
+
+fn main() -> int {
+    unsafe { labs(-1) }
+}
