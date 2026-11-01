@@ -45,6 +45,9 @@ are only comparable between runs on the same machine.
 | `compiler/medium/` | a checked-in `gen.sh` project (100 modules); a corpus fixture |
 | `opt-check.sh` | the CI gate: -O0 against -O1 over the corpus, and each opt pass's win |
 | `profile.sh` | per-stage compile-time profile and a `-j` sweep of one entry file |
+| `lib.sh` | helpers `run.sh` and `peers/run.sh` share: checksum, metrics, the ReleaseFast build |
+| `peers/` | peer programs, `peers/<lang>/<name>.<ext>`, their runner and toolchain pins |
+| `results/peers.json` | the last committed peer run |
 
 ## Add a benchmark
 
@@ -64,6 +67,51 @@ before every run (cold cache):
 ```json
 { "name": "check_cold_200x50", "kind": "compiler", "project": [200, 50], "args": ["check", "main.toy"] }
 ```
+
+## Peers
+
+`mise run bench:peers` runs every runtime benchmark as toy and as a peer program in C,
+Rust, Go, Swift, JS (Node) and Python, and checks that every program prints the toy
+checksum. The peers give a rough sense of scale only: take them with a pinch of salt.
+
+```sh
+mise run bench:peers                    # every benchmark and language, 5 timed runs each
+mise run bench:peers --runs 10 loops    # FILTER matches "<benchmark>/<lang>"
+mise run bench:peers /rust
+```
+
+Each peer runs the same algorithm as the toy program: idiomatic, single-threaded, the
+standard library only, no explicit SIMD, `unsafe` or arena tricks, written by us. Where a
+language has no closures or hash map in its standard library (C), the program writes the
+small one it needs. A peer builds the collections toy builds: toy's `Vec.map`,
+`Vec.filter` and `str.split` each return a new `Vec`, so a peer collects each stage rather
+than fusing a lazy iterator chain that would skip that work.
+
+| Language | Toolchain | Build |
+|---|---|---|
+| C | Xcode `cc` | `cc -O2` |
+| Rust | mise, `peers/mise.toml` | `rustc -C opt-level=3` |
+| Go | mise, `peers/mise.toml` | `go build` |
+| Swift | Xcode `swiftc` | `swiftc -O` |
+| JS | mise (Node), `peers/mise.toml` | `node` |
+| Python | mise, `peers/mise.toml` | `python3` |
+
+The peer toolchains are optional: they are pinned in `peers/mise.toml`, not the root
+`mise.toml`, so `mise install` at the root does not download them. The task runs
+`mise install` in `bench/peers/` first, so the first run installs them.
+
+Each program is timed the same way as `mise run bench` (hyperfine, then one
+`/usr/bin/time -l` run). A full run with every checksum right writes
+`results/peers.json`: the date, the toy commit (and `toy_dirty`, whether `packages/` or
+`build.zig*` had uncommitted changes), the machine block, the number of runs, each
+toolchain's version and flags, and one result per benchmark and language (`name`, `lang`,
+`source`, the program's path from the repo root, `metrics` as in the history,
+`checksum`). A run with a FILTER or a wrong checksum writes a temp file instead. Commit
+`results/peers.json` yourself after a run on the reference Mac. CI neither builds nor runs
+the peers.
+
+To add a peer, write `peers/<lang>/<name>.<ext>` for a runtime benchmark `<name>`. A
+benchmark with no peer in a language, where a peer would mean nothing, is skipped for it.
 
 ## History
 

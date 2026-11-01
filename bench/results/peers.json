@@ -1,0 +1,750 @@
+{
+  "date": "2026-11-02T00:26:10Z",
+  "toy_commit": "2a15edfc50bbc34b2831df3611f65b0bbdfb89b8",
+  "toy_dirty": false,
+  "runs": 5,
+  "machine": {
+    "id": "55a38e8f",
+    "chip": "Apple M2 Pro",
+    "model": "Mac14,9",
+    "p_cores": 6,
+    "e_cores": 4,
+    "ram_bytes": 34359738368,
+    "macos": "27.0.1",
+    "zig": "0.16.0",
+    "power": "ac",
+    "load_avg_1m": 2.15
+  },
+  "toolchains": {
+    "toy": {
+      "version": "zig 0.16.0",
+      "flags": "zig build -Doptimize=ReleaseFast; toy build --release"
+    },
+    "c": {
+      "version": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+      "flags": "cc -O2"
+    },
+    "rust": {
+      "version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "flags": "rustc -C opt-level=3"
+    },
+    "go": {
+      "version": "go version go1.27.3 darwin/arm64",
+      "flags": "go build"
+    },
+    "swift": {
+      "version": "Apple Swift version 6.1.2",
+      "flags": "swiftc -O"
+    },
+    "js": {
+      "version": "node v26.13.0",
+      "flags": "node"
+    },
+    "python": {
+      "version": "Python 3.15.2",
+      "flags": "python3"
+    }
+  },
+  "results": [
+    {
+      "name": "loops",
+      "lang": "toy",
+      "source": "bench/runtime/loops.toy",
+      "metrics": {
+        "instructions": 5039369986,
+        "cycles": 2330616237,
+        "max_rss_bytes": 1654784,
+        "peak_footprint_bytes": 1261976,
+        "wall_median_s": 0.699703583,
+        "wall_mean_s": 0.7115547748000001,
+        "wall_stddev_s": 0.022250928560592333,
+        "wall_min_s": 0.6938091670000001,
+        "wall_max_s": 0.7478964170000001,
+        "user_s": 0.6940812,
+        "sys_s": 0.007581
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "c",
+      "source": "bench/peers/c/loops.c",
+      "metrics": {
+        "instructions": 519356206,
+        "cycles": 237293573,
+        "max_rss_bytes": 1638400,
+        "peak_footprint_bytes": 1212776,
+        "wall_median_s": 0.073257791,
+        "wall_mean_s": 0.0728638664,
+        "wall_stddev_s": 0.0005891633131282856,
+        "wall_min_s": 0.072071667,
+        "wall_max_s": 0.0733405,
+        "user_s": 0.0693444,
+        "sys_s": 0.0017840000000000002
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "rust",
+      "source": "bench/peers/rust/loops.rs",
+      "metrics": {
+        "instructions": 520706668,
+        "cycles": 238270187,
+        "max_rss_bytes": 1835008,
+        "peak_footprint_bytes": 1245544,
+        "wall_median_s": 0.07232525000000001,
+        "wall_mean_s": 0.0721233418,
+        "wall_stddev_s": 0.000523645839719651,
+        "wall_min_s": 0.07144858400000001,
+        "wall_max_s": 0.072589417,
+        "user_s": 0.0686406,
+        "sys_s": 0.0017945999999999997
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "go",
+      "source": "bench/peers/go/loops.go",
+      "metrics": {
+        "instructions": 571415770,
+        "cycles": 322454721,
+        "max_rss_bytes": 4407296,
+        "peak_footprint_bytes": 3031568,
+        "wall_median_s": 0.097333417,
+        "wall_mean_s": 0.0974349586,
+        "wall_stddev_s": 0.0006793894616012259,
+        "wall_min_s": 0.096636625,
+        "wall_max_s": 0.09830545900000001,
+        "user_s": 0.09316340000000001,
+        "sys_s": 0.0026766
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "swift",
+      "source": "bench/peers/swift/loops.swift",
+      "metrics": {
+        "instructions": 619093928,
+        "cycles": 325041156,
+        "max_rss_bytes": 2113536,
+        "peak_footprint_bytes": 1409384,
+        "wall_median_s": 0.099130667,
+        "wall_mean_s": 0.09940630000000002,
+        "wall_stddev_s": 0.001060946986727425,
+        "wall_min_s": 0.098347291,
+        "wall_max_s": 0.100596875,
+        "user_s": 0.09455759999999999,
+        "sys_s": 0.0023258000000000003
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "js",
+      "source": "bench/peers/js/loops.js",
+      "metrics": {
+        "instructions": 8527401206,
+        "cycles": 2801147237,
+        "max_rss_bytes": 58376192,
+        "peak_footprint_bytes": 13862808,
+        "wall_median_s": 0.8293528750000001,
+        "wall_mean_s": 0.8297695832,
+        "wall_stddev_s": 0.0048100923304598715,
+        "wall_min_s": 0.8253205,
+        "wall_max_s": 0.8375758750000001,
+        "user_s": 0.8168844,
+        "sys_s": 0.012779400000000002
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "loops",
+      "lang": "python",
+      "source": "bench/peers/python/loops.py",
+      "metrics": {
+        "instructions": 47519372585,
+        "cycles": 10970946736,
+        "max_rss_bytes": 17514496,
+        "peak_footprint_bytes": 7160312,
+        "wall_median_s": 3.297247958,
+        "wall_mean_s": 3.2985300916,
+        "wall_stddev_s": 0.005338747965520588,
+        "wall_min_s": 3.292912666,
+        "wall_max_s": 3.30455325,
+        "user_s": 3.2558694000000004,
+        "sys_s": 0.0333248
+      },
+      "checksum": "64312953",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "toy",
+      "source": "bench/runtime/binary_trees.toy",
+      "metrics": {
+        "instructions": 7545384186,
+        "cycles": 2186087527,
+        "max_rss_bytes": 14680064,
+        "peak_footprint_bytes": 14320072,
+        "wall_median_s": 0.658414959,
+        "wall_mean_s": 0.6629765918,
+        "wall_stddev_s": 0.012834785320797345,
+        "wall_min_s": 0.6539647500000001,
+        "wall_max_s": 0.6856755,
+        "user_s": 0.4386132,
+        "sys_s": 0.22103279999999997
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "c",
+      "source": "bench/peers/c/binary_trees.c",
+      "metrics": {
+        "instructions": 374229062,
+        "cycles": 63142556,
+        "max_rss_bytes": 2211840,
+        "peak_footprint_bytes": 1786240,
+        "wall_median_s": 0.020147042,
+        "wall_mean_s": 0.020231967,
+        "wall_stddev_s": 0.00037635769489542784,
+        "wall_min_s": 0.019808667000000002,
+        "wall_max_s": 0.020713292,
+        "user_s": 0.017442799999999998,
+        "sys_s": 0.0012521999999999998
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "rust",
+      "source": "bench/peers/rust/binary_trees.rs",
+      "metrics": {
+        "instructions": 221577475,
+        "cycles": 46015777,
+        "max_rss_bytes": 2146304,
+        "peak_footprint_bytes": 1556864,
+        "wall_median_s": 0.015190625000000001,
+        "wall_mean_s": 0.015541550000000001,
+        "wall_stddev_s": 0.0009329219273411904,
+        "wall_min_s": 0.014877667,
+        "wall_max_s": 0.017187208000000002,
+        "user_s": 0.012759199999999998,
+        "sys_s": 0.001277
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "go",
+      "source": "bench/peers/go/binary_trees.go",
+      "metrics": {
+        "instructions": 294218231,
+        "cycles": 60608779,
+        "max_rss_bytes": 11124736,
+        "peak_footprint_bytes": 9585144,
+        "wall_median_s": 0.017009167000000002,
+        "wall_mean_s": 0.016782683399999998,
+        "wall_stddev_s": 0.0004241787504959433,
+        "wall_min_s": 0.016194583000000002,
+        "wall_max_s": 0.01713775,
+        "user_s": 0.015887599999999998,
+        "sys_s": 0.003392
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "swift",
+      "source": "bench/peers/swift/binary_trees.swift",
+      "metrics": {
+        "instructions": 722167562,
+        "cycles": 137747123,
+        "max_rss_bytes": 3194880,
+        "peak_footprint_bytes": 2507136,
+        "wall_median_s": 0.043888,
+        "wall_mean_s": 0.04401081660000001,
+        "wall_stddev_s": 0.0010021259802276857,
+        "wall_min_s": 0.043146958000000006,
+        "wall_max_s": 0.045684417000000005,
+        "user_s": 0.039409799999999995,
+        "sys_s": 0.0021348
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "js",
+      "source": "bench/peers/js/binary_trees.js",
+      "metrics": {
+        "instructions": 538475230,
+        "cycles": 150373971,
+        "max_rss_bytes": 64274432,
+        "peak_footprint_bytes": 20532104,
+        "wall_median_s": 0.044802292,
+        "wall_mean_s": 0.0444372248,
+        "wall_stddev_s": 0.0012572453889584158,
+        "wall_min_s": 0.043022542000000004,
+        "wall_max_s": 0.045807916000000004,
+        "user_s": 0.038151,
+        "sys_s": 0.007785199999999999
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "binary_trees",
+      "lang": "python",
+      "source": "bench/peers/python/binary_trees.py",
+      "metrics": {
+        "instructions": 1438530255,
+        "cycles": 284456309,
+        "max_rss_bytes": 18530304,
+        "peak_footprint_bytes": 8225272,
+        "wall_median_s": 0.08939475000000001,
+        "wall_mean_s": 0.08956810000000001,
+        "wall_stddev_s": 0.0008117773264230131,
+        "wall_min_s": 0.08875337500000001,
+        "wall_max_s": 0.090913833,
+        "user_s": 0.0805066,
+        "sys_s": 0.0046754
+      },
+      "checksum": "1348958",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "toy",
+      "source": "bench/runtime/alloc.toy",
+      "metrics": {
+        "instructions": 7396499308,
+        "cycles": 2064784656,
+        "max_rss_bytes": 13287424,
+        "peak_footprint_bytes": 12927456,
+        "wall_median_s": 0.622732417,
+        "wall_mean_s": 0.6262991916,
+        "wall_stddev_s": 0.009827397191894764,
+        "wall_min_s": 0.621053375,
+        "wall_max_s": 0.643818416,
+        "user_s": 0.3899642,
+        "sys_s": 0.233458
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "c",
+      "source": "bench/peers/c/alloc.c",
+      "metrics": {
+        "instructions": 253581245,
+        "cycles": 40287216,
+        "max_rss_bytes": 3784704,
+        "peak_footprint_bytes": 3326312,
+        "wall_median_s": 0.013452875000000001,
+        "wall_mean_s": 0.013586966800000003,
+        "wall_stddev_s": 0.0006523401903042616,
+        "wall_min_s": 0.012960709,
+        "wall_max_s": 0.014532125000000002,
+        "user_s": 0.010723,
+        "sys_s": 0.0013984
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "rust",
+      "source": "bench/peers/rust/alloc.rs",
+      "metrics": {
+        "instructions": 272785453,
+        "cycles": 45983654,
+        "max_rss_bytes": 4767744,
+        "peak_footprint_bytes": 4129104,
+        "wall_median_s": 0.015333958000000002,
+        "wall_mean_s": 0.0154386996,
+        "wall_stddev_s": 0.0004375842064503703,
+        "wall_min_s": 0.015011416000000001,
+        "wall_max_s": 0.016173708000000002,
+        "user_s": 0.012512200000000001,
+        "sys_s": 0.0013739999999999998
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "go",
+      "source": "bench/peers/go/alloc.go",
+      "metrics": {
+        "instructions": 262053761,
+        "cycles": 59833331,
+        "max_rss_bytes": 13041664,
+        "peak_footprint_bytes": 11551272,
+        "wall_median_s": 0.014527458,
+        "wall_mean_s": 0.014661291400000002,
+        "wall_stddev_s": 0.0003931599721154229,
+        "wall_min_s": 0.014182125,
+        "wall_max_s": 0.015159916,
+        "user_s": 0.0149632,
+        "sys_s": 0.0039296
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "swift",
+      "source": "bench/peers/swift/alloc.swift",
+      "metrics": {
+        "instructions": 504550597,
+        "cycles": 93528528,
+        "max_rss_bytes": 6717440,
+        "peak_footprint_bytes": 5964184,
+        "wall_median_s": 0.029861416000000002,
+        "wall_mean_s": 0.029830133400000004,
+        "wall_stddev_s": 0.00024277780546273133,
+        "wall_min_s": 0.029441709000000003,
+        "wall_max_s": 0.030054042000000003,
+        "user_s": 0.025108,
+        "sys_s": 0.0023124
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "js",
+      "source": "bench/peers/js/alloc.js",
+      "metrics": {
+        "instructions": 493444902,
+        "cycles": 156029315,
+        "max_rss_bytes": 75579392,
+        "peak_footprint_bytes": 32756488,
+        "wall_median_s": 0.043014083,
+        "wall_mean_s": 0.042984041400000006,
+        "wall_stddev_s": 0.0010835064527285009,
+        "wall_min_s": 0.041924417000000005,
+        "wall_max_s": 0.044713458000000005,
+        "user_s": 0.0387324,
+        "sys_s": 0.0098898
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "alloc",
+      "lang": "python",
+      "source": "bench/peers/python/alloc.py",
+      "metrics": {
+        "instructions": 1752353013,
+        "cycles": 342114058,
+        "max_rss_bytes": 27410432,
+        "peak_footprint_bytes": 17236472,
+        "wall_median_s": 0.10664208400000001,
+        "wall_mean_s": 0.1070263084,
+        "wall_stddev_s": 0.0009582793275276227,
+        "wall_min_s": 0.10609225000000001,
+        "wall_max_s": 0.108065458,
+        "user_s": 0.09721679999999999,
+        "sys_s": 0.0059012000000000005
+      },
+      "checksum": "500000550000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "toy",
+      "source": "bench/runtime/closures.toy",
+      "metrics": {
+        "instructions": 3827409420,
+        "cycles": 1433792504,
+        "max_rss_bytes": 2506752,
+        "peak_footprint_bytes": 2146760,
+        "wall_median_s": 0.433027084,
+        "wall_mean_s": 0.43298294980000007,
+        "wall_stddev_s": 0.0011207770435569162,
+        "wall_min_s": 0.43188000000000004,
+        "wall_max_s": 0.434726166,
+        "user_s": 0.4177098,
+        "sys_s": 0.012962199999999998
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "c",
+      "source": "bench/peers/c/closures.c",
+      "metrics": {
+        "instructions": 56337671,
+        "cycles": 15865733,
+        "max_rss_bytes": 1671168,
+        "peak_footprint_bytes": 1229160,
+        "wall_median_s": 0.005833209000000001,
+        "wall_mean_s": 0.0058402917999999995,
+        "wall_stddev_s": 0.0004116903264963848,
+        "wall_min_s": 0.005333167000000001,
+        "wall_max_s": 0.006420458,
+        "user_s": 0.0035562000000000002,
+        "sys_s": 0.000997
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "rust",
+      "source": "bench/peers/rust/closures.rs",
+      "metrics": {
+        "instructions": 56901325,
+        "cycles": 15998499,
+        "max_rss_bytes": 1851392,
+        "peak_footprint_bytes": 1245544,
+        "wall_median_s": 0.006079375000000001,
+        "wall_mean_s": 0.006101808200000001,
+        "wall_stddev_s": 0.0002444988174648295,
+        "wall_min_s": 0.0057614580000000006,
+        "wall_max_s": 0.0064010000000000004,
+        "user_s": 0.0038166,
+        "sys_s": 0.0009524000000000002
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "go",
+      "source": "bench/peers/go/closures.go",
+      "metrics": {
+        "instructions": 229966059,
+        "cycles": 79862106,
+        "max_rss_bytes": 11223040,
+        "peak_footprint_bytes": 9650680,
+        "wall_median_s": 0.020219666,
+        "wall_mean_s": 0.0202067748,
+        "wall_stddev_s": 0.0004520147620794039,
+        "wall_min_s": 0.019509625000000003,
+        "wall_max_s": 0.020700666000000003,
+        "user_s": 0.0192574,
+        "sys_s": 0.0054345999999999995
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "swift",
+      "source": "bench/peers/swift/closures.swift",
+      "metrics": {
+        "instructions": 184701508,
+        "cycles": 67050667,
+        "max_rss_bytes": 2277376,
+        "peak_footprint_bytes": 1556840,
+        "wall_median_s": 0.022283167000000003,
+        "wall_mean_s": 0.0225322586,
+        "wall_stddev_s": 0.000746672909163912,
+        "wall_min_s": 0.022050834000000002,
+        "wall_max_s": 0.023855792,
+        "user_s": 0.018534799999999997,
+        "sys_s": 0.0016576
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "js",
+      "source": "bench/peers/js/closures.js",
+      "metrics": {
+        "instructions": 1925709378,
+        "cycles": 384748401,
+        "max_rss_bytes": 61898752,
+        "peak_footprint_bytes": 17172760,
+        "wall_median_s": 0.105229,
+        "wall_mean_s": 0.10543078320000002,
+        "wall_stddev_s": 0.0015520312146363874,
+        "wall_min_s": 0.10328250000000001,
+        "wall_max_s": 0.10721979100000001,
+        "user_s": 0.10516619999999999,
+        "sys_s": 0.008710399999999998
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "closures",
+      "lang": "python",
+      "source": "bench/peers/python/closures.py",
+      "metrics": {
+        "instructions": 7801209876,
+        "cycles": 1262347770,
+        "max_rss_bytes": 18694144,
+        "peak_footprint_bytes": 8258040,
+        "wall_median_s": 0.386574958,
+        "wall_mean_s": 0.387851325,
+        "wall_stddev_s": 0.005544732316640227,
+        "wall_min_s": 0.383258292,
+        "wall_max_s": 0.397349875,
+        "user_s": 0.373857,
+        "sys_s": 0.008071600000000002
+      },
+      "checksum": "8995500000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "toy",
+      "source": "bench/runtime/strings.toy",
+      "metrics": {
+        "instructions": 5767022769,
+        "cycles": 1788755138,
+        "max_rss_bytes": 2523136,
+        "peak_footprint_bytes": 2146784,
+        "wall_median_s": 0.540188542,
+        "wall_mean_s": 0.54485645,
+        "wall_stddev_s": 0.012777086259201535,
+        "wall_min_s": 0.537706958,
+        "wall_max_s": 0.56760825,
+        "user_s": 0.397453,
+        "sys_s": 0.1429012
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "c",
+      "source": "bench/peers/c/strings.c",
+      "metrics": {
+        "instructions": 83376428,
+        "cycles": 34877044,
+        "max_rss_bytes": 1818624,
+        "peak_footprint_bytes": 1343824,
+        "wall_median_s": 0.012434,
+        "wall_mean_s": 0.0124059166,
+        "wall_stddev_s": 0.00080714612058307,
+        "wall_min_s": 0.011509083000000002,
+        "wall_max_s": 0.013626708000000001,
+        "user_s": 0.0095556,
+        "sys_s": 0.0012408
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "rust",
+      "source": "bench/peers/rust/strings.rs",
+      "metrics": {
+        "instructions": 162587127,
+        "cycles": 36741044,
+        "max_rss_bytes": 2179072,
+        "peak_footprint_bytes": 1573224,
+        "wall_median_s": 0.013283667,
+        "wall_mean_s": 0.0130741086,
+        "wall_stddev_s": 0.0005754280511039586,
+        "wall_min_s": 0.012340625000000001,
+        "wall_max_s": 0.013800084,
+        "user_s": 0.010089599999999999,
+        "sys_s": 0.0015092
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "go",
+      "source": "bench/peers/go/strings.go",
+      "metrics": {
+        "instructions": 157057739,
+        "cycles": 40437497,
+        "max_rss_bytes": 8486912,
+        "peak_footprint_bytes": 7029264,
+        "wall_median_s": 0.014353542,
+        "wall_mean_s": 0.0144380332,
+        "wall_stddev_s": 0.001220340191869956,
+        "wall_min_s": 0.01312925,
+        "wall_max_s": 0.016386,
+        "user_s": 0.010819199999999998,
+        "sys_s": 0.0023133999999999993
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "swift",
+      "source": "bench/peers/swift/strings.swift",
+      "metrics": {
+        "instructions": 1025763330,
+        "cycles": 239640815,
+        "max_rss_bytes": 2768896,
+        "peak_footprint_bytes": 1999256,
+        "wall_median_s": 0.07481462500000001,
+        "wall_mean_s": 0.07490373320000002,
+        "wall_stddev_s": 0.0007538072750913824,
+        "wall_min_s": 0.07374641600000001,
+        "wall_max_s": 0.075683917,
+        "user_s": 0.07012879999999999,
+        "sys_s": 0.0023152
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "js",
+      "source": "bench/peers/js/strings.js",
+      "metrics": {
+        "instructions": 907052670,
+        "cycles": 230115162,
+        "max_rss_bytes": 61308928,
+        "peak_footprint_bytes": 16681240,
+        "wall_median_s": 0.070031042,
+        "wall_mean_s": 0.07084545,
+        "wall_stddev_s": 0.0029451589973786677,
+        "wall_min_s": 0.068136666,
+        "wall_max_s": 0.07574858300000001,
+        "user_s": 0.06457379999999999,
+        "sys_s": 0.007866599999999998
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    },
+    {
+      "name": "strings",
+      "lang": "python",
+      "source": "bench/peers/python/strings.py",
+      "metrics": {
+        "instructions": 1080979829,
+        "cycles": 200949947,
+        "max_rss_bytes": 18022400,
+        "peak_footprint_bytes": 7651808,
+        "wall_median_s": 0.063342875,
+        "wall_mean_s": 0.0636574164,
+        "wall_stddev_s": 0.001237284278307659,
+        "wall_min_s": 0.062013416,
+        "wall_max_s": 0.065209708,
+        "user_s": 0.05570280000000001,
+        "sys_s": 0.004191800000000001
+      },
+      "checksum": "1558000",
+      "checksum_ok": true
+    }
+  ]
+}

@@ -73,3 +73,7 @@ run = "pnpm build"
 [tasks.bench]
 description = "Run the benchmarks on the working tree: [--runs N] [FILTER]"
 run = "bash bench/run.sh"
+
+[tasks."bench:peers"]
+description = "Run the runtime benchmarks as toy and as peer programs: [--runs N] [FILTER]"
+run = "bash bench/peers/run.sh"
