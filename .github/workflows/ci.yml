@@ -7,15 +7,40 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # A cancelled main run would skip its Pages deploy.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The newest run deploys Pages too, so an older main run is safe to cancel.
+  cancel-in-progress: true
 
 # The backend emits arm64 macOS Mach-O executables and ad-hoc code-signs them;
 # the run/emit tests SkipZigTest on anything but macos+aarch64. Every job therefore
 # runs on an Apple-Silicon macOS runner, or the whole backend would silently no-op.
 # Tools come from mise (pinned in mise.toml).
 jobs:
+  # A push that only records bench history needs the site rebuilt, not the Zig suite.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          code=true
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            files=$(git diff --name-only "$BASE" HEAD)
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -vxF 'bench/history.jsonl' | grep -q .; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Zig tests (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -38,6 +63,8 @@ jobs:
         run: zig build test --summary all
 
   gates:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Cache and opt gates (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -65,6 +92,8 @@ jobs:
         run: bash bench/record-test.sh
 
   fuzz:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Bounded fuzz (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -89,6 +118,8 @@ jobs:
           FUZZ_ITERS: "5000"
 
   lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: fmt + release build (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -153,8 +184,9 @@ jobs:
 
   pages:
     name: Deploy docs site
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, gates, fuzz, lint, site]
+    # Skipped Zig jobs (a history-only push) must not block the deploy; failed ones must.
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [changes, test, gates, fuzz, lint, site]
     runs-on: ubuntu-latest
     permissions:
       actions: read
