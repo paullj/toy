@@ -44,6 +44,7 @@ pub const Reloc = reloc.Reloc;
 pub const symtab_base_hash = reloc.symtab_base_hash;
 pub const desc_table_base_hash = reloc.desc_table_base_hash;
 pub const gc_stackmap_base_hash = reloc.gc_stackmap_base_hash;
+pub const bss_size = reloc.bss_size;
 
 /// The per-type descriptor sentinel a `descriptor_of[T]()` `cstr_ptr` reloc carries: the
 /// reserved `0xDE5C` prefix OR'd with a 48-bit Wyhash of `T`'s structural key bytes, so
@@ -850,8 +851,8 @@ fn fnLinkJob(
 /// Patch the cross-segment relocations `link` could not resolve, now that MachO
 /// has assigned every segment's vmaddr. `text` is the __text bytes in the final
 /// image; each reloc's `site` is already absolute within __text. `text_vmaddr`
-/// is the runtime address __text loads at; `cstring_vmaddr`/`got_vmaddr` are the
-/// __cstring section and __got section base vmaddrs.
+/// is the runtime address __text loads at; `cstring_vmaddr`/`got_vmaddr`/`bss_vmaddr`
+/// are the __cstring, __got and __bss section base vmaddrs.
 ///
 /// The page delta uses the 4096-byte ARM page (`>>12`), NOT the 0x4000 Mach-O
 /// page. Because every segment is page-aligned in the same image, the deltas are
@@ -863,6 +864,7 @@ pub fn applyDataRelocs(
     text_vmaddr: u64,
     cstring_vmaddr: u64,
     got_vmaddr: u64,
+    bss_vmaddr: u64,
     import_slots: *const std.StringHashMapUnmanaged(u32),
 ) void {
     // PARALLEL per-reloc PATCH: each reloc patches a UNIQUE disjoint 4-byte site
@@ -876,9 +878,10 @@ pub fn applyDataRelocs(
         text_vmaddr: u64,
         cstring_vmaddr: u64,
         got_vmaddr: u64,
+        bss_vmaddr: u64,
         import_slots: *const std.StringHashMapUnmanaged(u32),
         pub fn args(c: @This(), i: usize) std.meta.ArgsTuple(@TypeOf(dataRelocJob)) {
-            return .{ c.text, c.data_relocs[i], c.text_vmaddr, c.cstring_vmaddr, c.got_vmaddr, c.import_slots };
+            return .{ c.text, c.data_relocs[i], c.text_vmaddr, c.cstring_vmaddr, c.got_vmaddr, c.bss_vmaddr, c.import_slots };
         }
     };
     // chunk the per-reloc patch into ~ncpu ranges. Reloc COUNT is usually
@@ -890,6 +893,7 @@ pub fn applyDataRelocs(
         .text_vmaddr = text_vmaddr,
         .cstring_vmaddr = cstring_vmaddr,
         .got_vmaddr = got_vmaddr,
+        .bss_vmaddr = bss_vmaddr,
         .import_slots = import_slots,
     });
 }
@@ -903,6 +907,7 @@ fn dataRelocJob(
     text_vmaddr: u64,
     cstring_vmaddr: u64,
     got_vmaddr: u64,
+    bss_vmaddr: u64,
     import_slots: *const std.StringHashMapUnmanaged(u32),
 ) void {
     const site_vmaddr: u64 = text_vmaddr + rl.site;
@@ -910,8 +915,9 @@ fn dataRelocJob(
         // The relink tail already rewrote the content hash to a blob offset.
         .cstr => |off| cstring_vmaddr + off,
         .import => |s| got_vmaddr + @as(u64, import_slots.get(s.name).?) * 8,
+        .data => |off| bss_vmaddr + off,
         .text_off => |off| text_vmaddr + off,
-        // Only cross-segment targets (`.cstr`/`.import`/`.text_off`) reach `applyDataRelocs`.
+        // Only cross-segment targets (`.cstr`/`.import`/`.data`/`.text_off`) reach `applyDataRelocs`.
         .func, .none => unreachable,
     };
     const word = std.mem.readInt(u32, text[rl.site..][0..4], .little);
@@ -949,12 +955,12 @@ const FnHeader = extern struct {
 const RelocRec = extern struct {
     site: u32,
     kind: u8,
-    tgt_tag: u8, // 0=func, 1=cstr, 2=import (matches SymbolId field order)
+    tgt_tag: u8, // 0=func, 1=cstr, 2=import, 3=none, 4=data (matches SymbolId field order)
     tgt_kind: u8, // SymKind for func/import; 0 for cstr
     _pad: u8 = 0,
     name_off: u32, // into the names pool (func/import); 0 for cstr
     name_len: u32, // 0 for cstr
-    cstr_hash: u64, // content hash for cstr; 0 otherwise
+    cstr_hash: u64, // content hash for cstr, byte offset for data; 0 otherwise
     addend: i64,
 };
 
@@ -1042,6 +1048,10 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
                 name_cursor += @intCast(s.name.len);
             },
             .none => rec.tgt_tag = 3,
+            .data => |bss_off| {
+                rec.tgt_tag = 4;
+                rec.cstr_hash = bss_off;
+            },
             .text_off => return error.UnserializableReloc,
         }
         @memcpy(buf[off .. off + @sizeOf(RelocRec)], std.mem.asBytes(&rec));
@@ -1136,6 +1146,7 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
             },
             1 => SymbolId{ .cstr = rec.cstr_hash },
             3 => SymbolId.none,
+            4 => SymbolId{ .data = std.math.cast(u32, rec.cstr_hash) orelse return null },
             else => return null,
         };
         out_rl.* = .{ .site = rec.site, .target = target, .kind = kind, .addend = rec.addend };
@@ -1798,7 +1809,7 @@ test "a .func adrp/add pair resolves in the cross pass to the callee's text addr
     defer threaded.deinit();
     var import_slots: std.StringHashMapUnmanaged(u32) = .empty;
     const text_vmaddr: u64 = 0x100000460;
-    applyDataRelocs(threaded.io(), linked.text, linked.data_relocs, text_vmaddr, 0, 0, &import_slots);
+    applyDataRelocs(threaded.io(), linked.text, linked.data_relocs, text_vmaddr, 0, 0, 0, &import_slots);
     const add_word = std.mem.readInt(u32, linked.text[8..12], .little);
     try testing.expectEqual(@as(u32, @truncate((text_vmaddr + 16) & 0xFFF)), (add_word >> 10) & 0xFFF);
     try testing.expectEqual(Aarch64.adrp(9, 0), std.mem.readInt(u32, linked.text[4..8], .little)); // same 4 KiB page
@@ -1865,29 +1876,42 @@ test "applyDataRelocs reproduces clang adrp/add/ldr words" {
         var w: [4]u8 = undefined;
         std.mem.writeInt(u32, &w, Aarch64.adrp(8, 0), .little);
         const r = [_]Reloc{.{ .site = 0, .target = .{ .cstr = 0 }, .kind = .adrp_page }};
-        applyDataRelocs(io, &w, &r, base + 0x478, cstring_vmaddr, got_vmaddr, &import_slots);
+        applyDataRelocs(io, &w, &r, base + 0x478, cstring_vmaddr, got_vmaddr, 0, &import_slots);
         try testing.expectEqual(@as(u32, 0x90000008), std.mem.readInt(u32, &w, .little));
     }
     {
         var w: [4]u8 = undefined;
         std.mem.writeInt(u32, &w, Aarch64.addImm(8, 8, 0), .little);
         const r = [_]Reloc{.{ .site = 0, .target = .{ .cstr = 0 }, .kind = .add_lo12 }};
-        applyDataRelocs(io, &w, &r, base + 0x47c, cstring_vmaddr, got_vmaddr, &import_slots);
+        applyDataRelocs(io, &w, &r, base + 0x47c, cstring_vmaddr, got_vmaddr, 0, &import_slots);
         try testing.expectEqual(@as(u32, 0x9112C108), std.mem.readInt(u32, &w, .little));
     }
     {
         var w: [4]u8 = undefined;
         std.mem.writeInt(u32, &w, Aarch64.adrp(16, 0), .little);
         const r = [_]Reloc{.{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = "write" } }, .kind = .adrp_page }};
-        applyDataRelocs(io, &w, &r, base + 0x4a4, cstring_vmaddr, got_vmaddr, &import_slots);
+        applyDataRelocs(io, &w, &r, base + 0x4a4, cstring_vmaddr, got_vmaddr, 0, &import_slots);
         try testing.expectEqual(@as(u32, 0x90000030), std.mem.readInt(u32, &w, .little));
     }
     {
         var w: [4]u8 = undefined;
         std.mem.writeInt(u32, &w, Aarch64.ldrRegUoff(16, 16, 0), .little);
         const r = [_]Reloc{.{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = "write" } }, .kind = .ldr_lo12 }};
-        applyDataRelocs(io, &w, &r, base + 0x4a8, cstring_vmaddr, got_vmaddr, &import_slots);
+        applyDataRelocs(io, &w, &r, base + 0x4a8, cstring_vmaddr, got_vmaddr, 0, &import_slots);
         try testing.expectEqual(@as(u32, 0xF9400210), std.mem.readInt(u32, &w, .little));
+    }
+    {
+        // A `.data` target resolves against the __bss base: two 4 KiB pages up, +0x10.
+        var w: [8]u8 = undefined;
+        std.mem.writeInt(u32, w[0..4], Aarch64.adrp(9, 0), .little);
+        std.mem.writeInt(u32, w[4..8], Aarch64.addImm(9, 9, 0), .little);
+        const r = [_]Reloc{
+            .{ .site = 0, .target = .{ .data = 0x10 }, .kind = .adrp_page },
+            .{ .site = 4, .target = .{ .data = 0x10 }, .kind = .add_lo12 },
+        };
+        applyDataRelocs(io, &w, &r, base + 0x478, cstring_vmaddr, got_vmaddr, base + 0x2000, &import_slots);
+        try testing.expectEqual(Aarch64.adrp(9, 2), std.mem.readInt(u32, w[0..4], .little));
+        try testing.expectEqual(Aarch64.addImm(9, 9, 0x10), std.mem.readInt(u32, w[4..8], .little));
     }
 }
 
@@ -1920,6 +1944,7 @@ test "FnCode pack/unpack round-trips relocs, names, literals and line rows" {
         .{ .site = 0, .target = .{ .func = .{ .kind = .user_fn, .name = "add" } }, .kind = .call26 },
         .{ .site = 4, .target = .{ .cstr = 0xDEADBEEF }, .kind = .adrp_page, .addend = 3 },
         .{ .site = 4, .target = .{ .import = .{ .kind = .import, .name = "write" } }, .kind = .ldr_lo12 },
+        .{ .site = 0, .target = .{ .data = 0x40 }, .kind = .adrp_page },
     });
     const lit_bytes = try gpa.dupe(u8, "hi");
     const literals = try gpa.dupe(Literal, &.{.{ .hash = 0x1234, .bytes = lit_bytes }});
@@ -1948,11 +1973,12 @@ test "FnCode pack/unpack round-trips relocs, names, literals and line rows" {
     try testing.expect(got.sym.eql(fc.sym));
     try testing.expectEqualSlices(u8, fc.code, got.code);
     try testing.expectEqualSlices(u8, fc.root_bitmap, got.root_bitmap);
-    try testing.expectEqual(@as(usize, 3), got.relocs.len);
+    try testing.expectEqual(@as(usize, 4), got.relocs.len);
     try testing.expect(got.relocs[0].target.func.eql(.{ .kind = .user_fn, .name = "add" }));
     try testing.expectEqual(@as(u64, 0xDEADBEEF), got.relocs[1].target.cstr);
     try testing.expectEqual(@as(i64, 3), got.relocs[1].addend);
     try testing.expect(got.relocs[2].target.import.eql(.{ .kind = .import, .name = "write" }));
+    try testing.expectEqual(@as(u32, 0x40), got.relocs[3].target.data);
     try testing.expectEqual(@as(usize, 1), got.literals.len);
     try testing.expectEqual(@as(u64, 0x1234), got.literals[0].hash);
     try testing.expectEqualSlices(u8, "hi", got.literals[0].bytes);

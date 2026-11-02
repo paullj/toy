@@ -44,7 +44,7 @@ pub const hand_builtins = [_]HandBuiltin{
 
 /// Every C symbol a hand-emitted builtin imports, sorted. They bind to libSystem, so
 /// a user `extern` block that names one for another library is a conflict.
-pub const libsystem_imports = [_][]const u8{ "calloc", "free", "malloc", "mmap", "msync", "munmap", "realloc", "write" };
+pub const libsystem_imports = [_][]const u8{ "calloc", "free", "malloc", "mmap", "munmap", "realloc", "write" };
 
 /// The `hand_builtins` index of `name`, resolved at comptime — lets a caller name
 /// a specific builtin (e.g. `panic`, which drives the backtrace symbol table)

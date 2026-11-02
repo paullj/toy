@@ -34,6 +34,8 @@ pub const SymName = symbols.SymName;
 ///   * `.none`   — no target. For a reloc whose patched value is derived purely from its
 ///                 own site + addend (the `.movw_g0`/`.movw_g1` self-locate), so there is
 ///                 nothing to name or free.
+///   * `.data`   — a byte offset into the writable zero-fill `__DATA,__bss` section
+///                 (the GC control block). Patched by the cross-segment pass.
 ///   * `.text_off` — a `__text` byte offset, link-internal: `link` rewrites a `.func`
 ///                 address reloc (adrp/add of a function) to it once the callee's offset
 ///                 is known, so the cross-segment pass needs no symbol table. Never
@@ -43,6 +45,7 @@ pub const SymbolId = union(enum) {
     cstr: u64,
     import: SymName,
     none,
+    data: u32,
     text_off: u32,
 
     /// The heap-owned name this target carries, if any. THE single source of truth for
@@ -51,7 +54,7 @@ pub const SymbolId = union(enum) {
     pub fn name(self: SymbolId) ?[]const u8 {
         return switch (self) {
             .func, .import => |s| s.name,
-            .cstr, .none, .text_off => null,
+            .cstr, .none, .data, .text_off => null,
         };
     }
 };
@@ -164,6 +167,10 @@ pub const desc_table_base_hash: u64 = 0xDE5C_0000_0000_0000;
 /// `.cstr` path (no new `RelocKind`/`SymbolId`). The collector loads the table base through
 /// it to look up a frame's precise root map.
 pub const gc_stackmap_base_hash: u64 = 0x57AC_C0DE_BA5E_0000;
+
+/// Bytes of the writable zero-fill `__bss` an image gets when any reloc targets `.data`.
+/// Only the GC control block lives there; it asserts it fits.
+pub const bss_size: u32 = 256;
 
 comptime {
     std.debug.assert(gc_stackmap_base_hash != symtab_base_hash and

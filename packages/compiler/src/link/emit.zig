@@ -455,7 +455,10 @@ pub fn assembleAndSign(
     }
     for (names, 0..) |nm, i| imports[i] = .{ .name = try std.fmt.allocPrint(gpa, "_{s}", .{nm}), .ordinal = libs.ordinalOf(nm) };
 
-    const layout = try MachO.assemble(gpa, identifier, code, entry_off, cstrings, imports, libs.load(), debug);
+    const wants_bss = for (data_relocs) |rl| {
+        if (rl.target == .data) break true;
+    } else false;
+    const layout = try MachO.assemble(gpa, identifier, code, entry_off, cstrings, imports, libs.load(), debug, if (wants_bss) Link.bss_size else 0);
     errdefer gpa.free(layout.image);
 
     // Slot i binds the i-th sorted import; `applyDataRelocs` looks each `.import`
@@ -475,6 +478,7 @@ pub fn assembleAndSign(
             layout.text_vmaddr + layout.code_file_off,
             layout.cstring_vmaddr,
             layout.got_vmaddr,
+            layout.bss_vmaddr,
             &import_slots,
         );
     }
@@ -683,7 +687,7 @@ test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and 
 }
 
 /// One owned `FnCode` `main` whose body is `bl gc_alloc ; ret` — a `.call26` to the
-/// hand-emitted `gc_alloc` builtin, which drags in its body plus the `msync`/`mmap`
+/// hand-emitted `gc_alloc` builtin, which drags in its body plus the `mmap`
 /// imports. Fresh each call so both determinism-test runs get their own to consume.
 fn gcFns(gpa: std.mem.Allocator) ![]Link.FnCode {
     const fns = try gpa.alloc(Link.FnCode, 1);
@@ -697,7 +701,7 @@ fn gcFns(gpa: std.mem.Allocator) ![]Link.FnCode {
 }
 
 test "backend determinism: a gc_alloc-using image is byte-identical at -j1 and -jN" {
-    // The appended allocator body + its derived `msync`/`mmap` GOT imports must be a
+    // The appended allocator body + its derived `mmap` GOT import must be a
     // pure function of the fn set (the body is fixed AArch64; the imports are dedup+
     // sorted by name), so the whole image is identical regardless of thread count.
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
@@ -719,6 +723,9 @@ test "backend determinism: a gc_alloc-using image is byte-identical at -j1 and -
     defer gpa.free(img_par);
 
     try testing.expectEqualSlices(u8, img_serial, img_par);
+    // The control block's `.data` relocs are what make the linker add the zero-fill segment.
+    try testing.expect(std.mem.indexOf(u8, img_serial, "__bss") != null);
+    try testing.expect(std.mem.indexOf(u8, img_serial, "_msync") == null);
 }
 
 test "backend determinism: the gc stack-map table (riding __cstring) is byte-identical at -j1 and -jN" {

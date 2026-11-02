@@ -23,6 +23,10 @@
 //!   LC_MAIN, LC_LOAD_DYLIB libSystem, an LC_LOAD_DYLIB per user library and the
 //!   LC_RPATHs they need, LC_CODE_SIGNATURE (LAST).
 //! A user library also forces this path, even with no import, so dyld loads it.
+//! A program that links the GC adds a zero-fill `__DATA(+__bss)` segment after
+//! __DATA_CONST for the collector's control block: LC_MAIN gives no init hook, and
+//! __DATA_CONST turns read-only once dyld binds it, so mutable globals need their own
+//! segment. It has no file bytes; the segments after it load one page higher.
 //! A debug build adds LC_SYMTAB + LC_DYSYMTAB to either layout (`Symtab`), right after
 //! LC_DYLD_CHAINED_FIXUPS, with the nlists and strings in __LINKEDIT between the fixups
 //! blob and the signature. Its DWARF (`Dwarf.Sections`) takes the multi-segment path and
@@ -85,6 +89,8 @@ const S_CSTRING_LITERALS: u32 = 0x2;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 0x6;
 // __DATA_CONST is read-only after dyld binds it.
 const SG_READ_ONLY: u32 = 0x10;
+// __bss section type: zero-filled on demand, no file bytes.
+const S_ZEROFILL: u32 = 0x1;
 const S_ATTR_DEBUG: u32 = 0x02000000;
 
 /// One dyld-imported external symbol, named by its dyld-facing linkage name (with
@@ -326,6 +332,8 @@ pub const Layout = struct {
     /// Runtime address of the `__got` section base (multi-seg path only; 0 when
     /// there are no imports).
     got_vmaddr: u64 = 0,
+    /// Runtime address of the zero-fill `__bss` section (0 when none was asked for).
+    bss_vmaddr: u64 = 0,
 };
 
 /// Assemble the image with the code-signature region reserved (and currently
@@ -336,7 +344,9 @@ pub const Layout = struct {
 /// `imports` the dyld symbols to bind. When BOTH are empty this is a pure code-only
 /// program and we take the unchanged single-__TEXT layout; otherwise the
 /// multi-segment path (__cstring section + __DATA_CONST/__got + a real
-/// chained-fixups blob). `assemble` neither patches cross-segment relocs nor
+/// chained-fixups blob). A nonzero `bss_size` adds a writable zero-fill
+/// `__DATA,__bss` segment of that many bytes after `__DATA_CONST`; it costs no file
+/// bytes. `assemble` neither patches cross-segment relocs nor
 /// signs; that sign-last order lives in `link/emit.zig`'s `assembleAndSign`.
 pub fn assemble(
     gpa: std.mem.Allocator,
@@ -347,11 +357,12 @@ pub fn assemble(
     imports: []const Import,
     libs: Libraries,
     debug: Debug,
+    bss_size: u32,
 ) !Layout {
-    if (cstrings.len == 0 and imports.len == 0 and libs.isEmpty() and debug.dwarf.isEmpty()) {
+    if (cstrings.len == 0 and imports.len == 0 and libs.isEmpty() and debug.dwarf.isEmpty() and bss_size == 0) {
         return assembleEmpty(gpa, identifier, code, entry_text_off, debug.symtab);
     }
-    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs, debug);
+    return assembleMulti(gpa, identifier, code, entry_text_off, cstrings, imports, libs, debug, bss_size);
 }
 
 /// The unchanged single-segment layout (no __cstring, no imports). Kept
@@ -516,6 +527,7 @@ fn assembleEmpty(gpa: std.mem.Allocator, identifier: []const u8, code: []const u
 
 const NCMDS_MULTI: u32 = 9; // +1 over the empty path (the __DATA_CONST segment)
 const DATAC_SEG_CMD_SIZE: u32 = SEG_CMD_SIZE + SECT_SIZE; // one section (__got)
+const BSS_SEG_CMD_SIZE: u32 = SEG_CMD_SIZE + SECT_SIZE; // one section (__bss)
 
 const SIZEOFCMDS_MULTI: u32 = SEG_CMD_SIZE + // __PAGEZERO
     SEG_CMD_SIZE + 2 * SECT_SIZE + // __TEXT + __text + __cstring
@@ -540,11 +552,14 @@ fn assembleMulti(
     imports: []const Import,
     libs: Libraries,
     debug: Debug,
+    bss_size: u32,
 ) !Layout {
     std.debug.assert(libs.dylibs.len <= Libraries.max_dylibs);
     const symtab = debug.symtab;
-    const ncmds: u32 = NCMDS_MULTI + libs.cmdsCount() + symtab.cmdsCount() + debug.dwarfCmdsCount();
-    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + libs.cmdsSize() + symtab.cmdsSize() + debug.dwarfCmdsSize();
+    const has_bss = bss_size > 0;
+    const bss_segs: u32 = @intFromBool(has_bss);
+    const ncmds: u32 = NCMDS_MULTI + bss_segs + libs.cmdsCount() + symtab.cmdsCount() + debug.dwarfCmdsCount();
+    const sizeofcmds: u32 = SIZEOFCMDS_MULTI + bss_segs * BSS_SEG_CMD_SIZE + libs.cmdsSize() + symtab.cmdsSize() + debug.dwarfCmdsSize();
     const code_file_off: u32 = std.mem.alignForward(u32, HEADER_SIZE + sizeofcmds, 4);
     const text_size: u32 = @intCast(code.len);
 
@@ -572,7 +587,7 @@ fn assembleMulti(
     const linkedit_off: u32 = dwarf_off + @as(u32, @intCast(std.mem.alignForward(u64, dwarf_size, PAGE)));
     const fixups_off: u32 = linkedit_off;
 
-    const fixups_blob = try buildChainedFixups(gpa, imports, datac_file_off, NSEGS_MULTI + debug.dwarfCmdsCount(), DATAC_SEG_INDEX);
+    const fixups_blob = try buildChainedFixups(gpa, imports, datac_file_off, NSEGS_MULTI + bss_segs + debug.dwarfCmdsCount(), DATAC_SEG_INDEX);
     defer gpa.free(fixups_blob);
 
     const after_fixups: u32 = fixups_off + @as(u32, @intCast(fixups_blob.len));
@@ -583,11 +598,14 @@ fn assembleMulti(
     const total: u32 = sig_file_off + sig_len;
     const le_filesize: u32 = total - linkedit_off;
 
-    // Segment vmaddrs (one page each): __TEXT at BASE, __DATA_CONST one page up,
-    // __LINKEDIT two pages up.
+    // Segment vmaddrs: __TEXT at BASE, __DATA_CONST the page after it, then the bss
+    // (when present). The bss has no file bytes, so every segment after it loads
+    // `bss_vmsize` above its file offset.
     const text_vmaddr: u64 = BASE; // section addr is BASE + file off
     const datac_vmaddr: u64 = BASE + datac_file_off;
-    const linkedit_vmaddr: u64 = BASE + linkedit_off;
+    const bss_vmaddr: u64 = datac_vmaddr + PAGE;
+    const bss_vmsize: u64 = std.mem.alignForward(u64, bss_size, PAGE);
+    const linkedit_vmaddr: u64 = BASE + linkedit_off + bss_vmsize;
     const cstring_vmaddr: u64 = BASE + cstring_file_off;
     const got_vmaddr: u64 = datac_vmaddr; // __got is at __DATA_CONST's base
 
@@ -682,12 +700,40 @@ fn assembleMulti(
     w.put32(0);
     w.put32(0);
 
-    // [3] __DWARF, when present.
+    // [3] __DATA (+ __bss), when asked for. It stays writable after dyld (no
+    // SG_READ_ONLY), which is the point: the GC's control block lives here.
+    if (has_bss) {
+        w.put32(LC_SEGMENT_64);
+        w.put32(BSS_SEG_CMD_SIZE);
+        w.name16("__DATA");
+        w.put64(bss_vmaddr);
+        w.put64(bss_vmsize);
+        w.put64(dwarf_off);
+        w.put64(0); // filesize: zero-fill
+        w.put32(VM_PROT_READ | VM_PROT_WRITE);
+        w.put32(VM_PROT_READ | VM_PROT_WRITE);
+        w.put32(1); // __bss
+        w.put32(0);
+        w.name16("__bss");
+        w.name16("__DATA");
+        w.put64(bss_vmaddr);
+        w.put64(bss_size);
+        w.put32(0); // zero-fill sections have no file offset
+        w.put32(4); // align 2^4 = 16
+        w.put32(0);
+        w.put32(0);
+        w.put32(S_ZEROFILL);
+        w.put32(0);
+        w.put32(0);
+        w.put32(0);
+    }
+
+    // [3..4] __DWARF, when present.
     if (!debug.dwarf.isEmpty()) {
         w.put32(LC_SEGMENT_64);
         w.put32(debug.dwarfCmdsSize());
         w.name16("__DWARF");
-        w.put64(BASE + dwarf_off);
+        w.put64(BASE + dwarf_off + bss_vmsize);
         w.put64(0); // vmsize: dyld maps none of it
         w.put64(dwarf_off);
         w.put64(dwarf_size);
@@ -699,7 +745,7 @@ fn assembleMulti(
         for (debug.dwarf.parts()) |p| {
             w.name16(p.name);
             w.name16("__DWARF");
-            w.put64(BASE + at);
+            w.put64(BASE + at + bss_vmsize);
             w.put64(p.bytes.len);
             w.put32(at);
             w.put32(0); // align 2^0
@@ -713,7 +759,7 @@ fn assembleMulti(
         }
     }
 
-    // [3] or [4] __LINKEDIT
+    // [3..5] __LINKEDIT
     w.segment("__LINKEDIT", .{
         .vmaddr = linkedit_vmaddr,
         // vmsize must cover filesize; round up so it can never be smaller.
@@ -811,6 +857,7 @@ fn assembleMulti(
         .text_vmaddr = text_vmaddr,
         .cstring_vmaddr = cstring_vmaddr,
         .got_vmaddr = got_vmaddr,
+        .bss_vmaddr = if (has_bss) bss_vmaddr else 0,
     };
 }
 
@@ -1057,7 +1104,7 @@ fn rd64(image: []const u8, off: usize) u64 {
 }
 
 test "header fields" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1075,7 +1122,7 @@ test "header fields" {
 }
 
 test "segments and load command order" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1102,7 +1149,7 @@ test "segments and load command order" {
 }
 
 test "__PAGEZERO / __TEXT / __LINKEDIT geometry" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1131,7 +1178,7 @@ test "__PAGEZERO / __TEXT / __LINKEDIT geometry" {
 }
 
 test "chained fixups, LC_MAIN entryoff, and sig placement" {
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1172,7 +1219,7 @@ test "chained fixups, LC_MAIN entryoff, and sig placement" {
 test "nonzero entry_text_off shifts LC_MAIN entryoff" {
     // When `main` is not first in __text, its resolved offset is non-zero and the
     // entryoff must be code_file_off + that offset (so the kernel jumps to main).
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 8, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 8, &.{}, &.{}, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1199,7 +1246,7 @@ test "code spanning multiple pages grows __TEXT instead of being rejected" {
     // 4-byte-aligned blob so the layout assertions hold (real code is too).
     std.mem.writeInt(u32, big[0..4], 0xD65F03C0, .little); // ret at entry
 
-    const layout = try assemble(gpa, "stub", big, 0, &.{}, &.{}, .{}, .{});
+    const layout = try assemble(gpa, "stub", big, 0, &.{}, &.{}, .{}, .{}, 0);
     defer gpa.free(layout.image);
 
     // header+cmds+PAGE bytes of code spill into a second page -> __TEXT is 2 pages.
@@ -1243,7 +1290,7 @@ test "buildChainedFixups reproduces the clang 96-byte blob" {
 }
 
 test "multi-seg: 9 commands in the expected order" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1271,7 +1318,7 @@ test "multi-seg: 9 commands in the expected order" {
 }
 
 test "multi-seg: __TEXT has __text + __cstring; __cstring carries the bytes" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1296,7 +1343,7 @@ test "multi-seg: __TEXT has __text + __cstring; __cstring carries the bytes" {
 }
 
 test "multi-seg: __DATA_CONST geometry, __got, and the seeded slot" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1322,6 +1369,46 @@ test "multi-seg: __DATA_CONST geometry, __got, and the seeded slot" {
     try testing.expectEqual(GOT_BIND_SENTINEL, rd64(img, got_off));
 }
 
+test "multi-seg: a bss request adds a zero-fill rw __DATA,__bss segment after __DATA_CONST" {
+    const gpa = testing.allocator;
+    const plain = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
+    defer gpa.free(plain.image);
+    const layout = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 216);
+    defer gpa.free(layout.image);
+    const img = layout.image;
+
+    try testing.expectEqual(NCMDS_MULTI + 1, rd32(img, 16));
+    try testing.expectEqual(SIZEOFCMDS_MULTI + SEG_CMD_SIZE + SECT_SIZE, rd32(img, 20));
+    // Zero-fill takes no file bytes: only the extra load command grows the image.
+    try testing.expectEqual(plain.image.len, img.len);
+
+    const dc = HEADER_SIZE + SEG_CMD_SIZE + (SEG_CMD_SIZE + 2 * SECT_SIZE);
+    const ds = dc + DATAC_SEG_CMD_SIZE;
+    try testing.expectEqual(LC_SEGMENT_64, rd32(img, ds));
+    try testing.expectEqualStrings("__DATA", std.mem.sliceTo(img[ds + 8 ..][0..16], 0));
+    try testing.expectEqual(BASE + 2 * PAGE, rd64(img, ds + 24)); // vmaddr: right after __DATA_CONST
+    try testing.expectEqual(PAGE, rd64(img, ds + 32)); // vmsize: whole pages
+    try testing.expectEqual(@as(u64, 0), rd64(img, ds + 48)); // filesize: zero-fill
+    try testing.expectEqual(VM_PROT_READ | VM_PROT_WRITE, rd32(img, ds + 56));
+    try testing.expectEqual(VM_PROT_READ | VM_PROT_WRITE, rd32(img, ds + 60));
+    try testing.expectEqual(@as(u32, 0), rd32(img, ds + 68)); // stays writable after dyld
+    const bss = ds + SEG_CMD_SIZE;
+    try testing.expectEqualStrings("__bss", std.mem.sliceTo(img[bss..][0..16], 0));
+    try testing.expectEqual(layout.bss_vmaddr, rd64(img, bss + 32));
+    try testing.expectEqual(BASE + 2 * PAGE, layout.bss_vmaddr);
+    try testing.expectEqual(@as(u64, 216), rd64(img, bss + 40));
+    try testing.expectEqual(S_ZEROFILL, rd32(img, bss + 64));
+
+    // __LINKEDIT keeps its file offset but loads one page higher, past the bss.
+    const le = ds + SEG_CMD_SIZE + SECT_SIZE;
+    try testing.expectEqualStrings("__LINKEDIT", std.mem.sliceTo(img[le + 8 ..][0..16], 0));
+    try testing.expectEqual(BASE + 3 * PAGE, rd64(img, le + 24));
+    try testing.expectEqual(2 * PAGE, rd64(img, le + 40));
+    // The chained-fixups segment table counts the extra segment.
+    const fx = rd32(img, le + SEG_CMD_SIZE + 8);
+    try testing.expectEqual(NSEGS_MULTI + 1, rd32(img, fx + 0x20));
+}
+
 test "gotBindValue: chained-fixups bind encoding matches the clang 2-import reference" {
     // N=1 is bit-identical to the historical single-import sentinel (byte-identity of
     // the whole print/panic corpus rests on this).
@@ -1340,7 +1427,7 @@ test "gotBindValue: chained-fixups bind encoding matches the clang 2-import refe
 test "multi-seg: two imports seed two chained __got slots + ordered import/symbol tables" {
     // Imports arrive in canonical (name-sorted) slot order: labs (0) before write (1).
     const two = [_]Import{ .{ .name = "_labs" }, .{ .name = "_write" } };
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &two, .{}, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &two, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1363,7 +1450,7 @@ test "multi-seg: two imports seed two chained __got slots + ordered import/symbo
 }
 
 test "multi-seg: fixups blob + sig placement, sig last" {
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1398,7 +1485,7 @@ test "multi-seg: user dylibs follow libSystem, rpaths after them, and imports ca
         .{ .install_name = "/opt/z/lib/libz.1.dylib", .current_version = 0x10203 },
     };
     const rpaths = [_][]const u8{"/opt/ffi/lib"};
-    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &imports, .{ .dylibs = &dylibs, .rpaths = &rpaths }, .{});
+    const layout = try assemble(testing.allocator, "hello", &stub_code, 0, demo_cstrings, &imports, .{ .dylibs = &dylibs, .rpaths = &rpaths }, .{}, 0);
     defer testing.allocator.free(layout.image);
     const img = layout.image;
 
@@ -1439,7 +1526,7 @@ test "multi-seg: user dylibs follow libSystem, rpaths after them, and imports ca
 
 test "a library with no imports still takes the multi-segment path to be loaded" {
     const dylibs = [_]Dylib{.{ .install_name = "/usr/lib/libz.1.dylib" }};
-    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{ .dylibs = &dylibs }, .{});
+    const layout = try assemble(testing.allocator, "stub", &stub_code, 0, &.{}, &.{}, .{ .dylibs = &dylibs }, .{}, 0);
     defer testing.allocator.free(layout.image);
     try testing.expectEqual(NCMDS_MULTI + 1, rd32(layout.image, 16));
 }
@@ -1452,9 +1539,9 @@ test "a symtab adds LC_SYMTAB + LC_DYSYMTAB and its nlists before the signature"
 
     for ([_]bool{ false, true }) |multi| {
         const layout = if (multi)
-            try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st })
+            try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st }, 0)
         else
-            try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .symtab = st });
+            try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .symtab = st }, 0);
         defer gpa.free(layout.image);
         const img = layout.image;
 
@@ -1505,9 +1592,9 @@ test "an empty symtab leaves the image unchanged" {
     const gpa = testing.allocator;
     const st = try Symtab.build(gpa, &.{});
     defer st.deinit(gpa);
-    const a = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st });
+    const a = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{ .symtab = st }, 0);
     defer gpa.free(a.image);
-    const b = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{});
+    const b = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &demo_imports, .{}, .{}, 0);
     defer gpa.free(b.image);
     try testing.expectEqualSlices(u8, b.image, a.image);
 }
@@ -1520,7 +1607,7 @@ test "DWARF rides in a zero-vmsize __DWARF segment before __LINKEDIT, addresses 
     defer dw.deinit(gpa);
 
     // A code-only program takes the multi-segment path once it carries DWARF.
-    const layout = try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .dwarf = dw });
+    const layout = try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .dwarf = dw }, 0);
     defer gpa.free(layout.image);
     const img = layout.image;
     try testing.expectEqual(NCMDS_MULTI + 1, rd32(img, 16));
@@ -1565,4 +1652,40 @@ test "DWARF rides in a zero-vmsize __DWARF segment before __LINKEDIT, addresses 
     }
     // The compile unit's low_pc is the runtime address of __text.
     try testing.expectEqual(layout.text_vmaddr + layout.code_file_off, rd64(img, info_off + dw.info_addrs[0]));
+}
+
+test "with a bss, __DWARF and its sections load bss_vmsize above their file offsets" {
+    const gpa = testing.allocator;
+    const files = [_][]const u8{"main.toy"};
+    const fns = [_]Dwarf.Fn{.{ .name = "main", .text_off = 0, .size = stub_code.len, .file = 0, .rows = &.{.{ .off = 0, .line = 1 }} }};
+    const dw = try Dwarf.build(gpa, .{ .files = &files, .cu_file = 0, .comp_dir = "/", .fns = &fns, .text_size = stub_code.len });
+    defer dw.deinit(gpa);
+
+    const layout = try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{}, .{ .dwarf = dw }, 216);
+    defer gpa.free(layout.image);
+    const img = layout.image;
+
+    var off: usize = HEADER_SIZE;
+    var names: [8][]const u8 = undefined;
+    var nseg: usize = 0;
+    var dwarf_cmd: usize = 0;
+    for (0..rd32(img, 16)) |_| {
+        if (rd32(img, off) == LC_SEGMENT_64) {
+            names[nseg] = std.mem.sliceTo(img[off + 8 ..][0..16], 0);
+            if (std.mem.eql(u8, names[nseg], "__DWARF")) dwarf_cmd = off;
+            nseg += 1;
+        }
+        off += rd32(img, off + 4);
+    }
+    try testing.expectEqual(@as(usize, 6), nseg);
+    try testing.expectEqualStrings("__DATA", names[3]);
+    try testing.expectEqualStrings("__DWARF", names[4]);
+    try testing.expectEqualStrings("__LINKEDIT", names[5]);
+
+    try testing.expectEqual(BASE + rd64(img, dwarf_cmd + 40) + PAGE, rd64(img, dwarf_cmd + 24));
+    var sect = dwarf_cmd + SEG_CMD_SIZE;
+    for (0..rd32(img, dwarf_cmd + 64)) |_| {
+        try testing.expectEqual(BASE + rd32(img, sect + 48) + PAGE, rd64(img, sect + 32));
+        sect += SECT_SIZE;
+    }
 }
