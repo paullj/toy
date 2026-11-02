@@ -127,6 +127,32 @@ never the profile:
 So the order is: the profile, then `-O`, then `--opt`, then `--no-opt`. An explicit
 `-O` always wins over the profile: `toy build --release -O0` runs no pass.
 
+## Inlining
+
+The `inline` pass copies a small function's body into each place that calls it, so the
+call's setup costs nothing and the other passes simplify across it. A function is
+inlined when it has no loop, does not call itself, and stays under a small size after its
+own small callees are inlined into it, three calls deep at most. It can come from any
+module, the standard library included; a function that holds a closure is not inlined.
+A function that calls itself takes no inlined bodies: each one would grow its frame, and
+a deep recursion would run out of stack sooner than without inlining.
+
+An inlined function has no frame of its own, so a panic inside it shows the caller's
+frame, and the function itself drops out of the backtrace:
+
+```toy
+fn explode(n: int) -> int { 10 / n }
+fn main() -> int { explode(0) }
+```
+
+A release build of this panics with `division by zero` and a backtrace that ends at
+`main` with no `explode` frame above it. `--no-opt inline` keeps every frame. A debug
+build at its default `-O0` runs no pass, so it keeps every frame too.
+
+A caller's cache entry covers the bodies it can inline. In a release build, an edit to a
+small function compiles again each function that calls it, up to three calls away; a
+debug build at its default `-O0` compiles only the edited function.
+
 ## The cache
 
 The profile is part of every codegen cache key. A debug build never reuses code that a

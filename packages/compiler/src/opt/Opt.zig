@@ -4,7 +4,8 @@
 //! lex→parse→resolve→types→lower→OPT→codegen→link.
 //!
 //! PASSES (each its own file): fold, branch, dce, forward. They run behind this
-//! manager's bounded fixpoint so fold→branch→forward→DCE cascade.
+//! manager's bounded fixpoint so fold→branch→forward→DCE cascade. `inline` runs once
+//! before the fixpoint (`optimize`), since it needs callee IR the caller supplies.
 //!
 //! MEMORY STRATEGY (no arena; in-place mutate + mark-then-compact-once)
 //! A block's owned slices are freed once by `Ir.Block.freeOwned` (the single
@@ -36,10 +37,11 @@ pub const fold = @import("fold.zig");
 pub const branch = @import("branch.zig");
 pub const dce = @import("dce.zig");
 pub const forward = @import("forward.zig");
+pub const inliner = @import("inline.zig");
 
-/// The passes, in fixpoint order. The enum's declaration order IS the order the
-/// fixpoint loop runs them each round.
-pub const Pass = enum(u3) { fold, branch, forward, dce };
+/// The passes `--opt`/`--no-opt` name. The fixpoint loop runs the first four each round
+/// in declaration order; `inline` runs once before it (`optimize`).
+pub const Pass = enum(u3) { fold, branch, forward, dce, @"inline" };
 
 /// Which passes are enabled. A `packed struct` over a fixed `u8` so its `bits()`
 /// is a stable wire byte for the codegen fingerprint mix — toggling `-O` lands on
@@ -51,10 +53,11 @@ pub const Config = packed struct(u8) {
     branch: bool = false,
     forward: bool = false,
     dce: bool = false,
-    _pad: u4 = 0,
+    @"inline": bool = false,
+    _pad: u3 = 0,
 
     pub const O0: Config = .{};
-    pub const O1: Config = .{ .fold = true, .branch = true, .forward = true, .dce = true };
+    pub const O1: Config = .{ .fold = true, .branch = true, .forward = true, .dce = true, .@"inline" = true };
 
     pub fn has(self: Config, p: Pass) bool {
         return switch (p) {
@@ -62,6 +65,7 @@ pub const Config = packed struct(u8) {
             .branch => self.branch,
             .forward => self.forward,
             .dce => self.dce,
+            .@"inline" => self.@"inline",
         };
     }
 
@@ -71,6 +75,7 @@ pub const Config = packed struct(u8) {
             .branch => self.branch = on,
             .forward => self.forward = on,
             .dce => self.dce = on,
+            .@"inline" => self.@"inline" = on,
         }
     }
 
@@ -81,7 +86,7 @@ pub const Config = packed struct(u8) {
     }
 
     pub fn any(self: Config) bool {
-        return self.fold or self.branch or self.forward or self.dce;
+        return self.fold or self.branch or self.forward or self.dce or self.@"inline";
     }
 
     comptime {
@@ -108,6 +113,7 @@ pub const Stats = struct {
     instrs_dced: usize = 0,
     values_pruned: usize = 0,
     loads_forwarded: usize = 0,
+    calls_inlined: usize = 0,
     rounds: usize = 0,
     ir_instrs_before: usize = 0,
     ir_instrs_after: usize = 0,
@@ -119,6 +125,7 @@ pub const Stats = struct {
         self.instrs_dced += o.instrs_dced;
         self.values_pruned += o.values_pruned;
         self.loads_forwarded += o.loads_forwarded;
+        self.calls_inlined += o.calls_inlined;
         self.rounds += o.rounds;
         self.ir_instrs_before += o.ir_instrs_before;
         self.ir_instrs_after += o.ir_instrs_after;
@@ -134,20 +141,33 @@ fn dispatch(p: Pass) PassFn {
         .branch => branch.run,
         .forward => forward.run,
         .dce => dce.run,
+        .@"inline" => unreachable,
     };
 }
 
 /// Bounded fixpoint cap; documented in the locked design (≤8 rounds).
 pub const MAX_ROUNDS = 8;
 
-/// Run the enabled passes on `func` in-place to a bounded fixpoint. Records the
+/// Run the enabled fixpoint passes on `func` in-place to a bounded fixpoint. Records the
 /// dual-metric IR instruction count (before/after) and per-pass counters into
 /// `stats`. With no passes enabled this is a pure no-op (the O0==O1 scaffold gate).
 pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, stats: *Stats) error{OutOfMemory}!void {
+    return optimize(gpa, func, cfg, null, stats);
+}
+
+/// `run`, after inlining the callees `callees` hands over when `cfg` enables `inline`.
+/// The fixpoint then folds across the spliced bodies.
+pub fn optimize(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, callees: ?inliner.Lookup, stats: *Stats) error{OutOfMemory}!void {
     stats.ir_instrs_before = Ir.instrCount(func);
     defer stats.ir_instrs_after = Ir.instrCount(func);
 
-    if (!cfg.any()) return;
+    if (cfg.@"inline") if (callees) |l| {
+        _ = try inliner.run(gpa, func, l, inliner.budget, stats);
+    };
+
+    var fix = cfg;
+    fix.@"inline" = false;
+    if (!fix.any()) return;
 
     // Count rounds actually executed (a round is one full pass over the enabled
     // passes). The loop runs at least once; the final round that reports no change
@@ -157,7 +177,7 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, stats: *Stat
         rounds += 1;
         var changed = false;
         inline for (.{ .fold, .branch, .forward, .dce }) |p| {
-            if (cfg.has(p)) {
+            if (fix.has(p)) {
                 const c = try dispatch(p)(gpa, func, stats);
                 changed = changed or c;
             }
@@ -174,6 +194,7 @@ test {
     _ = branch;
     _ = dce;
     _ = forward;
+    _ = inliner;
 }
 
 test "Config.bits is a stable wire byte; O0 != O1" {

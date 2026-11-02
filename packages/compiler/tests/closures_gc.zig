@@ -458,7 +458,8 @@ test "gc: at -O1 a lambda whose Vec, str, Ref and closure captures sit in a fram
     const src = try std.mem.concat(gpa, u8, &.{ closure_gc_prelude, main_src });
     defer gpa.free(src);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/main.toy", .data = src });
-    const o1 = try harness.emitIr(gpa, io, dir ++ "/main.toy", &.{"-O1"});
+    // Without inlining, whose spliced bodies bring their own allocations into `main`.
+    const o1 = try harness.emitIr(gpa, io, dir ++ "/main.toy", &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(o1);
     const o0 = try harness.emitIr(gpa, io, dir ++ "/main.toy", &.{"-O0"});
     defer gpa.free(o0);

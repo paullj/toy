@@ -1,5 +1,10 @@
 //! PASS c — dead-instruction + dead-value elimination.
 //!
+//! PHASE 0 (dead slot stores): a slot nothing ever reads — no load, copy source, byte
+//! load or tag read resolves to it, and its address never escapes (forward.zig's
+//! `resolve`) — makes every store, byte store and copy INTO it dead. Inlining leaves
+//! such slots behind: a spliced callee's param slot whose every load was forwarded.
+//!
 //! PHASE 1 (dead-instr elim): an instruction is droppable iff its result is
 //! UNUSED *and* its op is side-effect-free (PURE). PURE = iconst, bconst, unit,
 //! add, sub, mul, sdiv, neg, bnot, icmp, slot_addr, field_addr, load, get_tag,
@@ -16,7 +21,11 @@
 //! ascending-old-id remap (preserves monotonic source-order determinism),
 //! and rewrite EVERY ValueId site through `walk.remapValues` (shared with liveness
 //! so they cannot drift). `none_value` maps to itself. `entry`/`exit` are BlockIds
-//! — untouched here. Slots are left stable (no dead-slot pass — out of scope).
+//! — untouched here.
+//!
+//! PHASE 3 (dead-slot pruning): a slot no instruction, terminator or param names any
+//! more (phase 0 dropped its stores, phase 1 its address) leaves `func.slots`, the rest
+//! renumbered in old-id order, so the frame stops reserving it.
 //! Shrinking `func.values.len` makes FrameLayout allocate fewer cells → fewer
 //! emitted prologue/marshal/load/store words (and can dodge FrameTooLarge).
 //!
@@ -28,14 +37,16 @@ const std = @import("std");
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("Opt.zig");
 const walk = @import("walk.zig");
+const forward = @import("forward.zig");
 
 pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{OutOfMemory}!bool {
     if (func.values.len == 0) return false;
 
+    var any_instr_dropped = try dropDeadSlotStores(gpa, func, stats);
+
     const used = try gpa.alloc(bool, func.values.len);
     defer gpa.free(used);
 
-    var any_instr_dropped = false;
     // Bounded by total instr count: each round drops ≥1 instr or stops.
     while (true) {
         // Recompute usage from the current instrs/terminators.
@@ -72,7 +83,103 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
     }
 
     const pruned = try pruneValues(gpa, func, stats);
-    return any_instr_dropped or pruned;
+    const slots_pruned = try pruneSlots(gpa, func);
+    return any_instr_dropped or pruned or slots_pruned;
+}
+
+fn dropDeadSlotStores(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{OutOfMemory}!bool {
+    if (func.slots.len == 0) return false;
+    const def = try gpa.alloc(?Ir.Op, func.values.len);
+    defer gpa.free(def);
+    @memset(def, null);
+    for (func.blocks) |b| for (b.instrs) |ins| {
+        if (ins.result != Ir.none_value and ins.result < def.len) def[ins.result] = ins.op;
+    };
+    const read = try gpa.alloc(bool, func.slots.len);
+    defer gpa.free(read);
+    @memset(read, false);
+    const Ctx = struct {
+        def: []const ?Ir.Op,
+        read: []bool,
+        fn mark(c: @This(), v: Ir.ValueId) void {
+            switch (forward.resolve(c.def, v)) {
+                .slot => |sl| if (sl.s < c.read.len) {
+                    c.read[sl.s] = true;
+                },
+                .unknown => {},
+            }
+        }
+        fn slot(c: @This(), o: Ir.Operand) void {
+            switch (o) {
+                .slot => |sid| if (sid < c.read.len) {
+                    c.read[sid] = true;
+                },
+                .value => |v| c.mark(v),
+                .none => {},
+            }
+        }
+    };
+    const ctx: Ctx = .{ .def = def, .read = read };
+    // Every use of a slot's address reads (or leaks) it, except as the target of a write
+    // and as the base of a `field_addr`, whose own uses are classified in turn.
+    for (func.blocks) |*b| {
+        for (b.instrs) |*ins| switch (ins.op) {
+            .store => |st| ctx.mark(st.val),
+            .store_byte => |st| ctx.mark(st.val),
+            .copy => |c| ctx.mark(c.src),
+            .field_addr, .slot_addr => {},
+            .call => |c| for (c.args) |a| ctx.slot(a),
+            .call_indirect => |c| {
+                ctx.mark(c.target);
+                for (c.args) |a| ctx.slot(a);
+            },
+            else => {
+                var one = ins.*;
+                walk.forEachInstrUse(&one, ctx, Ctx.mark);
+            },
+        };
+        switch (b.term) {
+            .br => |br| for (br.args) |a| ctx.slot(a),
+            .ret => |o| ctx.slot(o),
+            .cond_br => |c| ctx.mark(c.cond),
+            .@"unreachable", .panic => {},
+        }
+    }
+    var dropped = false;
+    for (func.blocks) |*b| {
+        var kept: usize = 0;
+        for (b.instrs) |ins| {
+            if (!deadStore(ctx, ins.op)) kept += 1;
+        }
+        if (kept == b.instrs.len) continue;
+        const new_instrs = try gpa.alloc(Ir.Instr, kept);
+        var j: usize = 0;
+        for (b.instrs) |ins| {
+            if (deadStore(ctx, ins.op)) {
+                stats.instrs_dced += 1;
+                continue;
+            }
+            new_instrs[j] = ins;
+            j += 1;
+        }
+        gpa.free(b.instrs);
+        b.instrs = new_instrs;
+        dropped = true;
+    }
+    return dropped;
+}
+
+fn deadStore(ctx: anytype, op: Ir.Op) bool {
+    const target = switch (op) {
+        .store => |st| st.addr,
+        .store_byte => |st| st.addr,
+        .copy => |c| c.dst,
+        else => return false,
+    };
+    return switch (forward.resolve(ctx.def, target)) {
+        .slot => |sl| sl.s < ctx.read.len and !ctx.read[sl.s],
+        .unknown => false,
+    };
 }
 
 /// An instr survives iff it produces no value, OR its result is used, OR its op
@@ -143,6 +250,45 @@ fn pruneValues(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) er
     walk.remapValues(func, remap, remapFn);
 
     stats.values_pruned += (old_n - kept);
+    return true;
+}
+
+/// Rebuild `func.slots` to the slots still referenced (every param, every slot operand,
+/// address and ret slot), renumbering in old-id order. Returns true if any pruned.
+fn pruneSlots(gpa: std.mem.Allocator, func: *Ir.Function) error{OutOfMemory}!bool {
+    const old_n = func.slots.len;
+    if (old_n == 0) return false;
+    const remap = try gpa.alloc(Ir.SlotId, old_n);
+    defer gpa.free(remap);
+    @memset(remap, Ir.none_slot);
+    for (func.params) |p| remap[p] = 0;
+    const Mark = struct {
+        fn f(r: []Ir.SlotId, s: Ir.SlotId) Ir.SlotId {
+            if (s != Ir.none_slot) r[s] = 0;
+            return s;
+        }
+    };
+    for (func.blocks) |*b| walk.remapBlockSlots(b, remap, Mark.f);
+    var kept: Ir.SlotId = 0;
+    for (remap) |*r| if (r.* != Ir.none_slot) {
+        r.* = kept;
+        kept += 1;
+    };
+    if (kept == old_n) return false;
+
+    const slots = try gpa.alloc(Ir.Slot, kept);
+    for (func.slots, remap) |sl, r| if (r != Ir.none_slot) {
+        slots[r] = sl;
+    };
+    gpa.free(func.slots);
+    func.slots = slots;
+    for (func.params) |*p| p.* = remap[p.*];
+    const Map = struct {
+        fn f(r: []const Ir.SlotId, s: Ir.SlotId) Ir.SlotId {
+            return if (s == Ir.none_slot) s else r[s];
+        }
+    };
+    for (func.blocks) |*b| walk.remapBlockSlots(b, @as([]const Ir.SlotId, remap), Map.f);
     return true;
 }
 
@@ -235,14 +381,17 @@ test "dead chain (load + its slot_addr) both dropped" {
 test "call/store/copy are KEPT even with unused result" {
     const gpa = testing.allocator;
     // %0=slot_addr s0; %1=iconst 3; store %0,%1; %2=slot_addr s1;
-    // call @f() -> (void, result none); copy %2 <- %0.
+    // call @f(%0) -> (void, result none).
     // store/copy/call must all survive; slot_addrs feeding them survive too.
     var instrs = try gpa.alloc(Ir.Instr, 5);
     instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
     instrs[1] = .{ .result = 1, .op = .{ .iconst = 3 } };
     instrs[2] = .{ .result = Ir.none_value, .op = .{ .store = .{ .addr = 0, .val = 1, .ty = Ir.Type.int } } };
     instrs[3] = .{ .result = 2, .op = .{ .slot_addr = 1 } };
-    instrs[4] = .{ .result = Ir.none_value, .op = .{ .call = .{ .callee = .{ .kind = .user_fn, .name = "f" }, .args = try gpa.alloc(Ir.Operand, 0), .ret_slot = Ir.none_slot } } };
+    // The call reads s0 through its address, so the store into s0 is live.
+    const call_args = try gpa.alloc(Ir.Operand, 1);
+    call_args[0] = .{ .value = 0 };
+    instrs[4] = .{ .result = Ir.none_value, .op = .{ .call = .{ .callee = .{ .kind = .user_fn, .name = "f" }, .args = call_args, .ret_slot = Ir.none_slot } } };
 
     var slots = try gpa.alloc(Ir.Slot, 2);
     slots[0] = .{ .type = Ir.Type.int };
@@ -338,4 +487,61 @@ test "no-op when nothing is dead" {
     try testing.expect(!changed);
     try testing.expectEqual(@as(usize, 0), st.instrs_dced);
     try testing.expectEqual(@as(usize, 3), func.values.len);
+}
+
+test "a store or copy into a slot nothing reads is dropped; one into a read slot is kept" {
+    const gpa = testing.allocator;
+    // %0=slot_addr s0; %1=iconst 3; store %0,%1; %2=slot_addr s1; copy %2 <- %0;
+    // %3=slot_addr s2; store %3,%1; %4=load %3; ret %4
+    // s0 is read only by the copy into s1, which nothing reads: the copy goes, then s0
+    // has no reader left in the next run. s2 is loaded: its store stays.
+    var instrs = try gpa.alloc(Ir.Instr, 8);
+    instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
+    instrs[1] = .{ .result = 1, .op = .{ .iconst = 3 } };
+    instrs[2] = .{ .result = Ir.none_value, .op = .{ .store = .{ .addr = 0, .val = 1, .ty = Ir.Type.int } } };
+    instrs[3] = .{ .result = 2, .op = .{ .slot_addr = 1 } };
+    instrs[4] = .{ .result = Ir.none_value, .op = .{ .copy = .{ .dst = 2, .src = 0, .ty = Ir.Type.int } } };
+    instrs[5] = .{ .result = 3, .op = .{ .slot_addr = 2 } };
+    instrs[6] = .{ .result = Ir.none_value, .op = .{ .store = .{ .addr = 3, .val = 1, .ty = Ir.Type.int } } };
+    instrs[7] = .{ .result = 4, .op = .{ .load = .{ .addr = 3, .ty = Ir.Type.int } } };
+    const slots = try gpa.alloc(Ir.Slot, 3);
+    for (slots) |*sl| sl.* = .{ .type = Ir.Type.int };
+    var func = try oneBlock(gpa, instrs, .{ .ret = .{ .value = 4 } }, 5);
+    gpa.free(func.slots);
+    func.slots = slots;
+    defer func.deinit(gpa);
+
+    var st: Opt.Stats = .{};
+    try testing.expect(try run(gpa, &func, &st));
+    try testing.expect(try run(gpa, &func, &st));
+    var stores: usize = 0;
+    for (func.blocks[0].instrs) |ins| switch (ins.op) {
+        .copy => return error.TestUnexpectedResult,
+        .store => stores += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), stores);
+}
+
+test "a slot nothing references any more leaves the frame; params and the rest renumber" {
+    const gpa = testing.allocator;
+    // params (s1); s0 and s2 unused; %0=slot_addr s3; %1=load %0; ret %1
+    var instrs = try gpa.alloc(Ir.Instr, 2);
+    instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 3 } };
+    instrs[1] = .{ .result = 1, .op = .{ .load = .{ .addr = 0, .ty = Ir.Type.int } } };
+    var func = try oneBlock(gpa, instrs, .{ .ret = .{ .value = 1 } }, 2);
+    defer func.deinit(gpa);
+    gpa.free(func.slots);
+    func.slots = try gpa.alloc(Ir.Slot, 4);
+    for (func.slots, 0..) |*sl, i| sl.* = .{ .type = if (i == 1) Ir.Type.bool else Ir.Type.int };
+    gpa.free(func.params);
+    func.params = try gpa.dupe(Ir.SlotId, &.{1});
+
+    var st: Opt.Stats = .{};
+    try testing.expect(try run(gpa, &func, &st));
+    try testing.expectEqual(@as(usize, 2), func.slots.len);
+    try testing.expectEqual(@as(Ir.SlotId, 0), func.params[0]);
+    try testing.expect(Ir.Type.eql(Ir.Type.bool, func.slots[0].type));
+    try testing.expectEqual(@as(Ir.SlotId, 1), func.blocks[0].instrs[0].op.slot_addr);
+    try testing.expect(!try run(gpa, &func, &st));
 }

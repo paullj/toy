@@ -364,7 +364,8 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     try std.testing.expectEqual(@as(u8, 32), try runExitBigStack(io, p1));
     const path = tmp ++ "/near.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
-    const ir = try harness.emitIr(gpa, io, path, &.{"-O1"});
+    // Without inlining, whose spliced bodies bring their own allocations into `main`.
+    const ir = try harness.emitIr(gpa, io, path, &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(ir);
     const body = harness.irBody(ir, "main") orelse return error.TestExpectedMain;
     try std.testing.expect(std.mem.indexOf(u8, body, "call @gc_alloc") != null);
@@ -374,7 +375,7 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     defer gpa.free(lean);
     const lean_path = tmp ++ "/lean.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = lean_path, .data = lean });
-    const lean_ir = try harness.emitIr(gpa, io, lean_path, &.{"-O1"});
+    const lean_ir = try harness.emitIr(gpa, io, lean_path, &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(lean_ir);
     const lean_body = harness.irBody(lean_ir, "main") orelse return error.TestExpectedMain;
     try std.testing.expect(std.mem.indexOf(u8, lean_body, "call @gc_alloc") == null);
