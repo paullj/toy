@@ -76,7 +76,7 @@ impl Map[K has Hashable, V] {
 
     fn keys(self) -> Vec[K] {
         n := mem.mp_len[K, V](self.h)
-        out := Vec[K].new()
+        out := Vec[K].with_capacity(n)
         i := 0
         while i < n {
             out.push(mem.mp_key_at[K, V](self.h, i))
@@ -87,7 +87,7 @@ impl Map[K has Hashable, V] {
 
     fn values(self) -> Vec[V] {
         n := mem.mp_len[K, V](self.h)
-        out := Vec[V].new()
+        out := Vec[V].with_capacity(n)
         i := 0
         while i < n {
             out.push(mem.mp_val_at[K, V](self.h, i))
@@ -102,7 +102,7 @@ impl Map[K has Hashable, V] {
 impl Map[K has Display, V has Display] has Display {
     fn display(self) -> str {
         n := mem.mp_len[K, V](self.h)
-        parts := mem.ga_new[str]()
+        parts := mem.ga_with_cap[str](n)
         i := 0
         while i < n {
             k := mem.mp_key_at[K, V](self.h, i).to_string()

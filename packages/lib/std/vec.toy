@@ -15,6 +15,11 @@ impl Vec[T] {
         return Vec[T] { h: mem.ga_new[T]() }
     }
 
+    # Room for `n` pushes before the first grow.
+    fn with_capacity(n: int) -> Vec[T] {
+        return Vec[T] { h: mem.ga_with_cap[T](n) }
+    }
+
     fn push(self, x: T) {
         mem.ga_push[T](self.h, x)
     }
@@ -55,7 +60,7 @@ impl Vec[T] {
 
     fn map[U](self, f: fn(T) -> U) -> Vec[U] {
         n := mem.ga_len[T](self.h)
-        out := Vec[U].new()
+        out := Vec[U].with_capacity(n)
         i := 0
         while i < n {
             out.push(f(mem.ga_get[T](self.h, i)))
@@ -122,7 +127,7 @@ impl Vec[T] {
     fn sort_by(self, less: fn(T, T) -> bool) {
         n := mem.ga_len[T](self.h)
         src := self.h
-        dst := mem.ga_new[T]()
+        dst := mem.ga_with_cap[T](n)
         i := 0
         while i < n {
             mem.ga_push[T](dst, mem.ga_get[T](src, i))
@@ -177,7 +182,7 @@ impl Vec[T has Ord] {
 impl Vec[T has Display] has Display {
     fn display(self) -> str {
         n := mem.ga_len[T](self.h)
-        parts := mem.ga_new[str]()
+        parts := mem.ga_with_cap[str](n)
         i := 0
         while i < n {
             mem.ga_push[str](parts, mem.ga_get[T](self.h, i).to_string())
