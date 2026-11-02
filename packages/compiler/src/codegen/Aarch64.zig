@@ -655,6 +655,26 @@ pub fn fmovWS(wd: u32, sn: u32) u32 {
     return 0x1E260000 | (sn << 5) | wd;
 }
 
+/// FMOV Dd, Dn — copy a double between FP registers.
+pub fn fmovDD(dd: u32, dn: u32) u32 {
+    return 0x1E604000 | (dn << 5) | dd;
+}
+
+/// FMOV Sd, Sn — copy a single between FP registers, zeroing the upper bits of `dd`.
+pub fn fmovSS(sd: u32, sn: u32) u32 {
+    return 0x1E204000 | (sn << 5) | sd;
+}
+
+/// FMOV Dd, Xn — the 64 bits of a GPR into an FP register.
+pub fn fmovDX(dd: u32, xn: u32) u32 {
+    return 0x9E670000 | (xn << 5) | dd;
+}
+
+/// FMOV Xd, Dn — the 64 bits of an FP register into a GPR.
+pub fn fmovXD(xd: u32, dn: u32) u32 {
+    return 0x9E660000 | (dn << 5) | xd;
+}
+
 /// ldr st, [rn, #byteOff] — 32-bit FP load, offset scaled by 4.
 pub fn ldrSRegUoff(st: u32, rn: u32, byteOff: u32) u32 {
     std.debug.assert(byteOff % 4 == 0 and byteOff / 4 <= 0xFFF);
@@ -733,6 +753,10 @@ test "fp encoders" {
     try testing.expectEqual(@as(u32, 0x9A9F47E0), cset(0, .pl)); // cset x0,pl
     try testing.expectEqual(Cond.pl, invert(.mi));
     try testing.expectEqual(Cond.mi, invert(.pl));
+    try testing.expectEqual(@as(u32, 0x1E604230), fmovDD(16, 17)); // fmov d16,d17
+    try testing.expectEqual(@as(u32, 0x1E204230), fmovSS(16, 17)); // fmov s16,s17
+    try testing.expectEqual(@as(u32, 0x9E670130), fmovDX(16, 9)); // fmov d16,x9
+    try testing.expectEqual(@as(u32, 0x9E660209), fmovXD(9, 16)); // fmov x9,d16
 }
 
 test "move-wide immediates" {

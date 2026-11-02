@@ -255,8 +255,36 @@ pub const Terminator = union(enum) {
     /// backstop). No successors.
     panic: PanicReason,
 
-    pub const PanicReason = enum { div_by_zero, rem_by_zero, index_oob, add_overflow, sub_overflow, mul_overflow, div_overflow, neg_overflow };
+    pub const PanicReason = enum {
+        div_by_zero,
+        rem_by_zero,
+        index_oob,
+        add_overflow,
+        sub_overflow,
+        mul_overflow,
+        div_overflow,
+        neg_overflow,
+
+        pub fn message(r: PanicReason) []const u8 {
+            return switch (r) {
+                .div_by_zero => "division by zero",
+                .rem_by_zero => "remainder by zero",
+                .index_oob => "index out of bounds",
+                .add_overflow => "integer overflow in '+'",
+                .sub_overflow => "integer overflow in '-'",
+                .mul_overflow => "integer overflow in '*'",
+                .div_overflow => "integer overflow in '/'",
+                .neg_overflow => "integer overflow in negation",
+            };
+        }
+    };
 };
+
+/// The hash seed every literal is interned under, by lower and by both backends' panic
+/// messages, so one message that is also a display literal dedups to one `__cstring` entry.
+/// FROZEN: changing it re-hashes every literal, so the `.cstr` reloc targets in cached
+/// FnCode blobs would no longer line up with the literal table.
+pub const lit_seed: u64 = 0x10c5_7e87;
 
 /// A basic block: a list of block params (the merge slots), straight-line
 /// instructions, and exactly one terminator.

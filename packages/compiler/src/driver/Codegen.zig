@@ -89,6 +89,8 @@ pub const LinkedProgram = struct {
     /// from the codegen cache this build. Surfaced via `--codegen-stats`.
     codegen_compiled: usize = 0,
     codegen_cached: usize = 0,
+    /// Under `--backend=mir`: how many freshly lowered fns took MIR, and which fell back.
+    mir: Engine.MirStats = .{},
     /// dual-metric: summed opt counters over freshly-lowered fns, the total
     /// IR instruction count after opt, and the emitted aarch64 instruction count
     /// (text.len/4). No owned slices → deinit unchanged. Cached fns contribute 0
@@ -161,7 +163,9 @@ fn relink(
     // backing array here, never its elements.
     var fns: std.ArrayList(Link.FnCode) = .empty;
     defer fns.deinit(gpa);
+    var mir: Engine.MirStats = .{};
     for (slots) |*s| {
+        mir.add(s.mir);
         try fns.append(gpa, s.fc.?);
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
@@ -175,6 +179,7 @@ fn relink(
     lp.owned_msgs = try gpa.alloc([]u8, 0);
     lp.codegen_compiled = compiled;
     lp.codegen_cached = cached_n;
+    lp.mir = mir;
     lp.opt_stats = opt_stats;
     lp.ir_instrs = ir_instrs;
     // Dual-metric machine-code count: aarch64 is fixed-width 4-byte instrs, so

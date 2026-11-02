@@ -19,6 +19,12 @@ opt: Opt.Config = .O0,
 /// appended runtime changes, but it joins the key anyway so a stress build never serves a
 /// normal one from the cache, whatever later lowering starts to read it.
 gc_stress: bool = false,
+/// The machine-code backend. `spill` gives every IR value a frame cell; `mir` selects
+/// instructions into MIR and allocates registers, falling back to `spill` per fn for what
+/// it cannot lower yet. Hidden until MIR becomes the default (#202).
+backend: Backend = .spill,
+
+pub const Backend = enum(u8) { spill, mir };
 
 pub const debug: Profile = of(.debug);
 pub const release: Profile = of(.release);
@@ -50,8 +56,8 @@ const all_passes: Opt.Config = blk: {
 
 /// The fixed bytes the codegen key folds. A field added here must join them, or two
 /// profiles that differ in it would share code.
-pub fn keyBytes(p: Profile) [3]u8 {
-    return .{ @intFromEnum(p.name), p.opt.bits(), @intFromBool(p.gc_stress) };
+pub fn keyBytes(p: Profile) [4]u8 {
+    return .{ @intFromEnum(p.name), p.opt.bits(), @intFromBool(p.gc_stress), @intFromEnum(p.backend) };
 }
 
 test "debug runs no pass and release runs every pass" {
@@ -71,4 +77,9 @@ test "the key bytes tell the profiles apart even when their passes match" {
 test "gc stress joins the key bytes" {
     const stress: Profile = .{ .name = .debug, .opt = .O0, .gc_stress = true };
     try std.testing.expect(!std.mem.eql(u8, &Profile.debug.keyBytes(), &stress.keyBytes()));
+}
+
+test "the backend joins the key bytes" {
+    const mir: Profile = .{ .name = .debug, .opt = .O0, .backend = .mir };
+    try std.testing.expect(!std.mem.eql(u8, &Profile.debug.keyBytes(), &mir.keyBytes()));
 }

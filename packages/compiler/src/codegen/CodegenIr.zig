@@ -1342,17 +1342,13 @@ fn genCallIndirect(g: *Gen, result: Ir.ValueId, c: Ir.CallIndirect) error{OutOfM
     try placeResult(g, result, c.ret_slot, pr.ret_ty);
 }
 
-/// Same seed as lower.zig's `lit_seed`, so a panic message that ALSO appears as a
-/// display literal dedups to one `__cstring` blob entry; distinct hashes are harmless.
-const panic_lit_seed: u64 = 0x10c5_7e87;
-
 /// Retarget a `.panic` terminator to `panic(msg)`: intern `msg` as a
 /// `__cstring` on THIS FnCode, put its ptr in x0 (adrp+add, `.cstr` relocs) and its
 /// byte-length in x1 (every message < 64 KiB -> one `movz`), then `bl panic` (a
 /// `.call26` reloc to the builtin, appended once at link time). The block has no
 /// successors; a `brk #0` backstop follows the never-returning call.
 fn emitPanicCall(g: *Gen, msg: []const u8) error{OutOfMemory}!void {
-    const h = std.hash.Wyhash.hash(panic_lit_seed, msg);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, msg);
     try addLiteral(g, h, try g.gpa.dupe(u8, msg));
     var site: u32 = @intCast(g.code.items.len);
     try g.relocs.append(g.gpa, .{ .site = site, .target = .{ .cstr = h }, .kind = .adrp_page });
@@ -1391,16 +1387,7 @@ fn genTerm(g: *Gen, term: Ir.Terminator) error{OutOfMemory}!void {
             try emitEpilogue(g);
         },
         .@"unreachable" => {}, // emit nothing (preserve the never byte budget).
-        .panic => |reason| try emitPanicCall(g, switch (reason) {
-            .div_by_zero => "division by zero",
-            .rem_by_zero => "remainder by zero",
-            .index_oob => "index out of bounds",
-            .add_overflow => "integer overflow in '+'",
-            .sub_overflow => "integer overflow in '-'",
-            .mul_overflow => "integer overflow in '*'",
-            .div_overflow => "integer overflow in '/'",
-            .neg_overflow => "integer overflow in negation",
-        }),
+        .panic => |reason| try emitPanicCall(g, reason.message()),
     }
 }
 

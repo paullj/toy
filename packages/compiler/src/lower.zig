@@ -890,7 +890,7 @@ fn lowerStrLiteral(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Opera
     // Content-hash the decoded bytes; `cstr_ptr` carries the hash and the bytes
     // are registered in the fn's literal table (codegen recovers them there and
     // emits the adrp+add). `addLiteral` takes ownership of `bytes`.
-    const h = std.hash.Wyhash.hash(lit_seed, bytes);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, bytes);
     const len: i64 = @intCast(bytes.len);
     try b.addLiteral(h, bytes);
 
@@ -1867,7 +1867,7 @@ fn lowerStrConcat(b: *Builder, node_idx: Ast.Index, lhs: Ast.Index, rhs: Ast.Ind
 pub fn emitStrLiteralSlot(b: *Builder, bytes: []const u8) error{OutOfMemory}!Ir.SlotId {
     const int_ty = Typecheck.Type.int;
     const owned = try b.gpa.dupe(u8, bytes);
-    const h = std.hash.Wyhash.hash(lit_seed, owned);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, owned);
     try b.addLiteral(h, owned);
     const slot = try b.addSlot(Typecheck.Type.str);
     const base = try b.emit(.{ .slot_addr = slot }, int_ty);
@@ -1912,7 +1912,7 @@ pub fn appendLiteral(b: *Builder, acc: Ir.SlotId, bytes: []const u8) error{OutOf
     if (bytes.len == 0) return;
     const int_ty = Typecheck.Type.int;
     const owned = try b.gpa.dupe(u8, bytes);
-    const h = std.hash.Wyhash.hash(lit_seed, owned);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, owned);
     try b.addLiteral(h, owned);
     const p = try b.emit(.{ .cstr_ptr = h }, int_ty);
     const l = try b.emit(.{ .iconst = @intCast(bytes.len) }, int_ty);
@@ -3213,7 +3213,7 @@ pub fn operandPtr(b: *Builder, op: Ir.Operand) error{OutOfMemory}!Ir.ValueId {
 fn storeStrLiteralInto(b: *Builder, expr: Ast.Index, dst_ptr: Ir.ValueId) error{OutOfMemory}!void {
     const n = b.in.tree.nodes[(expr).int()];
     const bytes = (try decodeStringLiteral(b, n.main_token)) orelse return;
-    const h = std.hash.Wyhash.hash(lit_seed, bytes);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, bytes);
     const len: i64 = @intCast(bytes.len);
     try b.addLiteral(h, bytes);
     const p = try b.emit(.{ .cstr_ptr = h }, Typecheck.Type.int);
@@ -4867,11 +4867,6 @@ fn condFromToken(tag: TokenTag, unsigned: bool) Ir.Cond {
         else => unreachable,
     };
 }
-
-/// Seed for the literal content hash. FROZEN: changing it re-hashes every literal,
-/// so the `.cstr` reloc targets (the hashes) in existing cached FnCode blobs would
-/// no longer line up with the literal table — cached blobs rot.
-const lit_seed: u64 = 0x10c5_7e87;
 
 /// Parse an int literal as written in source, for a PATTERN literal. Delegates to
 /// `Literal.value` (base-0 decode, `_` stripped) so a `0x2A`/`0o52` pattern decodes to
