@@ -1,6 +1,8 @@
 # str and collections together: to_string, concat, join, split and chars, with a
 # Map[str, int] word count and a Vec[str].
 # expect: stdout "1558000\n"
+# Millions of allocations over a live map: collecting on each one is far too slow.
+# gc-stress: skip
 
 import std/vec
 import std/map

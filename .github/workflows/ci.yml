@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      gc: ${{ steps.diff.outputs.gc }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,15 +29,27 @@ jobs:
       - id: diff
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
         run: |
           code=true
+          gc=true
           if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             files=$(git diff --name-only "$BASE" HEAD)
             if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -vxF 'bench/history.jsonl' | grep -q .; then
               code=false
             fi
+            # The GC stress corpus is slow, so a PR runs it only when it touches what
+            # roots, layouts or the collector come from: codegen (the runtime and GC
+            # included), lowering, the IR and the passes that change what is live across
+            # a call, the query engine and profiles that pick the build, the linker's
+            # stack maps, core, or the job itself.
+            if [ "$EVENT" = pull_request ] && ! printf '%s\n' "$files" | grep -qE '^(packages/compiler/src/(codegen/|lower/|lower\.zig|ir/|opt/|query/|driver/|link/)|packages/lib/core/|packages/compiler/tests/corpus\.zig|\.github/workflows/ci\.yml)'; then
+              gc=false
+            fi
           fi
+          [ "$code" = true ] || gc=false
           echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "gc=$gc" >> "$GITHUB_OUTPUT"
 
   test:
     needs: changes
@@ -90,6 +103,29 @@ jobs:
       # When `mise run bench` appends to bench/history.jsonl, on a scratch repo.
       - name: Bench history rules
         run: bash bench/record-test.sh
+
+  gc-stress:
+    needs: changes
+    if: needs.changes.outputs.gc == 'true'
+    name: GC stress corpus (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - uses: actions/cache@v6
+        with:
+          path: .zig-cache
+          key: zig-cache-gc-stress-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-gc-stress-${{ runner.os }}-
+      # Every corpus program built with --gc-stress (a collection before each allocation)
+      # at -O0 and -O1 must still meet its # expect: lines.
+      - name: GC stress corpus
+        run: mise run test:gc-stress
 
   fuzz:
     needs: changes
@@ -186,7 +222,7 @@ jobs:
     name: Deploy docs site
     # Skipped Zig jobs (a history-only push) must not block the deploy; failed ones must.
     if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: [changes, test, gates, fuzz, lint, site]
+    needs: [changes, test, gates, gc-stress, fuzz, lint, site]
     runs-on: ubuntu-latest
     permissions:
       actions: read

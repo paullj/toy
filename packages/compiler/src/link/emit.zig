@@ -52,6 +52,8 @@ pub const Options = struct {
     /// Emit debug info (LC_SYMTAB and DWARF) for these sources. Null leaves the image
     /// byte-identical to a build without it.
     debug: ?Link.DebugInput = null,
+    /// The choices the appended runtime bodies read.
+    runtime: runtime.Config = .{},
 };
 
 /// The linked-program tail: the joined __text blob, the entry offset, and the
@@ -77,8 +79,8 @@ pub const Linked = struct {
 /// `Link.link`. CONSUMES `fns` (frees each FnCode, dropped or kept, and any appended
 /// builtin body). `entry` is the entry function's stable symbol identity. Returns the
 /// linked tail; the caller owns its `text`/`cstrings`/`data_relocs` (free `.import`
-/// data-reloc names individually).
-pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
+/// data-reloc names individually). `rt` shapes the appended builtin bodies.
+pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput, rt: runtime.Config) !Linked {
     // We OWN `fns`' elements now (the caller relinquished them); on any failure free
     // the ones not yet moved into `all` (or dropped) plus everything in `all`.
     var all: std.ArrayList(Link.FnCode) = .empty;
@@ -153,7 +155,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
     // The referenced hand-emitted builtin bodies follow the kept fns, in `hand_builtins`
     // order, so the linked image never depends on thread order.
     for (runtime.hand_builtins, 0..) |hb, i| {
-        if (used[i]) try all.append(gpa, try hb.lower(gpa));
+        if (used[i]) try all.append(gpa, try hb.lower(gpa, rt));
     }
 
     // 2) Intern strings program-wide via `internCstrings` (stable collect +
@@ -494,7 +496,7 @@ pub fn assembleAndSign(
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
 /// symbol identity (e.g. `{.user_fn, "main"}`). Caller owns the returned bytes.
 pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
-    const lk = try linkProgram(io, gpa, fns, entry, opts.descriptors, opts.debug);
+    const lk = try linkProgram(io, gpa, fns, entry, opts.descriptors, opts.debug, opts.runtime);
     defer {
         lk.debug.deinit(gpa);
         gpa.free(lk.text);
@@ -645,7 +647,7 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
 
     var t = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t.deinit();
-    var lk = try linkProgram(t.io(), gpa, fns, entry, &.{}, null);
+    var lk = try linkProgram(t.io(), gpa, fns, entry, &.{}, null, .{});
     defer freeLinked(gpa, &lk);
 
     // Only `main` survives: no `aaa`, no `bbb`, so no `panic` body either.
@@ -741,14 +743,14 @@ test "backend determinism: the gc stack-map table (riding __cstring) is byte-ide
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null, .{});
     defer freeLinked(gpa, &serial);
 
     const fns_par = try gcFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null, .{});
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);
@@ -790,14 +792,14 @@ test "backend determinism: linkProgram is byte-identical at -j1 and -jN across e
     defer gpa.free(fns_serial); // linkProgram consumes the elements, not the slice
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null, .{});
     defer freeLinked(gpa, &serial);
 
     const fns_par = try detFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null, .{});
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);

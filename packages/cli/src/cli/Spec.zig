@@ -67,6 +67,9 @@ pub const Option = struct {
     value_name: []const u8 = "VALUE",
     conflicts: []const []const u8 = &.{},
     requires: []const []const u8 = &.{},
+    /// Parsed like any option but left out of `--help`: a test or CI switch that users
+    /// should not reach for.
+    hidden: bool = false,
 };
 
 pub const Positional = struct {

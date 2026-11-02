@@ -448,6 +448,7 @@ fn applyParsed(gpa: std.mem.Allocator, comptime cmd: cli.Spec.Command, p: anytyp
     if (p.opt.len != 0) st.profile.opt = .O0;
     for (p.opt) |pass| st.profile.opt.set(optPass(pass), true);
     for (p.no_opt) |pass| st.profile.opt.set(optPass(pass), false);
+    st.profile.gc_stress = p.gc_stress;
     if (try buildSevRules(gpa, p, sev_rules)) |e| return try cliValueError(usage, e);
     st.sev = .{ .rules = sev_rules.items, .deny_warnings = p.deny_warnings };
     // p.file is a variadic slice borrowing argv/arena; copy the ELEMENTS (slices) —

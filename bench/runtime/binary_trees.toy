@@ -1,6 +1,8 @@
 # The Benchmarks Game binary-trees at a small depth: many short-lived trees and one
 # long-lived tree, so the collector runs with a live set.
 # expect: stdout "1348958\n"
+# Millions of allocations over a live tree: collecting on each one is far too slow.
+# gc-stress: skip
 
 import std/vec
 import std/io
