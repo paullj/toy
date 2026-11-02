@@ -12,7 +12,7 @@ export TMPDIR="$work/tmp"
 repo="$work/repo"
 fails=0
 
-export BENCH_MACHINE='{"id":"m1","chip":"Test Chip","model":"Test1,1","p_cores":4,"e_cores":4,"ram_bytes":1024,"macos":"1.0","zig":"0.16.0","power":"ac","load_avg_1m":0.5}'
+export BENCH_MACHINE='{"id":"m1","chip":"Test Chip","model":"Test1,1","p_cores":4,"e_cores":4,"ram_bytes":1024,"macos":"1.0","zig":"0.16.0","power":"ac","low_power":false,"load_avg_1m":0.5}'
 
 # result NAME INSTRUCTIONS [STDDEV]
 result() {
@@ -102,16 +102,23 @@ g checkout -q main
 echo '{"sha":"0000000","name":"x","machine":{"id":"other"}}' >>"$repo/bench/history.jsonl"
 run run2.jsonl 2 "main at a new commit appends, the history file's own edits aside" "appended 2 records"
 
-other='{"id":"m2","chip":"Other","model":"O1,1","p_cores":8,"e_cores":4,"ram_bytes":2048,"macos":"1.0","zig":"0.16.0","power":"battery","load_avg_1m":9}'
-BENCH_MACHINE="$other" run run1.jsonl 2 "another machine records the same commit" "appended 2 records"
+other='{"id":"m2","chip":"Other","model":"O1,1","p_cores":8,"e_cores":4,"ram_bytes":2048,"macos":"1.0","zig":"0.16.0","power":"ac","low_power":false,"load_avg_1m":9}'
+battery="$(jq -c '.power = "battery"' <<<"$other")"
+low_power="$(jq -c '.low_power = true' <<<"$other")"
+BENCH_MACHINE="$battery" run run1.jsonl 0 "a run on battery appends nothing" "not recorded: on battery power"
+BENCH_MACHINE="$low_power" run run1.jsonl 0 "a run in Low Power Mode appends nothing" "not recorded: Low Power Mode is on"
+grep -q '^records: ' <<<"$last_out" || { echo "FAIL: a Low Power Mode run does not keep its records"; fails=$((fails + 1)); }
+BENCH_MACHINE="$other" run run1.jsonl 2 "another machine records the same commit, a high load only warns" "appended 2 records"
 
 # run.sh probes before the build, so the warnings come while the user can still act.
-probe="$(BENCH_MACHINE="$other" bash "$here/machine.sh" 2>"$work/warn")" || true
-[ "$probe" = "$other" ] || { echo "FAIL: machine.sh does not pass BENCH_MACHINE through: $probe"; fails=$((fails + 1)); }
+probe="$(BENCH_MACHINE="$battery" bash "$here/machine.sh" 2>"$work/warn")" || true
+[ "$probe" = "$battery" ] || { echo "FAIL: machine.sh does not pass BENCH_MACHINE through: $probe"; fails=$((fails + 1)); }
 grep -q "on battery" "$work/warn" && grep -q "load average 9" "$work/warn" ||
   { echo "FAIL: machine.sh does not warn on battery and load"; cat "$work/warn"; fails=$((fails + 1)); }
+grep -q "Low Power Mode" <<<"$(BENCH_MACHINE="$low_power" bash "$here/machine.sh" 2>&1 >/dev/null)" ||
+  { echo "FAIL: machine.sh does not warn in Low Power Mode"; fails=$((fails + 1)); }
 [ -z "$(BENCH_MACHINE="$BENCH_MACHINE" bash "$here/machine.sh" 2>&1 >/dev/null)" ] || { echo "FAIL: machine.sh warns on an idle machine"; fails=$((fails + 1)); }
-jq -e '.id and .chip and .p_cores and .ram_bytes and .power and (.load_avg_1m | type == "number")' <<<"$(bash "$here/machine.sh" 2>/dev/null)" >/dev/null ||
+jq -e '.id and .chip and .p_cores and .ram_bytes and .power and (.low_power | type == "boolean") and (.load_avg_1m | type == "number")' <<<"$(bash "$here/machine.sh" 2>/dev/null)" >/dev/null ||
   { echo "FAIL: the machine probe lacks fields"; fails=$((fails + 1)); }
 
 # A branch made before the latest main record compares with that record, not with its own

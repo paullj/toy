@@ -5,8 +5,9 @@
 # benchmark's result; each output line adds the commit and the machine. The lines are
 # appended to bench/history.jsonl only on main, on a tree that is clean apart from that
 # file, at a commit this machine has not recorded whose diff from the last recorded one
-# touches more than that file. Otherwise they go to a temp file. The table compares each
-# benchmark with the latest main record from the same machine. Nothing is committed.
+# touches more than that file, on AC power and outside Low Power Mode. Otherwise they go
+# to a temp file. The table compares each benchmark with the latest main record from the
+# same machine. Nothing is committed.
 # BENCH_MACHINE (a JSON object, from machine.sh) is the machine block; run.sh probes it
 # before the build. Without it, record.sh probes the machine itself.
 set -euo pipefail
@@ -41,6 +42,13 @@ elif jq -e --arg m "$mid" --arg sha "$head" 'select(.machine.id == $m and .sha =
 elif [ -n "$last" ] && git -C "$root" cat-file -e "$last^{commit}" 2>/dev/null &&
   [ -z "$(git -C "$root" diff --name-only "$last" HEAD -- . ":(exclude)$hist_rel")" ]; then
   why="HEAD changes nothing but $hist_rel since the last record"
+fi
+# Throttling leaves instructions and cycles alone but inflates wall time, which the
+# history would then keep as a regression.
+if [ "$(jq -r .power <<<"$machine")" != ac ]; then
+  why="on battery power"
+elif jq -e '.low_power == true' <<<"$machine" >/dev/null; then
+  why="Low Power Mode is on"
 fi
 if jq -e 'select(.checksum_ok == false)' <<<"$records" >/dev/null; then
   why="a checksum failed"

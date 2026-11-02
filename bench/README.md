@@ -36,7 +36,7 @@ are only comparable between runs on the same machine.
 |---|---|
 | `benchmarks.json` | the manifest: one entry per benchmark |
 | `run.sh` | the runner `mise run bench` calls |
-| `machine.sh` | the machine block of a record; warns on battery power or high load |
+| `machine.sh` | the machine block of a record; warns on battery power, Low Power Mode or high load |
 | `record.sh` | turns one run into history records, appends or writes a temp file, prints the table |
 | `record-test.sh` | the append rules, against a scratch git repo |
 | `history.jsonl` | the history on `main`; append-only |
@@ -120,8 +120,9 @@ benchmark with no peer in a language, where a peer would mean nothing, is skippe
 `sha`, `subject`, `commit_date`, `run_date`, `name`, `kind`, `runs`, `metrics`
 (`instructions`, `cycles`, `peak_footprint_bytes`, `max_rss_bytes`, `wall_median_s`,
 `wall_mean_s`, `wall_stddev_s`, `wall_min_s`, `wall_max_s`, `user_s`, `sys_s`), the checksum,
-and `machine` (chip, model, P and E cores, RAM, macOS and zig versions, AC or battery, load
-average, and `id`, a hash of chip, model and RAM). The site's `/benchmarks` page draws it.
+and `machine` (chip, model, P and E cores, RAM, macOS and zig versions, AC or battery, Low
+Power Mode, load average, and `id`, a hash of chip, model and RAM). The site's `/benchmarks`
+page draws it.
 
 `mise run bench` appends to it only when all of these hold:
 
@@ -129,7 +130,9 @@ average, and `id`, a hash of chip, model and RAM). The site's `/benchmarks` page
 - the tree is clean, apart from `bench/history.jsonl` itself;
 - this machine has not recorded HEAD, and the diff from its last recorded commit changes more
   than `bench/history.jsonl`, so committing the history does not make a new point;
-- every benchmark ran (no FILTER) and every checksum matched.
+- every benchmark ran (no FILTER) and every checksum matched;
+- the Mac is on AC power and not in Low Power Mode, which leave instructions and cycles
+  alone but inflate wall time.
 
 Then commit the file yourself; the tool never commits or pushes. Otherwise it appends
 nothing, writes the records to a temp file and prints its path. On a branch, the table's
@@ -137,6 +140,7 @@ changes against the latest `main` record are the dev loop for performance work. 
 reads that record from `main`'s committed `bench/history.jsonl`, so it need not be rebased
 to see a newer one.
 
-Before the build, it warns when the Mac is on battery or the load average is above 2. `bash bench/record-test.sh`
+Before the build, it warns when the Mac is on battery, in Low Power Mode or the load
+average is above 2; a high load only warns. `bash bench/record-test.sh`
 checks the rules on a scratch repo; CI runs it.
 
