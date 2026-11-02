@@ -1,0 +1,61 @@
+# Feature: `Vec.with_capacity(n)` starts empty with room for `n` pushes, and a push past
+# the room grows it with every element kept. The bulk grow copy keeps elements of every
+# width: 1-byte bools, 16-byte strs and 24-byte structs, across several doublings.
+# expect: stdout "0 5 true\n[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9]\n[1, 2, 3]\n"
+# expect: exit 42
+import std/vec
+import std/map
+import std/io
+
+struct P { a: int, b: int, c: int }
+
+fn main() -> int {
+    e: Vec[int] = Vec[int].with_capacity(0)
+    io.print(e.len().to_string().concat(" "))
+    i := 0
+    while i < 5 {
+        e.push(i)
+        i += 1
+    }
+    io.print(e.len().to_string().concat(" "))
+
+    bs := Vec[bool].with_capacity(1)
+    i = 0
+    while i < 37 {
+        bs.push(i % 3 == 0)
+        i += 1
+    }
+    ok := bs.len() == 37
+    i = 0
+    while i < 37 {
+        if bs[i] != (i % 3 == 0) { ok = false }
+        i += 1
+    }
+    io.println(ok.to_string())
+
+    ss := Vec[str].with_capacity(2)
+    i = 0
+    while i < 10 {
+        ss.push("a".concat(i.to_string()))
+        i += 1
+    }
+    io.println(ss.to_string())
+
+    ps := Vec[P].new()
+    i = 0
+    while i < 100 {
+        ps.push(P { a: i, b: i * 2, c: i * 3 })
+        i += 1
+    }
+    big := ps.map(fn(p) { p.a + p.b + p.c })
+    sum := 0
+    big.each(fn(x) { sum = sum + x })
+    if sum != 29700 { return 1 }
+
+    m := Map[str, int].new()
+    m.set("x", 1)
+    m.set("y", 2)
+    m.set("z", 3)
+    io.println(m.values().to_string())
+    return e[4] + bs.len() + m.keys().len() - 2
+}

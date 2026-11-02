@@ -17,7 +17,7 @@ either runs cleanly or, under `errors/`, fails compilation on purpose.
 | `generics/`     | generic fns and structs, type-arg inference (incl. lambdas and `_` from the other args), methods with their own type params |
 | `places/`       | `mut` parameters: by-address arguments (locals, fields), forwarding, generics, aliasing, captured by non-escaping closures (incl. bound methods) |
 | `ref/`          | `Ref[T]` shared cells from `std/ref`: `Ref.new`, `get` / `set`, cell identity `==`, inferred `T` |
-| `vec/`          | `Vec[T]` from `std/vec`: literals, `push` / `get`, indexing, and the closure methods `each`, `map`, `filter`, `fold`, `any`, `all`, `find`, `sort`, `sort_by` (stable, in place) |
+| `vec/`          | `Vec[T]` from `std/vec`: literals, `with_capacity`, `push` / `get`, indexing, and the closure methods `each`, `map`, `filter`, `fold`, `any`, `all`, `find`, `sort`, `sort_by` (stable, in place) |
 | `option/`       | the prelude `Option[T]` / `Result[T, E]`: constructors, `?`, the built-in `is_*` / `expect` / `or`, and the closure methods from `std/option`: `map`, `then`, `or_else` (the lazy `or`), `map_error` |
 | `map/`          | `Map[K, V]` from `std/map`: `set` / `get`, `for k, v`, and the closure methods `each`, `filter`, `map` (the values), plus `keys()` / `values()` as a `Vec`, all in insertion order |
 | `set/`          | `Set[T]` from `std/set`: `add` / `contains`, `for x`, and the closure methods `each`, `filter`, `map`, in insertion order |

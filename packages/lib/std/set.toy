@@ -74,7 +74,7 @@ impl Set[T has Hashable] {
 impl Set[T has Display] has Display {
     fn display(self) -> str {
         n := mem.mp_len[T, ()](self.h)
-        parts := mem.ga_new[str]()
+        parts := mem.ga_with_cap[str](n)
         i := 0
         while i < n {
             mem.ga_push[str](parts, mem.mp_key_at[T, ()](self.h, i).to_string())

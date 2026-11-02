@@ -22,6 +22,23 @@ pub fn ga_new[T]() -> gc_array[T] {
     return gc_array[T](hdr)
 }
 
+# `ga_new` with room for `n` elements, for a caller that knows its final length. `cap`
+# never starts below 4: `ga_grow` doubles it, so a 0 would never grow. `ga_new` keeps its
+# own constant body instead of calling this with 4: the call and the runtime clamp cost
+# about 3% of instructions in programs that make many small Vecs.
+pub fn ga_with_cap[T](n: int) -> gc_array[T] {
+    c := if n < 4 { 4 } else { n }
+    hdr := gc_alloc(56)
+    unsafe {
+        store(offset(hdr, 8), c)
+        store(offset(hdr, 16), gc_alloc(c * size_of[T]()))
+        store(offset(hdr, 32), 0)
+        store(offset(hdr, 40), descriptor_of[T]())
+        store(offset(hdr, 48), size_of[T]())
+    }
+    return gc_array[T](hdr)
+}
+
 pub fn ga_len[T](a: gc_array[T]) -> int {
     return unsafe { load(offset(a, 0)) }
 }
@@ -67,24 +84,22 @@ pub fn ga_push[T](a: gc_array[T], x: T) {
     }
 }
 
+extern fn memcpy(dst: rawptr, src: rawptr, n: int) -> rawptr
+
 # Double the backing and copy the live prefix over. Store-before-alloc/copy: a collection
 # can fire inside `gc_alloc`, so the header still holds the OLD backing there (keeping it
 # reachable); once `ne` is allocated, publish it into the rooted header BEFORE the copy so
 # a later collection keeps BOTH arrays live (old via the spilled `e`, new via the header).
-# The header never moves, so every alias sees the new backing.
+# The header never moves, so every alias sees the new backing. libSystem's `memcpy` moves
+# the bytes in bulk: a toy loop costs dozens of instructions per element.
 pub fn ga_grow[T](a: gc_array[T], c: int) {
     nc := c * 2
     ne := gc_alloc(nc * size_of[T]())
-    e := unsafe { load(offset(a, 16)) }
+    e: rawptr = unsafe { load(offset(a, 16)) }
     unsafe {
         store(offset(a, 16), ne)
         store(offset(a, 8), nc)
-    }
-    i := 0
-    while i < c {
-        v: T = unsafe { load(offset(e, i * size_of[T]())) }
-        unsafe { store(offset(ne, i * size_of[T]()), v) }
-        i = i + 1
+        memcpy(ne, e, c * size_of[T]())
     }
 }
 
