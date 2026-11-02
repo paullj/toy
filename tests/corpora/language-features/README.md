@@ -73,3 +73,11 @@ every failing fixture, and `TOY_CORPUS=<path substring>` runs only the matching 
 (`TOY_CORPUS=closures/capture_loop ./zig-out/bin/toy-corpus-test`). The manifest holds
 each corpus's exact fixture count, so adding or removing a fixture means updating it,
 and a fixture that goes missing fails the suite.
+
+`TOY_GC_STRESS=1 ./zig-out/bin/toy-corpus-test` (or `mise run test:gc-stress`) is the
+GC stress mode: every program is built with the hidden `--gc-stress` flag, which
+collects before every heap allocation, at `-O0` and at `-O1`, and must meet the same
+`# expect:` lines. A missing GC root or a wrong trace then shows up in any program that
+allocates, not only in one that outgrows the collection budget. A program whose output
+counts collections, or that allocates too much to collect each time, opts out with
+`# gc-stress: skip`.

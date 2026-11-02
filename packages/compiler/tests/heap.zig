@@ -162,6 +162,41 @@ test "gc: an explicit collection bumps the collection count to 1" {
     try std.testing.expectEqual(@as(u8, 1), code);
 }
 
+test "gc: --gc-stress collects once per allocation, at -O0 and -O1; no flag never collects" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const src =
+        \\import std/gc
+        \\import std/ref
+        \\fn main() -> int {
+        \\    before := gc.collections()
+        \\    total := 0
+        \\    i := 0
+        \\    loop {
+        \\        if i >= 10 { break }
+        \\        r := Ref.new(i)
+        \\        total = total + r.get()
+        \\        i = i + 1
+        \\    }
+        \\    if total != 45 { return 255 }
+        \\    return gc.collections() - before
+        \\}
+        \\
+    ;
+    const cases = [_]struct { flags: []const []const u8, want: u8 }{
+        .{ .flags = &.{ "--gc-stress", "-O0" }, .want = 10 },
+        .{ .flags = &.{ "--gc-stress", "-O1" }, .want = 10 },
+        .{ .flags = &.{"-O0"}, .want = 0 },
+        .{ .flags = &.{"-O1"}, .want = 0 },
+    };
+    for (cases) |c| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-stress", src, c.flags);
+        try std.testing.expectEqual(c.want, code);
+    }
+}
+
 test "dfe: a collection inside a kept fn works after the link drops an allocating fn, at -O0 and -O1" {
     // The dropped fn precedes the kept ones, so a stack map keyed by the pre-drop layout
     // would hand the collector the wrong frame's roots and free the live Vec.

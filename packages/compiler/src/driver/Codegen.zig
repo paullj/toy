@@ -154,6 +154,7 @@ fn relink(
     ir_instrs: usize,
     desc_plan: []const Link.DescEntry,
     debug: ?Link.DebugInput,
+    profile: Profile,
 ) !LowerProgramResult {
     // Gather the lowered fns into a contiguous slice in source order. `linkAndTail`
     // CONSUMES the elements (frees each FnCode on every path), so we only free the
@@ -165,7 +166,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug, profile) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -186,8 +187,8 @@ fn relink(
 /// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
 /// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug);
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput, profile: Profile) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug, .{ .gc_stress = profile.gc_stress });
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -667,7 +668,7 @@ pub fn lowerGraphProgram(
     const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "" } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
+    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug, profile);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;

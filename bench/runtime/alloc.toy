@@ -2,6 +2,8 @@
 # grows with the input. Collection cost that grows with live heap times allocations
 # shows here first.
 # expect: stdout "500000550000\n"
+# Millions of allocations over a growing live heap: collecting on each one is far too slow.
+# gc-stress: skip
 
 import std/vec
 import std/io

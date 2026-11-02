@@ -14,6 +14,11 @@ pub const Name = enum(u8) { debug, release };
 name: Name = .debug,
 /// The IR passes. Starts as the profile's own choice; `-O`, `--opt` and `--no-opt` change it.
 opt: Opt.Config = .O0,
+/// Every heap allocation collects first, so a missing root or a wrong trace shows up in
+/// any allocating program, not only in one that outgrows the collection budget. Only the
+/// appended runtime changes, but it joins the key anyway so a stress build never serves a
+/// normal one from the cache, whatever later lowering starts to read it.
+gc_stress: bool = false,
 
 pub const debug: Profile = of(.debug);
 pub const release: Profile = of(.release);
@@ -45,8 +50,8 @@ const all_passes: Opt.Config = blk: {
 
 /// The fixed bytes the codegen key folds. A field added here must join them, or two
 /// profiles that differ in it would share code.
-pub fn keyBytes(p: Profile) [2]u8 {
-    return .{ @intFromEnum(p.name), p.opt.bits() };
+pub fn keyBytes(p: Profile) [3]u8 {
+    return .{ @intFromEnum(p.name), p.opt.bits(), @intFromBool(p.gc_stress) };
 }
 
 test "debug runs no pass and release runs every pass" {
@@ -61,4 +66,9 @@ test "the key bytes tell the profiles apart even when their passes match" {
     const debug_o1: Profile = .{ .name = .debug, .opt = .O1 };
     try std.testing.expect(!std.mem.eql(u8, &Profile.release.keyBytes(), &debug_o1.keyBytes()));
     try std.testing.expect(!std.mem.eql(u8, &Profile.release.keyBytes(), &Profile.debug.keyBytes()));
+}
+
+test "gc stress joins the key bytes" {
+    const stress: Profile = .{ .name = .debug, .opt = .O0, .gc_stress = true };
+    try std.testing.expect(!std.mem.eql(u8, &Profile.debug.keyBytes(), &stress.keyBytes()));
 }

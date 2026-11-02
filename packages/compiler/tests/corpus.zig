@@ -43,6 +43,12 @@
 //! the manifest. The fixtures run in parallel, each worker with its own cache
 //! directory, and every failing fixture is reported, not only the first.
 //!
+//! `TOY_GC_STRESS=1` is the GC stress mode: every `.expect` fixture is built with
+//! `--gc-stress` (collect before every allocation) at -O0 and at -O1 and must meet the
+//! same expectations; `.diagnostics` fixtures are skipped, as they run no code. A
+//! fixture whose output counts collections, or that allocates too much to collect on
+//! every allocation, opts out with `# gc-stress: skip`.
+//!
 //! This file is its own test binary, `toy-corpus-test`. Run it under `zig build test`,
 //! or `zig build test-bin` then `./zig-out/bin/toy-corpus-test`. `TOY_CORPUS=<substr>`
 //! runs only the fixtures whose path contains it:
@@ -65,6 +71,7 @@ const SourceMap = toyc.term.render.SourceMap;
 const Diagnostic = toyc.diagnostics.Diagnostic.Diagnostic;
 const Token = toyc.Token;
 const Span = toyc.diagnostics.model.Span;
+const Profile = toyc.Profile;
 
 const testing = std.testing;
 
@@ -406,6 +413,8 @@ const Expect = struct {
     include: std.ArrayList([]const u8) = .empty,
     /// Library folders (`-L`), relative to the fixture's folder, or `@harness`.
     libdir: std.ArrayList([]const u8) = .empty,
+    /// `# gc-stress: skip`: stress mode would change the output or take too long.
+    gc_stress_skip: bool = false,
 
     fn deinit(self: *Expect, gpa: std.mem.Allocator) void {
         if (self.stdout) |s| gpa.free(s);
@@ -485,7 +494,8 @@ fn parseArgs(gpa: std.mem.Allocator, body: []const u8, out: *std.ArrayList([]con
 /// Parse every directive out of `source`. The `# expect:` checks are `exit <N>`,
 /// `stdout "<bytes>"`, `stderr "<substr>"` and `compile-error "<substr>"`; the run
 /// inputs are `# stdin: "<bytes>"` (repeats concatenate), `# args: "a" "b c"` (repeats
-/// append), `# env: K=V` and `# include: "<dir>"` (repeats append). Caller `deinit`s.
+/// append), `# env: K=V` and `# include: "<dir>"` (repeats append); `# gc-stress: skip`
+/// keeps the fixture out of the GC stress mode. Caller `deinit`s.
 fn parseExpect(gpa: std.mem.Allocator, source: []const u8) !Expect {
     var e: Expect = .{};
     errdefer e.deinit(gpa);
@@ -514,6 +524,11 @@ fn parseExpect(gpa: std.mem.Allocator, source: []const u8) !Expect {
             const owned = try gpa.dupe(u8, raw);
             errdefer gpa.free(owned);
             try e.libdir.append(gpa, owned);
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "# gc-stress:")) {
+            if (!std.mem.eql(u8, std.mem.trim(u8, line["# gc-stress:".len..], " \t\r"), "skip")) return error.BadGcStressDirective;
+            e.gc_stress_skip = true;
             continue;
         }
         if (std.mem.startsWith(u8, line, "# env:")) {
@@ -641,6 +656,7 @@ fn compileAndRun(
     out_name: []const u8,
     e: *const Expect,
     cwd: []const u8,
+    profile: Profile,
 ) !RunResult {
     var include: std.ArrayList([]const u8) = .empty;
     defer {
@@ -690,7 +706,7 @@ fn compileAndRun(
 
     if (!can_exec) return .skipped_exec;
 
-    var lowered = try DriverCodegen.lowerGraphProgram(gpa, io, cache, Driver.default_target, &graph, &res, &tc, .verify, .debug, true, null, null, 0);
+    var lowered = try DriverCodegen.lowerGraphProgram(gpa, io, cache, Driver.default_target, &graph, &res, &tc, .verify, profile, true, null, null, 0);
     const lp = switch (lowered) {
         .ok => |*ok| ok,
         // A codegen `EmitError` after a clean typecheck is a real back-end failure,
@@ -858,11 +874,28 @@ fn checkExpectFixture(
     var e = try parseExpect(gpa, source);
     defer e.deinit(gpa);
 
-    var r = try compileAndRun(gpa, io, cache, entry, out_name, &e, cwd);
-    defer r.deinit(gpa);
-
-    return judge(gpa, entry, e, r);
+    if (!stress) {
+        var r = try compileAndRun(gpa, io, cache, entry, out_name, &e, cwd, .debug);
+        defer r.deinit(gpa);
+        return judge(gpa, entry, e, r);
+    }
+    if (e.gc_stress_skip) return null;
+    const levels = [_]struct { opt: toyc.Opt.Config, tag: []const u8 }{ .{ .opt = .O0, .tag = "-O0" }, .{ .opt = .O1, .tag = "-O1" } };
+    for (levels) |lv| {
+        // A distinct binary per build: macOS can kill a binary rewritten at the same path.
+        const out = try std.fmt.allocPrint(gpa, "{s}{s}", .{ out_name, lv.tag });
+        defer gpa.free(out);
+        var r = try compileAndRun(gpa, io, cache, entry, out, &e, cwd, .{ .name = .debug, .opt = lv.opt, .gc_stress = true });
+        defer r.deinit(gpa);
+        const name = try std.fmt.allocPrint(gpa, "{s} [gc-stress {s}]", .{ entry, lv.tag });
+        defer gpa.free(name);
+        if (try judge(gpa, name, e, r)) |msg| return msg;
+    }
+    return null;
 }
+
+/// The GC stress mode, read once from `TOY_GC_STRESS` before the workers start.
+var stress = false;
 
 /// One fixture: its cwd-relative path (owned) and how its corpus checks it.
 const Fixture = struct { path: []const u8, mode: Mode };
@@ -946,7 +979,7 @@ const Run = struct {
     fn check(run: *Run, cache: Cache, cwd: []const u8, i: usize) !?[]const u8 {
         const f = run.fixtures[i];
         return switch (f.mode) {
-            .diagnostics => checkFixture(run.gpa, run.io, cache, f.path),
+            .diagnostics => if (stress) null else checkFixture(run.gpa, run.io, cache, f.path),
             .expect => {
                 const out_name = try std.fmt.allocPrint(run.gpa, "{s}/f{d}", .{ run.out_dir, i });
                 defer run.gpa.free(out_name);
@@ -979,6 +1012,8 @@ fn runCorpus(gpa: std.mem.Allocator) !void {
 
     var picked: std.ArrayList(Fixture) = .empty;
     defer picked.deinit(gpa);
+    stress = if (testing.environ.getPosix("TOY_GC_STRESS")) |v| v.len != 0 else false;
+    if (stress) std.debug.print("corpus: GC stress mode (--gc-stress at -O0 and -O1)\n", .{});
     const filter: ?[]const u8 = if (testing.environ.getPosix("TOY_CORPUS")) |sub| (if (sub.len == 0) null else sub) else null;
     for (all.items) |f| {
         if (filter == null or std.mem.indexOf(u8, f.path, filter.?) != null) try picked.append(gpa, f);
@@ -1253,6 +1288,17 @@ test "expect harness: parseExpect reads stderr, stdin, args and env directives" 
     try testing.expectError(error.BadStdinDirective, parseExpect(gpa, "# stdin: x\n"));
     try testing.expectError(error.BadIncludeDirective, parseExpect(gpa, "# include: lib\n"));
     try testing.expectError(error.BadStderrDirective, parseExpect(gpa, "# expect: stderr x\n"));
+}
+
+test "expect harness: parseExpect reads gc-stress skip and rejects other values" {
+    const gpa = testing.allocator;
+    var e = try parseExpect(gpa, "# expect: exit 1\n# gc-stress: skip\n");
+    defer e.deinit(gpa);
+    try testing.expect(e.gc_stress_skip);
+    var plain = try parseExpect(gpa, "# expect: exit 1\n");
+    defer plain.deinit(gpa);
+    try testing.expect(!plain.gc_stress_skip);
+    try testing.expectError(error.BadGcStressDirective, parseExpect(gpa, "# gc-stress: maybe\n"));
 }
 
 test "expect harness: judge matches stderr by substring" {

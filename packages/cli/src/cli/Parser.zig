@@ -299,12 +299,14 @@ fn handleLong(
     });
 }
 
-/// Every long name `cmd` recognises, declined ones included: a near miss to a declined
-/// name is still the flag the user meant, and the parser then says who owns it.
+/// Every long name `cmd` suggests, declined ones included: a near miss to a declined
+/// name is still the flag the user meant, and the parser then says who owns it. A hidden
+/// one is left out, as help leaves it out.
 fn longNames(comptime cmd: Spec.Command) []const []const u8 {
     comptime {
         var names: []const []const u8 = &.{ "help", "version" };
         for (cmd.options ++ cmd.declined.options) |o| {
+            if (o.hidden) continue;
             if (o.long) |l| names = names ++ &[_][]const u8{l};
         }
         return names;
@@ -1343,6 +1345,19 @@ test "an unknown long flag suggests a near long name, including a declined one" 
     var r2 = try parse(testing.allocator, cmd.subcommands[1], &.{ "--no-cahce", "x.toy" }, &sink);
     defer r2.deinit();
     try testing.expectEqualStrings("no-cache", sink.items()[0].suggestion);
+}
+
+test "an unknown long flag never suggests a hidden one" {
+    const cmd: Spec.Command = comptime .{
+        .name = "build",
+        .options = &.{.{ .long = "gc-stress", .action = .set_true, .hidden = true, .help = "Secret" }},
+    };
+    var sink: Sink = .{};
+    defer sink.deinit(testing.allocator);
+    var r = try parse(testing.allocator, cmd, &.{"--gc-stres"}, &sink);
+    defer r.deinit();
+    try testing.expectEqual(Sink.Kind.unknown_flag, sink.items()[0].kind);
+    try testing.expectEqualStrings("", sink.items()[0].suggestion);
 }
 
 test "an unknown short flag gets no suggestion" {

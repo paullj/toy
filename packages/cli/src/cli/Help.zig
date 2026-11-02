@@ -69,7 +69,7 @@ pub fn renderHelp(comptime cmd: Spec.Command, out: *std.Io.Writer, mode: Mode) !
 
     try out.writeAll("\nOptions:\n");
     inline for (cmd.options) |o| {
-        try renderRow(out, optionLabel(o), rowHelp(o.help, o.long_help, mode), enumSuffix(o), width);
+        if (!o.hidden) try renderRow(out, optionLabel(o), rowHelp(o.help, o.long_help, mode), enumSuffix(o), width);
     }
     // The auto-injected flags are not in the spec's option list; list them last
     // so they always appear, matching the reservation in `Spec`.
@@ -172,7 +172,9 @@ fn leftWidth(comptime cmd: Spec.Command) usize {
         var w: usize = 0;
         for (cmd.subcommands) |s| w = @max(w, s.name.len);
         for (cmd.positionals) |p| w = @max(w, positionalLabel(p).len);
-        for (cmd.options) |o| w = @max(w, optionLabel(o).len);
+        for (cmd.options) |o| {
+            if (!o.hidden) w = @max(w, optionLabel(o).len);
+        }
         w = @max(w, "-h, --help".len);
         w = @max(w, "-V, --version".len);
         return w;
@@ -358,4 +360,22 @@ test "enum option with empty help still renders its choices" {
     var w = std.Io.Writer.fixed(&buf);
     try renderHelp(cmd, &w, .short);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "(one of: fast|small)") != null);
+}
+
+test "a hidden option is left out of help and of its column width" {
+    const cmd = comptime Spec.Command{
+        .name = "c",
+        .options = &.{
+            .{ .long = "v", .action = .set_true, .help = "Shown" },
+            .{ .long = "a-very-long-hidden-switch", .action = .set_true, .hidden = true, .help = "Secret" },
+        },
+    };
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try renderHelp(cmd, &w, .long);
+    const out = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "hidden") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "Secret") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "Shown") != null);
+    try testing.expect(comptime leftWidth(cmd) < "    --a-very-long-hidden-switch".len);
 }

@@ -127,8 +127,9 @@ fn emitTriggerCompare(code: *std.ArrayList(u8), gpa: std.mem.Allocator) error{Ou
 /// Small requests round up to a size class and pop that class's freelist (clearing the
 /// reused cell's next-pointer to preserve zero-on-alloc); an empty freelist once the
 /// allocation budget is spent triggers a collection, else mmaps + carves a fresh span. Requests
-/// above 8 KiB get a direct span-aligned mmap (large object). Caller owns the result.
-pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
+/// above 8 KiB get a direct span-aligned mmap (large object). `stress` collects on entry
+/// to every call. Caller owns the result.
+pub fn lowerGcAlloc(gpa: std.mem.Allocator, stress: bool) error{OutOfMemory}!Link.FnCode {
     const A = Aarch64;
     const emit = emitWord;
     var code: std.ArrayList(u8) = .empty;
@@ -140,6 +141,13 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emitFramePrologue(&code, gpa);
     try emit(&code, gpa, A.subImm(A.SP, A.SP, 32));
     try emit(&code, gpa, A.strSp(0, 0)); // save size (calls clobber x0-x18)
+    // The collection resets the watermark to 0 and one request adds at most 8 KiB (small)
+    // or is compared before it is added (large), so the budget trigger below never also
+    // fires: a stress run collects exactly once per allocation.
+    if (stress) {
+        try emitBuiltinCall(&code, &relocs, gpa, "gc_collect");
+        try emit(&code, gpa, A.ldrSp(0, 0));
+    }
     try emitLoadCb(&code, &relocs, gpa, 9);
 
     // Large object (> 8 KiB): a direct span-aligned mmap, bypassing the class arena.
@@ -1168,7 +1176,7 @@ test "gc_mark: names the builtin, opens a frame, ends in ret, byte-identical acr
 
 test "gc_alloc: names the builtin, opens a frame, and carries a bl gc_collect call reloc" {
     const gpa = testing.allocator;
-    var fc = try lowerGcAlloc(gpa);
+    var fc = try lowerGcAlloc(gpa, false);
     defer fc.deinit(gpa);
 
     try testing.expectEqualStrings("gc_alloc", fc.sym.name);
@@ -1196,9 +1204,34 @@ test "gc_alloc: names the builtin, opens a frame, and carries a bl gc_collect ca
     try testing.expect(saw_mmap);
 }
 
+fn lowerNormalGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
+    return lowerGcAlloc(gpa, false);
+}
+
+test "gc_alloc under stress: collects before anything else, and only adds that call" {
+    const gpa = testing.allocator;
+    var normal = try lowerGcAlloc(gpa, false);
+    defer normal.deinit(gpa);
+    var stress = try lowerGcAlloc(gpa, true);
+    defer stress.deinit(gpa);
+
+    // Only the frame prologue, the 32-byte scratch and the size save precede the
+    // `bl gc_collect`, ahead of any branch, so no path skips it.
+    const first = stress.relocs[0];
+    try testing.expectEqual(Link.RelocKind.call26, first.kind);
+    try testing.expectEqualStrings("gc_collect", first.target.func.name);
+    try testing.expectEqual(@as(u32, 16), first.site);
+
+    // Two words more (bl + reload size) and one more call reloc; nothing else changes.
+    try testing.expectEqual(normal.code.len + 8, stress.code.len);
+    try testing.expectEqual(normal.relocs.len + 1, stress.relocs.len);
+    try testing.expectEqualSlices(u8, normal.code[0..first.site], stress.code[0..first.site]);
+    try testing.expectEqualSlices(u8, normal.code[first.site..], stress.code[first.site + 8 ..]);
+}
+
 test "every gc builtin reaches the control block through __bss: no msync probe, no fixed address" {
     const gpa = testing.allocator;
-    inline for (.{ lowerGcAlloc, lowerGcCollect, lowerGcMark, lowerGcMarkLeaf, lowerGcStats, lowerGcSpanCount }) |lower| {
+    inline for (.{ lowerNormalGcAlloc, lowerGcCollect, lowerGcMark, lowerGcMarkLeaf, lowerGcStats, lowerGcSpanCount }) |lower| {
         var fc = try lower(gpa);
         defer fc.deinit(gpa);
         var adrp = false;

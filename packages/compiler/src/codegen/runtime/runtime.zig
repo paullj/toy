@@ -9,12 +9,18 @@ const panic = @import("panic.zig");
 const gc = @import("gc.zig");
 const trace = @import("trace.zig");
 
+/// The per-build runtime choices a builtin body may read, taken from the build profile.
+pub const Config = struct {
+    /// `gc_alloc` collects before every allocation (`--gc-stress`).
+    gc_stress: bool = false,
+};
+
 /// A hand-emitted AArch64 builtin body and its stable name. The link tail both
 /// scans for referenced builtins and appends their bodies off this one list, so
 /// the image stays a pure function of the fn set.
 pub const HandBuiltin = struct {
     name: []const u8,
-    lower: *const fn (std.mem.Allocator) error{OutOfMemory}!Link.FnCode,
+    lower: *const fn (std.mem.Allocator, Config) error{OutOfMemory}!Link.FnCode,
     /// Other hand-emitted builtins this body statically calls from WITHIN its appended
     /// machine code (e.g. `gc_alloc` triggers `gc_collect`). Such an edge is invisible to
     /// the link tail's fn-only used-scan, so the linker closes the used set over it — a
@@ -27,20 +33,33 @@ pub const HandBuiltin = struct {
 /// linked image order-independent of the fn set's discovery/thread order. Append,
 /// never reorder.
 pub const hand_builtins = [_]HandBuiltin{
-    .{ .name = "panic", .lower = panic.lowerPanic },
-    .{ .name = "gc_alloc", .lower = gc.lowerGcAlloc, .static_call_deps = &.{"gc_collect"} },
-    .{ .name = "gc_span_count", .lower = gc.lowerGcSpanCount },
-    .{ .name = "gc_collect", .lower = gc.lowerGcCollect, .static_call_deps = &.{ "ga_trace", "mp_trace" } },
-    .{ .name = "gc_stats", .lower = gc.lowerGcStats },
-    .{ .name = "gc_mark", .lower = gc.lowerGcMark },
-    .{ .name = "gc_mark_leaf", .lower = gc.lowerGcMarkLeaf },
-    .{ .name = "ga_trace", .lower = trace.lowerGaTrace, .static_call_deps = &.{"gc_mark_leaf"} },
-    .{ .name = "mp_trace", .lower = trace.lowerMpTrace, .static_call_deps = &.{"gc_mark_leaf"} },
-    .{ .name = "text_base", .lower = panic.lowerTextBase },
-    .{ .name = "__int_to_str", .lower = str.lowerIntToStr, .static_call_deps = &.{"gc_alloc"} },
-    .{ .name = "__str_concat", .lower = str.lowerStrConcat, .static_call_deps = &.{"gc_alloc"} },
-    .{ .name = "__uint_to_str", .lower = str.lowerUintToStr, .static_call_deps = &.{"gc_alloc"} },
+    .{ .name = "panic", .lower = plain(panic.lowerPanic) },
+    .{ .name = "gc_alloc", .lower = gcAlloc, .static_call_deps = &.{"gc_collect"} },
+    .{ .name = "gc_span_count", .lower = plain(gc.lowerGcSpanCount) },
+    .{ .name = "gc_collect", .lower = plain(gc.lowerGcCollect), .static_call_deps = &.{ "ga_trace", "mp_trace" } },
+    .{ .name = "gc_stats", .lower = plain(gc.lowerGcStats) },
+    .{ .name = "gc_mark", .lower = plain(gc.lowerGcMark) },
+    .{ .name = "gc_mark_leaf", .lower = plain(gc.lowerGcMarkLeaf) },
+    .{ .name = "ga_trace", .lower = plain(trace.lowerGaTrace), .static_call_deps = &.{"gc_mark_leaf"} },
+    .{ .name = "mp_trace", .lower = plain(trace.lowerMpTrace), .static_call_deps = &.{"gc_mark_leaf"} },
+    .{ .name = "text_base", .lower = plain(panic.lowerTextBase) },
+    .{ .name = "__int_to_str", .lower = plain(str.lowerIntToStr), .static_call_deps = &.{"gc_alloc"} },
+    .{ .name = "__str_concat", .lower = plain(str.lowerStrConcat), .static_call_deps = &.{"gc_alloc"} },
+    .{ .name = "__uint_to_str", .lower = plain(str.lowerUintToStr), .static_call_deps = &.{"gc_alloc"} },
 };
+
+/// A `HandBuiltin.lower` for a body that reads no `Config`.
+fn plain(comptime f: fn (std.mem.Allocator) error{OutOfMemory}!Link.FnCode) *const fn (std.mem.Allocator, Config) error{OutOfMemory}!Link.FnCode {
+    return struct {
+        fn lower(gpa: std.mem.Allocator, _: Config) error{OutOfMemory}!Link.FnCode {
+            return f(gpa);
+        }
+    }.lower;
+}
+
+fn gcAlloc(gpa: std.mem.Allocator, cfg: Config) error{OutOfMemory}!Link.FnCode {
+    return gc.lowerGcAlloc(gpa, cfg.gc_stress);
+}
 
 /// Every C symbol a hand-emitted builtin imports, sorted. They bind to libSystem, so
 /// a user `extern` block that names one for another library is a conflict.
@@ -101,7 +120,7 @@ test "libsystem_imports lists every symbol a hand builtin imports" {
     const gpa = std.testing.allocator;
     var seen: [libsystem_imports.len]bool = @splat(false);
     for (hand_builtins) |hb| {
-        var fc = try hb.lower(gpa);
+        var fc = try hb.lower(gpa, .{});
         defer fc.deinit(gpa);
         for (fc.relocs) |r| if (r.target == .import) {
             for (libsystem_imports, 0..) |nm, i| {
