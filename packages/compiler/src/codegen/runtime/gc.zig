@@ -21,16 +21,14 @@ const patchBCondTo = em.patchBCondTo;
 const patchBTo = em.patchBTo;
 
 // A conservative, non-moving MARK-SWEEP collector, hand-emitted like `print`/`panic`.
-// Appended once at link time (emit.zig) when any fn references a heap intrinsic. There is
-// no writable image segment (LC_MAIN gives no init hook, __DATA_CONST is read-only after
-// dyld binds, and no __bss exists), so the collector's control block lives at a fixed
-// high VM address, `mmap`ped MAP_FIXED on the first call. `msync(CB_ADDR, 1, MS_ASYNC)`
-// is the fault-free is-it-initialized probe: it returns 0 when the page is mapped and −1
-// (ENOMEM) when it is not. (macOS `mincore` cannot serve here — it returns 0 for an
-// unmapped page too.) The CB page is metadata-only (span_count, collection count, a
-// growth watermark, the span/large lists, the mark-stack fields, 13 per-class freelist
-// heads, and the bytes the last sweep kept live); a fresh zeroed page leaves every field
-// 0, so nothing is seeded.
+// Appended once at link time (emit.zig) when any fn references a heap intrinsic. The
+// collector's control block lives in the image's writable zero-fill `__DATA,__bss`, which
+// the linker adds whenever a reloc targets `.data`; each builtin reaches it PC-relatively
+// (adrp+add). The kernel maps it zeroed at exec, so every field starts 0 and no init call,
+// probe or fixed-address map is needed: an earlier fixed-address design paid one `msync`
+// syscall per allocation to ask whether the page was mapped yet. The CB is metadata-only
+// (span_count, collection count, a growth watermark, the span/large lists, the mark-stack
+// fields, 13 per-class freelist heads, and the bytes the last sweep kept live).
 //
 // Each 16 KiB size-class span carries a 256-byte self-describing prologue (its size
 // class, cell count, cells base, class index, and a 1-bit-per-cell mark bitmap); cells
@@ -47,12 +45,9 @@ const patchBTo = em.patchBTo;
 // frame cell), traces marked objects to a fixpoint over a malloc-backed mark stack
 // (resolving each candidate word's span through a hash table of span pages built per
 // collection), and linear-sweeps every span (dead cells → freelists, mark bits cleared).
-// All emitted bodies are PURE fixed AArch64 (only the constant CB address / mmap+malloc
-// flags / lengths are baked), so the bytes are byte-identical at any -jN; the runtime
-// span/mark-stack addresses never touch the image.
-
-const cb_addr_hw: u16 = 0x3000; // CB_ADDR = 0x3000 << 32 (48 TiB, image-far, empty mid-VA)
-const cb_addr_lsl: u2 = 2; // lsl #32
+// All emitted bodies are PURE fixed AArch64 (only mmap+malloc flags / lengths are baked;
+// the CB address is a link-time reloc), so the bytes are byte-identical at any -jN; the
+// runtime span/mark-stack addresses never touch the image.
 
 // CB header field offsets (all 8-byte). `span_count` sits at +0 so `gc_span_count` reads
 // it there. `scratch_a`/`scratch_b` hold collector temporaries live across malloc/realloc.
@@ -72,6 +67,10 @@ const off_live: u32 = 184;
 const off_ht_ptr: u32 = 192;
 const off_ht_mask: u32 = 200;
 const off_ht_shift: u32 = 208;
+
+comptime {
+    std.debug.assert(off_ht_shift + 8 <= Link.bss_size);
+}
 
 // Class-span prologue field offsets (size_class != 0 marks a class span).
 const sp_next: u32 = 0;
@@ -93,9 +92,7 @@ const span: u16 = 0x4000; // 16 KiB span
 const cells_bytes: u16 = 0x3F00; // span - prologue = 16128 bytes usable for cells
 const prot_rw: u16 = 3; // PROT_READ | PROT_WRITE
 const map_anon_priv: u16 = 0x1002; // MAP_ANON | MAP_PRIVATE
-const map_anon_priv_fixed: u16 = 0x1012; // MAP_ANON | MAP_PRIVATE | MAP_FIXED
 const large_threshold: u16 = 0x2000; // 8 KiB: requests above this bypass the span arena
-const ms_async: u16 = 1; // MS_ASYNC
 const ms_init: u16 = 4096; // initial mark-stack capacity (entries; 16 B each)
 const trigger_floor_hw1: u16 = 4; // movz #4, lsl #16 = 256 KiB minimum collection budget
 
@@ -103,36 +100,13 @@ const trigger_floor_hw1: u16 = 4; // movz #4, lsl #16 = 256 KiB minimum collecti
 // The taxonomy lives in `Abi` (the descriptor + the allocator share one authority).
 const size_classes = Abi.size_classes;
 
-/// Ensure the control-block page exists, leaving CB_ADDR in x9 on exit. The page is
-/// metadata-only now (it no longer doubles as span 0); a fresh MAP_FIXED page is zeroed,
-/// so every CB field starts 0 and nothing is seeded. Clobbers x0-x5, x9, x16; emits
-/// `.import` relocs for `msync` and `mmap` (auto-joining the dedup+sorted GOT set).
-fn emitLocateCb(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc), gpa: std.mem.Allocator) error{OutOfMemory}!void {
-    const A = Aarch64;
-    const emit = emitWord;
-
-    // msync(CB_ADDR, 1, MS_ASYNC): 0 → page mapped (already initialized) → skip mmap.
-    try emit(code, gpa, A.movz(0, cb_addr_hw, cb_addr_lsl));
-    try emit(code, gpa, A.movz(1, 1, 0));
-    try emit(code, gpa, A.movz(2, ms_async, 0));
-    try emitImportPreamble(code, relocs, gpa, "msync", 16);
-    try emit(code, gpa, A.blr(16));
-    const cbz_site: u32 = @intCast(code.items.len);
-    try emit(code, gpa, A.cbz(0, 0)); // mapped → skip mmap (backpatched below)
-
-    // mmap(CB_ADDR, SPAN, RW, ANON|PRIVATE|FIXED, -1, 0): a zeroed page at CB_ADDR.
-    try emit(code, gpa, A.movz(0, cb_addr_hw, cb_addr_lsl));
-    try emit(code, gpa, A.movz(1, span, 0));
-    try emit(code, gpa, A.movz(2, prot_rw, 0));
-    try emit(code, gpa, A.movz(3, map_anon_priv_fixed, 0));
-    try emit(code, gpa, A.movn(4, 0, 0)); // fd = -1
-    try emit(code, gpa, A.movz(5, 0, 0));
-    try emitImportPreamble(code, relocs, gpa, "mmap", 16);
-    try emit(code, gpa, A.blr(16));
-
-    const mapped: u32 = @intCast(code.items.len);
-    patchCbzTo(code.items, cbz_site, mapped);
-    try emit(code, gpa, A.movz(9, cb_addr_hw, cb_addr_lsl)); // x9 = CB_ADDR (both paths)
+/// Load the control block's address into `rd`: an adrp+add pair against the `__bss`
+/// base, patched once vmaddrs are known. Touches no other register.
+fn emitLoadCb(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc), gpa: std.mem.Allocator, rd: u32) error{OutOfMemory}!void {
+    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .data = 0 }, .kind = .adrp_page });
+    try emitWord(code, gpa, Aarch64.adrp(rd, 0));
+    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .data = 0 }, .kind = .add_lo12 });
+    try emitWord(code, gpa, Aarch64.addImm(rd, rd, 0));
 }
 
 /// Emit the collection-trigger compare with CB in x9: flags = watermark (x3) against the
@@ -166,9 +140,7 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emitFramePrologue(&code, gpa);
     try emit(&code, gpa, A.subImm(A.SP, A.SP, 32));
     try emit(&code, gpa, A.strSp(0, 0)); // save size (calls clobber x0-x18)
-
-    try emitLocateCb(&code, &relocs, gpa); // x9 = CB
-    try emit(&code, gpa, A.ldrSp(0, 0)); // x0 = size
+    try emitLoadCb(&code, &relocs, gpa, 9);
 
     // Large object (> 8 KiB): a direct span-aligned mmap, bypassing the class arena.
     try emit(&code, gpa, A.movz(13, large_threshold, 0));
@@ -188,7 +160,7 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emitBuiltinCall(&code, &relocs, gpa, "gc_collect");
     const lg_after_collect: u32 = @intCast(code.items.len);
     patchBCondTo(code.items, lg_skip_collect, lg_after_collect);
-    try emit(&code, gpa, A.movz(9, cb_addr_hw, cb_addr_lsl)); // reload CB
+    try emitLoadCb(&code, &relocs, gpa, 9); // reload CB
     try emit(&code, gpa, A.ldrSp(0, 0)); // reload size
 
     try emit(&code, gpa, A.addImm(1, 0, prologue)); // 256 + size
@@ -205,7 +177,7 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.movz(5, 0, 0));
     try emitImportPreamble(&code, &relocs, gpa, "mmap", 16);
     try emit(&code, gpa, A.blr(16)); // x0 = base
-    try emit(&code, gpa, A.movz(9, cb_addr_hw, cb_addr_lsl)); // x9 = CB
+    try emitLoadCb(&code, &relocs, gpa, 9); // x9 = CB
     try emit(&code, gpa, A.ldrRegUoff(10, 9, off_large_head));
     try emit(&code, gpa, A.strRegUoff(10, 0, lg_next)); // base.next = large_head
     try emit(&code, gpa, A.strRegUoff(0, 9, off_large_head)); // large_head = base
@@ -264,7 +236,7 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.bCond(.lo, 0)); // budget not spent → refill
     try emitBuiltinCall(&code, &relocs, gpa, "gc_collect");
     // Reload CB/idx/slot/head (the call clobbered x0-x18).
-    try emit(&code, gpa, A.movz(9, cb_addr_hw, cb_addr_lsl));
+    try emitLoadCb(&code, &relocs, gpa, 9);
     try emit(&code, gpa, A.ldrSp(2, 16)); // idx
     try emit(&code, gpa, A.movz(5, 3, 0));
     try emit(&code, gpa, A.lslv(6, 2, 5));
@@ -296,7 +268,7 @@ pub fn lowerGcAlloc(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.movz(5, 0, 0));
     try emitImportPreamble(&code, &relocs, gpa, "mmap", 16);
     try emit(&code, gpa, A.blr(16)); // x0 = span base
-    try emit(&code, gpa, A.movz(9, cb_addr_hw, cb_addr_lsl)); // x9 = CB
+    try emitLoadCb(&code, &relocs, gpa, 9); // x9 = CB
     try emit(&code, gpa, A.ldrSp(1, 8)); // class
     try emit(&code, gpa, A.ldrSp(2, 16)); // idx
     try emit(&code, gpa, A.ldrRegUoff(10, 9, off_span_head));
@@ -657,16 +629,14 @@ pub fn lowerGcMark(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     var relocs: std.ArrayList(Link.Reloc) = .empty;
     errdefer deinitBuiltinRelocs(&relocs, gpa);
 
-    // x19 is callee-saved (emitConservativeMark reads CB from it) and x0 is clobbered by
-    // emitLocateCb, so both are stashed in a 16-byte scratch frame across the setup.
+    // x19 is callee-saved and emitConservativeMark reads CB from it, so the caller's is
+    // stashed in a 16-byte scratch frame.
     try emitFramePrologue(&code, gpa);
     try emit(&code, gpa, A.subImm(A.SP, A.SP, 16));
     try emit(&code, gpa, A.strSp(19, 0)); // preserve caller's x19
-    try emit(&code, gpa, A.strSp(0, 8)); // save candidate (emitLocateCb clobbers x0)
 
-    try emitLocateCb(&code, &relocs, gpa); // x9 = CB
-    try emit(&code, gpa, A.movReg(19, 9)); // x19 = CB (the reg emitConservativeMark reads)
-    try emit(&code, gpa, A.ldrSp(10, 8)); // x10 = candidate (the reg it marks)
+    try emitLoadCb(&code, &relocs, gpa, 19);
+    try emit(&code, gpa, A.movReg(10, 0)); // x10 = candidate (the reg it marks)
     try emit(&code, gpa, A.movz(24, 0, 0)); // descriptor = 0 → the pop word-scans conservatively
     try emitConservativeMark(&code, &relocs, gpa, true);
 
@@ -696,11 +666,9 @@ pub fn lowerGcMarkLeaf(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emitFramePrologue(&code, gpa);
     try emit(&code, gpa, A.subImm(A.SP, A.SP, 16));
     try emit(&code, gpa, A.strSp(19, 0)); // preserve caller's x19
-    try emit(&code, gpa, A.strSp(0, 8)); // save candidate (emitLocateCb clobbers x0)
 
-    try emitLocateCb(&code, &relocs, gpa); // x9 = CB
-    try emit(&code, gpa, A.movReg(19, 9)); // x19 = CB
-    try emit(&code, gpa, A.ldrSp(10, 8)); // x10 = candidate
+    try emitLoadCb(&code, &relocs, gpa, 19);
+    try emit(&code, gpa, A.movReg(10, 0)); // x10 = candidate
     try emitConservativeMark(&code, &relocs, gpa, false); // mark bit only, no push
 
     try emit(&code, gpa, A.ldrSp(19, 0)); // restore caller's x19
@@ -752,8 +720,7 @@ pub fn lowerGcCollect(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.strSp(27, 64));
     try emit(&code, gpa, A.strSp(28, 72));
 
-    try emitLocateCb(&code, &relocs, gpa); // x9 = CB
-    try emit(&code, gpa, A.movReg(19, 9)); // x19 = CB
+    try emitLoadCb(&code, &relocs, gpa, 19);
 
     // Self-locate text_base into x25, and load the GC stack-map table base into x26 via the
     // reserved `.cstr` hash (the exact adrp+add path `lowerPanic` uses for the symtab). Both
@@ -1115,8 +1082,7 @@ pub fn lowerGcCollect(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     return finishBuiltin(&code, &relocs, gpa, "gc_collect");
 }
 
-/// Build the `gc_span_count()` builtin: the number of spans mapped so far. Forces lazy
-/// CB init if called before any allocation, so it always returns a truthful count.
+/// Build the `gc_span_count()` builtin: the number of spans mapped so far.
 pub fn lowerGcSpanCount(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     const A = Aarch64;
     const emit = emitWord;
@@ -1126,7 +1092,7 @@ pub fn lowerGcSpanCount(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     errdefer deinitBuiltinRelocs(&relocs, gpa);
 
     try emitFramePrologue(&code, gpa);
-    try emitLocateCb(&code, &relocs, gpa);
+    try emitLoadCb(&code, &relocs, gpa, 9);
     try emit(&code, gpa, A.ldrRegUoff(0, 9, off_span_count));
     try emit(&code, gpa, A.ldpFpLrPost);
     try emit(&code, gpa, A.ret);
@@ -1134,8 +1100,7 @@ pub fn lowerGcSpanCount(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     return finishBuiltin(&code, &relocs, gpa, "gc_span_count");
 }
 
-/// Build the `gc_stats()` builtin: the number of collections run so far. Forces lazy CB
-/// init if called before any allocation, so it always returns a truthful count.
+/// Build the `gc_stats()` builtin: the number of collections run so far.
 pub fn lowerGcStats(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     const A = Aarch64;
     const emit = emitWord;
@@ -1145,7 +1110,7 @@ pub fn lowerGcStats(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     errdefer deinitBuiltinRelocs(&relocs, gpa);
 
     try emitFramePrologue(&code, gpa);
-    try emitLocateCb(&code, &relocs, gpa);
+    try emitLoadCb(&code, &relocs, gpa, 9);
     try emit(&code, gpa, A.ldrRegUoff(0, 9, off_collections));
     try emit(&code, gpa, A.ldpFpLrPost);
     try emit(&code, gpa, A.ret);
@@ -1229,6 +1194,30 @@ test "gc_alloc: names the builtin, opens a frame, and carries a bl gc_collect ca
     try testing.expectEqual(@as(usize, 2), call26s);
     try testing.expect(saw_collect);
     try testing.expect(saw_mmap);
+}
+
+test "every gc builtin reaches the control block through __bss: no msync probe, no fixed address" {
+    const gpa = testing.allocator;
+    inline for (.{ lowerGcAlloc, lowerGcCollect, lowerGcMark, lowerGcMarkLeaf, lowerGcStats, lowerGcSpanCount }) |lower| {
+        var fc = try lower(gpa);
+        defer fc.deinit(gpa);
+        var adrp = false;
+        var add = false;
+        for (fc.relocs) |r| {
+            if (r.target == .import) try testing.expect(!std.mem.eql(u8, r.target.import.name, "msync"));
+            if (r.target == .data) {
+                try testing.expectEqual(@as(u32, 0), r.target.data);
+                if (r.kind == .adrp_page) adrp = true;
+                if (r.kind == .add_lo12) add = true;
+            }
+        }
+        try testing.expect(adrp and add);
+        var i: usize = 0;
+        while (i < fc.code.len) : (i += 4) {
+            const w = std.mem.readInt(u32, fc.code[i..][0..4], .little);
+            for (0..31) |rd| try testing.expect(w != Aarch64.movz(@intCast(rd), 0x3000, 2));
+        }
+    }
 }
 
 test "gc_collect: names the builtin, opens a frame, ends in ret, and pulls malloc + realloc + calloc + free" {
