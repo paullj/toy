@@ -22,6 +22,7 @@ const Lexer = @import("../lex.zig");
 const Cache = @import("Cache.zig");
 const Key = @import("Key.zig");
 const CodegenIr = @import("../codegen/CodegenIr.zig");
+const CodegenMir = @import("../codegen/CodegenMir.zig");
 const Ast = @import("../ast/Ast.zig");
 const Fingerprint = @import("Fingerprint.zig");
 const AstWalk = @import("AstWalk.zig");
@@ -417,6 +418,7 @@ pub fn barrier(
 const OptOut = struct {
     stats: Opt.Stats = .{},
     ir_instrs: usize = 0,
+    mir: MirStat = .off,
     /// The first lowering diagnostic of a unit that failed with `error.CodegenDiagnostic`.
     diag: ?CodegenIr.Diagnostic = null,
 };
@@ -432,6 +434,36 @@ pub const Slot = struct {
     /// 0). Accumulated into the LinkedProgram in the collect loop.
     opt_stats: Opt.Stats = .{},
     ir_instrs: usize = 0,
+    /// Which backend lowered a freshly lowered unit under `--backend=mir`.
+    mir: MirStat = .off,
+};
+
+/// Under `--backend=mir`, whether a unit went through MIR or fell back to the spill
+/// backend, and why. `off` for other builds and cached units.
+pub const MirStat = union(enum) {
+    off,
+    lowered,
+    fallback: CodegenMir.Fallback,
+};
+
+/// `MirStat`s summed over a build's units, for `--codegen-stats`.
+pub const MirStats = struct {
+    lowered: usize = 0,
+    fallback: std.EnumArray(CodegenMir.Fallback, usize) = .initFill(0),
+
+    pub fn add(m: *MirStats, s: MirStat) void {
+        switch (s) {
+            .off => {},
+            .lowered => m.lowered += 1,
+            .fallback => |why| m.fallback.getPtr(why).* += 1,
+        }
+    }
+
+    pub fn fallbacks(m: MirStats) usize {
+        var n: usize = 0;
+        for (m.fallback.values) |v| n += v;
+        return n;
+    }
 };
 
 /// What one codegen unit lowers.
@@ -582,12 +614,23 @@ fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, audit: bool, opt_out: ?*
         .source => |s| s.is_entry,
         else => false,
     };
+    if (audit) try CodegenIr.verifyRefsSpilled(gpa, &irf, fr.in.layouts, fr.in.enum_layouts);
+    if (fr.profile.backend == .mir) {
+        switch (try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry)) {
+            .code => |fc| {
+                if (opt_out) |o| o.mir = .lowered;
+                return fc;
+            },
+            .fallback => |why| if (opt_out) |o| {
+                o.mir = .{ .fallback = why };
+            },
+        }
+    }
     var fc = try CodegenIr.lowerIr(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry, &diags);
     errdefer fc.deinit(gpa);
     // A codegen diagnostic means an unsupported construct slipped past the front-end; the
     // build fails cleanly rather than emitting a half-lowered function.
     if (diags.items.len > 0) return failLowering(diags.items, opt_out);
-    if (audit) try CodegenIr.verifyRefsSpilled(gpa, &irf, fr.in.layouts, fr.in.enum_layouts);
     return fc;
 }
 
@@ -621,7 +664,7 @@ pub fn codegen(
         slot.diag = out.diag;
         return e;
     };
-    slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs };
+    slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs, .mir = out.mir };
 }
 
 /// The key of a body from source: its own content (`sourceFp`) and that of every callee
@@ -795,7 +838,7 @@ fn serve(
         }
         // A verify build re-lowers fresh, so it has honest opt stats even on a
         // cache hit (was_cached==true). Record them.
-        slot.* = .{ .fc = fresh, .cached = was_cached, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs };
+        slot.* = .{ .fc = fresh, .cached = was_cached, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs, .mir = opt_out.mir };
         return;
     }
 
@@ -826,7 +869,7 @@ fn serve(
         cache.put(u8, io, key, tmp_tag, b) catch {};
         if (self.probe) |p| StageProbe.lap(io, &p.put_ns, put_t0);
     }
-    slot.* = .{ .fc = fc, .cached = false, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs };
+    slot.* = .{ .fc = fc, .cached = false, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs, .mir = opt_out.mir };
 }
 
 const testing = std.testing;

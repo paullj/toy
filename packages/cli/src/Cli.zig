@@ -76,6 +76,7 @@ const post_emit: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "opt-stats", .action = .set_true, .help = "Print per-pass opt counters + dual metric (with -o; use --no-cache)" },
     .{ .long = "no-specialize", .action = .set_true, .help = "Call function-typed arguments of generic functions through the erased instance" },
     .{ .long = "gc-stress", .action = .set_true, .hidden = true, .help = "Collect before every heap allocation, to expose missing GC roots (testing only)" },
+    .{ .long = "backend", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Backend) }, .value_name = "NAME", .hidden = true, .help = "Machine-code backend: spill (default) or mir, which falls back to spill per fn (testing only)" },
     .{ .long = "timings", .action = .set_true, .help = "Print the per-stage wall-clock profile" },
     .{ .long = "color", .value = .{ .@"enum" = &.{ "auto", "always", "never" } }, .value_name = "WHEN", .help = "Colorize output (default auto: on when stdout is a tty)" },
 } ++ sev_opts;
@@ -208,7 +209,7 @@ comptime {
     if (hasLong(check_opts, "emit"))
         @compileError("`check` must never register `--emit`");
     // check_opts must carry ONLY the restricted, non-codegen knobs.
-    for ([_][]const u8{ "output", "j", "O", "release", "profile", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "gc-stress", "emit" }) |banned| {
+    for ([_][]const u8{ "output", "j", "O", "release", "profile", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "gc-stress", "backend", "emit" }) |banned| {
         if (hasLong(check_opts, banned))
             @compileError("`check` option set must not contain build/codegen/opt flags");
     }

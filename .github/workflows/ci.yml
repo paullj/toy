@@ -107,7 +107,7 @@ jobs:
   gc-stress:
     needs: changes
     if: needs.changes.outputs.gc == 'true'
-    name: GC stress corpus (${{ matrix.os }})
+    name: GC stress + MIR corpus (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +126,9 @@ jobs:
       # at -O0 and -O1 must still meet its # expect: lines.
       - name: GC stress corpus
         run: mise run test:gc-stress
+      # The same corpus with --backend=mir, plain and under GC stress.
+      - name: MIR backend corpus
+        run: mise run test:mir
 
   fuzz:
     needs: changes

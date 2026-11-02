@@ -83,3 +83,9 @@ run = "bash bench/peers/run.sh"
 [tasks."test:gc-stress"]
 description = "Run the corpus with a collection before every allocation"
 run = "zig build test-bin && TOY_GC_STRESS=1 ./zig-out/bin/toy-corpus-test"
+
+# The corpus with `--backend=mir` at -O0 and -O1, plain and under `--gc-stress`: the MIR
+# backend must meet every expectation the spill backend does (#199).
+[tasks."test:mir"]
+description = "Run the corpus with the MIR backend, plain and under GC stress"
+run = "zig build test-bin && TOY_BACKEND=mir ./zig-out/bin/toy-corpus-test && TOY_BACKEND=mir TOY_GC_STRESS=1 ./zig-out/bin/toy-corpus-test"

@@ -185,6 +185,56 @@ test "profiles: debug and release never reuse each other's cache entries or outp
     try testing.expect(found);
 }
 
+/// The `--codegen-stats` counts of a `--backend=mir` build: compiled, cached, lowered
+/// through MIR, fallen back to spill.
+fn mirStats(gpa: std.mem.Allocator, io: Io, cwd: []const u8, flags: []const []const u8) ![4]usize {
+    const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "build", "main.toy", "--codegen-stats", "--backend", "mir" }, flags });
+    defer gpa.free(args);
+    const res = try toyIn(gpa, io, cwd, args);
+    defer freeOut(gpa, res);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    var got: [4]usize = undefined;
+    inline for (.{ "compiled=", "cached=", "lowered=", "fallback=" }, 0..) |key, i| {
+        const at = std.mem.indexOf(u8, res.out, key) orelse return error.NoStats;
+        const rest = res.out[at + key.len ..];
+        const end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;
+        got[i] = try std.fmt.parseInt(usize, rest[0..end], 10);
+    }
+    return got;
+}
+
+test "profiles: --backend=mir lowers every fn through MIR and shares no cache entry with spill (#199)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const root = ".toy-test-profiles-mir";
+    Io.Dir.cwd().deleteTree(io, root) catch {};
+    try Io.Dir.cwd().createDirPath(io, root);
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = root ++ "/main.toy", .data = prog });
+    const cwd = try Io.Dir.cwd().realPathFileAlloc(io, root, gpa);
+    defer gpa.free(cwd);
+
+    const n = (try codegenStats(gpa, io, cwd, &.{}))[0];
+    try testing.expect(n > 0);
+    try testing.expectEqual([4]usize{ n, 0, n, 0 }, try mirStats(gpa, io, cwd, &.{}));
+    try testing.expectEqual([2]usize{ 0, n }, try codegenStats(gpa, io, cwd, &.{}));
+    // A cached unit was lowered by an earlier build, so it counts toward neither.
+    try testing.expectEqual([4]usize{ 0, n, 0, 0 }, try mirStats(gpa, io, cwd, &.{}));
+    // A --verify build still reports the units cached but re-lowers each one fresh to
+    // check the cached bytes, so MIR counts it lowered.
+    try testing.expectEqual([4]usize{ 0, n, n, 0 }, try mirStats(gpa, io, cwd, &.{"--verify"}));
+    try testing.expectEqual([4]usize{ n, 0, n, 0 }, try mirStats(gpa, io, cwd, &.{"--release"}));
+
+    // The default backend prints no MIR line.
+    const res = try toyIn(gpa, io, cwd, &.{ "build", "main.toy", "--codegen-stats" });
+    defer freeOut(gpa, res);
+    try testing.expect(std.mem.indexOf(u8, res.out, "mir:") == null);
+}
+
 /// One function per checked operator, width and signedness, each called from `main` on
 /// the case its first argument names, so one build covers every case without -O1 folding
 /// the operands away. `folded` multiplies two literals with no width to range-check them
@@ -441,12 +491,16 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
 }
 
 /// The profiles debug info is checked under: debug at its own -O0 and at -O1 (`-O` stays
-/// an override), and release, which carries none. Debug -O1 leaves inlining out: an
-/// inlined callee's code takes its caller's lines, and the link drops the callee.
+/// an override), and release, which carries none; each with both backends. Debug -O1
+/// leaves inlining out: an inlined callee's code takes its caller's lines, and the link
+/// drops the callee.
 const debug_cases = [_]struct { name: []const u8, flags: []const []const u8, debug: bool }{
     .{ .name = "debug", .flags = &.{ "--profile", "debug" }, .debug = true },
     .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1", "--no-opt", "inline" }, .debug = true },
     .{ .name = "release", .flags = &.{ "--profile", "release" }, .debug = false },
+    .{ .name = "debug-mir", .flags = &.{ "--profile", "debug", "--backend", "mir" }, .debug = true },
+    .{ .name = "debug-O1-mir", .flags = &.{ "--profile", "debug", "-O", "1", "--no-opt", "inline", "--backend", "mir" }, .debug = true },
+    .{ .name = "release-mir", .flags = &.{ "--profile", "release", "--backend", "mir" }, .debug = false },
 };
 
 /// Some hosts ship an lldb that crashes on any target. Only a crash is that; a working lldb
