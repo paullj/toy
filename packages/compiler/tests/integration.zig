@@ -38,4 +38,5 @@ test {
     _ = @import("unit.zig");
     _ = @import("grammar_agreement.zig");
     _ = @import("profiles.zig");
+    _ = @import("fuzz_diff.zig");
 }

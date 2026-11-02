@@ -148,13 +148,15 @@ jobs:
           path: .zig-cache
           key: zig-cache-fuzz-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
           restore-keys: zig-cache-fuzz-${{ runner.os }}-
-      # Seeded + bounded (FUZZ_SEED / FUZZ_ITERS), so the run terminates fast and
-      # reproducibly. Forced to Debug by build.zig so the parser invariants fire.
-      - name: Front-end fuzzer
+      # Seeded + bounded (FUZZ_SEED / FUZZ_ITERS / FUZZ_DIFF_ITERS), so the run terminates
+      # in a few minutes and reproducibly. Forced to Debug by build.zig so the parser
+      # invariants fire. The differential phase builds each program with both backends.
+      - name: Front-end and differential fuzzer
         run: zig build fuzz
         env:
           FUZZ_SEED: "1"
           FUZZ_ITERS: "5000"
+          FUZZ_DIFF_ITERS: "200"
 
   lint:
     needs: changes
