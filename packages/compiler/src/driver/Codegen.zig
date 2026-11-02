@@ -12,6 +12,7 @@ const Io = std.Io;
 const Ast = @import("../ast/Ast.zig");
 const Cache = @import("../query/Cache.zig");
 const Engine = @import("../query/Engine.zig");
+const InlineUnits = @import("../query/InlineUnits.zig");
 const Typecheck = @import("../types.zig");
 const Mono = @import("../symbols/Mono.zig");
 const Graph = @import("Graph.zig");
@@ -244,6 +245,10 @@ const Plan = struct {
     /// Each module's line starts, by module id, when the profile wants debug info; else
     /// empty. Owned.
     line_starts: []const []const u32 = &.{},
+    /// Each body unit's position, by symbol: the units the inliner can read. Owned.
+    bodies_by_name: std.StringHashMapUnmanaged(u32) = .empty,
+    /// The callee IR the inliner prepared, shared by every job. Owned.
+    inline_cache: *InlineUnits.InlineCache,
 
     fn init(gpa: std.mem.Allocator, graph: *const Graph.Graph, res: *const ResolveGraph.GraphResult, tc: *const Typecheck.GraphResult, o: Options) !Plan {
         const modules = try gpa.alloc(Walk.Source, graph.modules.len);
@@ -279,7 +284,11 @@ const Plan = struct {
         errdefer specs.deinit(gpa);
         for (0..specs.units.len) |k| try units.append(gpa, .{ .spec = @intCast(k) });
 
+        const inline_cache = try gpa.create(InlineUnits.InlineCache);
+        inline_cache.* = .{};
+        errdefer gpa.destroy(inline_cache);
         var p: Plan = .{
+            .inline_cache = inline_cache,
             .graph = graph,
             .res = res,
             .tc = tc,
@@ -294,6 +303,8 @@ const Plan = struct {
         errdefer gpa.free(p.units);
         p.closure_facts = try p.ownerClosureFacts(gpa);
         errdefer freeClosureFacts(gpa, p.closure_facts);
+        errdefer p.bodies_by_name.deinit(gpa);
+        for (p.units, 0..) |u, i| if (u == .body) try p.bodies_by_name.put(gpa, p.symOf(u).name, @intCast(i));
         if (o.profile.debugInfo()) {
             const starts = try gpa.alloc([]const u32, modules.len);
             var done: usize = 0;
@@ -311,6 +322,9 @@ const Plan = struct {
     }
 
     fn deinit(p: *Plan, gpa: std.mem.Allocator) void {
+        p.inline_cache.deinit(gpa);
+        gpa.destroy(p.inline_cache);
+        p.bodies_by_name.deinit(gpa);
         for (p.line_starts) |st| gpa.free(st);
         gpa.free(p.line_starts);
         freeClosureFacts(gpa, p.closure_facts);
@@ -438,7 +452,14 @@ const Plan = struct {
             .type_args = if (inst) |x| x.args else &.{},
             .conformances = if (inst) |x| x.conformances else &.{},
             .closure_facts = if (u == .body and i < p.closure_facts.len) p.closure_facts[i] else &.{},
+            .units = .{ .ctx = p, .findFn = findBody, .cache = p.inline_cache },
         };
+    }
+
+    fn findBody(ctx: *const anyopaque, name: []const u8) ?Engine.Frozen {
+        const p: *const Plan = @ptrCast(@alignCast(ctx));
+        const i = p.bodies_by_name.get(name) orelse return null;
+        return p.frozenFor(i);
     }
 
     /// The closure tables a body of `owner` lowers against.

@@ -5335,7 +5335,7 @@ test "every enum or range flag lists its valid values, on build, run and check (
 
     const bad_target = "error: invalid value 'bogus' for --target (one of: native|aarch64-macos)\n";
     const near_target = "error: invalid value 'aarch64-mac' for --target (one of: native|aarch64-macos)\ndid you mean 'aarch64-macos'?\n";
-    const passes = "(one of: fold|branch|forward|dce)\n";
+    const passes = "(one of: fold|branch|forward|dce|inline)\n";
     const runs = [_]struct { argv: []const []const u8, line: []const u8 }{
         .{ .argv = &.{ "build", "--target", "bogus", path }, .line = bad_target },
         .{ .argv = &.{ "run", "--target", "bogus", path }, .line = bad_target },

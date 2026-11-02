@@ -326,6 +326,62 @@ TOY
 }
 run_cross_module
 
+# 5b) INLINED CALLEE — a release build inlines the small imported `bump` into `main`, so
+#     `main`'s key folds `bump`'s body. Editing only `bump` must re-lower `main` too: the
+#     warm binary's exit changes with the edit, and equals a --no-cache build. The
+#     unrelated fn still cuts off.
+run_inline_callee() {
+  local d="$work/inline"; mkdir -p "$d/lib"
+  ( cd "$d" && rm -rf .toy )
+  cat > "$d/main.toy" <<'TOY'
+import lib/util
+fn unrelated() -> int { return 3 }
+fn main() -> int { return util.bump(40) + unrelated() - 3 }
+TOY
+  cat > "$d/lib/util.toy" <<'TOY'
+pub fn bump(n: int) -> int { return n + 1 }
+TOY
+  ( cd "$d" && "$toyc" --release -o base.bin main.toy >/dev/null 2>&1 ) \
+    || { fail_one "inline-callee: cold build failed"; return; }
+  if ( cd "$d" && "$toyc" --emit ir --release main.toy 2>/dev/null ) | sed -n '/^fn main()/,/^}/p' | grep -q 'call @lib/util.bump'; then
+    fail_one "inline-callee: main still calls bump at release (nothing to test)"
+    return
+  fi
+  local full_compiled
+  full_compiled="$( cd "$d" && "$toyc" --release -o /dev/null --codegen-stats --no-cache main.toy 2>&1 )"; full_compiled="$(compiled_of "$full_compiled")"
+
+  cat > "$d/lib/util.toy" <<'TOY'
+pub fn bump(n: int) -> int { return n + 2 }
+TOY
+  local inc_out
+  inc_out="$( cd "$d" && "$toyc" --release -o inc.bin --codegen-stats main.toy 2>&1 )"
+  ( cd "$d" && "$toyc" --release -o force.bin --no-cache main.toy >/dev/null 2>&1 ) \
+    || { fail_one "inline-callee: force build failed"; return; }
+
+  local base_rc inc_rc
+  "$d/base.bin"; base_rc=$?
+  "$d/inc.bin"; inc_rc=$?
+  if [ "$base_rc" != 41 ] || [ "$inc_rc" != 42 ]; then
+    fail_one "inline-callee: exit base=$base_rc inc=$inc_rc, want 41 then 42 [STALE INLINED BODY]"
+    return
+  fi
+  local ih fh
+  ih="$(texthash "$d/inc.bin")"; fh="$(texthash "$d/force.bin")"
+  if [ "$ih" != "$fh" ]; then
+    fail_one "inline-callee: SOUNDNESS — inc __text ($ih) != force __text ($fh) [STALE-CACHE MISCOMPILE]"
+    return
+  fi
+  local comp
+  comp="$(compiled_of "$inc_out")"
+  if [ -n "$comp" ] && [ -n "$full_compiled" ] && [ "$comp" -lt "$full_compiled" ]; then
+    echo "  OK   inline-callee: SOUND; exit 41->42; CUTOFF codegen compiled=$comp < full=$full_compiled"
+    pass=$((pass + 1))
+  else
+    fail_one "inline-callee: CUTOFF — codegen compiled=$comp NOT < full=$full_compiled"
+  fi
+}
+run_inline_callee
+
 # 6) `?`-FROM CONFORMANCE TOGGLE — `outer`'s `?` WIDENS `inner()`'s error via
 #    `impl BigErr has From[SmallErr]`. Base builds; REMOVING the impl makes a warm rebuild a
 #    T0033 compile-error (the widen is NOT stale-served from the cached green `outer`);

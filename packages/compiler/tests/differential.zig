@@ -611,9 +611,11 @@ test "dfe: after the link drops an unreachable fn, a panic backtrace names only 
         \\}
         \\
     ;
+    // Inlining would fold the panicking fn into its caller; this checks the frames the
+    // other passes keep.
     inline for (.{ "-O0", "-O1" }) |lvl| {
         try writeFixture(io, dir, &.{.{ "main.toy", src }});
-        const bld = try spawnExit(gpa, io, &.{ "build", lvl, dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
+        const bld = try spawnExit(gpa, io, &.{ "build", lvl, "--no-opt=inline", dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
         try testing.expectEqual(@as(?u8, 0), exitCode(bld));
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, dir ++ "/prog" ++ lvl, gpa);
         defer gpa.free(abs);
@@ -657,9 +659,11 @@ test "panic: a backtrace through a C callback names the C frames <C> and still s
         \\}
         \\
     ;
+    // Inlining would fold the panicking fn into its caller; this checks the frames the
+    // other passes keep.
     inline for (.{ "-O0", "-O1" }) |lvl| {
         try writeFixture(io, dir, &.{.{ "main.toy", src }});
-        const bld = try spawnExit(gpa, io, &.{ "build", lvl, dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
+        const bld = try spawnExit(gpa, io, &.{ "build", lvl, "--no-opt=inline", dir ++ "/main.toy", "-o", dir ++ "/prog" ++ lvl });
         try testing.expectEqual(@as(?u8, 0), exitCode(bld));
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, dir ++ "/prog" ++ lvl, gpa);
         defer gpa.free(abs);
@@ -674,6 +678,95 @@ test "panic: a backtrace through a C callback names the C frames <C> and still s
         try testing.expect(std.mem.endsWith(u8, r.stderr, " main\n"));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stderr, " main\n"));
     }
+}
+
+test "panic: a release build inlines a small panicking fn, so its frame leaves the backtrace, which still ends at main" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-panic-inlined";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\fn explode_inl(n: int) -> int {
+        \\  return 10 / n
+        \\}
+        \\fn main() -> int {
+        \\  return explode_inl(0)
+        \\}
+        \\
+    ;
+    const Case = struct { argv: []const []const u8, exe: []const u8, framed: bool };
+    for ([_]Case{
+        .{ .argv = &.{ "build", "--release", dir ++ "/main.toy", "-o", dir ++ "/inlined" }, .exe = dir ++ "/inlined", .framed = false },
+        .{ .argv = &.{ "build", "--release", "--no-opt=inline", dir ++ "/main.toy", "-o", dir ++ "/called" }, .exe = dir ++ "/called", .framed = true },
+    }) |c| {
+        try writeFixture(io, dir, &.{.{ "main.toy", src }});
+        const bld = try spawnExit(gpa, io, c.argv);
+        try testing.expectEqual(@as(?u8, 0), exitCode(bld));
+        const abs = try Io.Dir.cwd().realPathFileAlloc(io, c.exe, gpa);
+        defer gpa.free(abs);
+        const r = try spawnBinaryTermStderr(gpa, io, abs);
+        defer gpa.free(r.stderr);
+        try testing.expectEqual(@as(?u8, 1), exitCode(r.term));
+        try testing.expect(std.mem.indexOf(u8, r.stderr, "division by zero") != null);
+        try testing.expectEqual(c.framed, std.mem.indexOf(u8, r.stderr, " main.explode_inl\n") != null);
+        try testing.expect(std.mem.endsWith(u8, r.stderr, " main\n"));
+    }
+}
+
+test "inline: a recursion over small helpers runs as deep at -O1 and in release as at -O0" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const src = try Io.Dir.cwd().readFileAlloc(io, "tests/corpora/regression/inline_deep_recursion.toy", gpa, .unlimited);
+    defer gpa.free(src);
+    const dir = ".toy-test-inline-deep-recursion";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    for ([_][]const []const u8{ &.{"-O0"}, &.{"-O1"}, &.{"--release"} }, [_][]const u8{ dir ++ "/O0", dir ++ "/O1", dir ++ "/rel" }) |flags, sub| {
+        const prog = try harness.compile(gpa, io, sub, src, flags);
+        defer gpa.free(prog);
+        try testing.expectEqual(@as(u8, 188), try harness.runExit(gpa, io, prog));
+    }
+}
+
+test "inline: a comment in a helper's body does not keep it from inlining" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-inline-comment";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\fn add1(n: int) -> int {
+        \\    # A comment long enough to push the declaration past several hundred
+        \\    # source bytes, which says nothing about how much code the body makes.
+        \\    # A comment long enough to push the declaration past several hundred
+        \\    # source bytes, which says nothing about how much code the body makes.
+        \\    # A comment long enough to push the declaration past several hundred
+        \\    # source bytes, which says nothing about how much code the body makes.
+        \\    return n + 1
+        \\}
+        \\fn main() -> int {
+        \\    return add1(1)
+        \\}
+        \\
+    ;
+    try writeFixture(io, dir, &.{.{ "main.toy", src }});
+    const ir = try harness.emitIr(gpa, io, dir ++ "/main.toy", &.{"--release"});
+    defer gpa.free(ir);
+    const body = harness.irBody(ir, "main") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, body, "call @main.add1") == null);
 }
 
 test "panic: a backtrace cut off by the frame cap before main ends with a '...' line" {

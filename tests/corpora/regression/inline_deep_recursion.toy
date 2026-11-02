@@ -1,0 +1,82 @@
+# Regression: inlining gave a recursive fn's frame a cell for every value of every
+# spliced helper, so -O1 and --release overflowed the stack at a depth -O0 handles.
+# A recursive caller now takes no inlined bodies.
+# expect: exit 188
+fn h0(a: int, b: int) -> int {
+    x := a * 1 + b
+    y := x - a
+    z := y + 0
+    return z
+}
+fn h1(a: int, b: int) -> int {
+    x := a * 2 + b
+    y := x - a
+    z := y + 1
+    return z
+}
+fn h2(a: int, b: int) -> int {
+    x := a * 3 + b
+    y := x - a
+    z := y + 2
+    return z
+}
+fn h3(a: int, b: int) -> int {
+    x := a * 4 + b
+    y := x - a
+    z := y + 3
+    return z
+}
+fn h4(a: int, b: int) -> int {
+    x := a * 5 + b
+    y := x - a
+    z := y + 4
+    return z
+}
+fn h5(a: int, b: int) -> int {
+    x := a * 6 + b
+    y := x - a
+    z := y + 5
+    return z
+}
+fn h6(a: int, b: int) -> int {
+    x := a * 7 + b
+    y := x - a
+    z := y + 6
+    return z
+}
+fn h7(a: int, b: int) -> int {
+    x := a * 8 + b
+    y := x - a
+    z := y + 7
+    return z
+}
+fn h8(a: int, b: int) -> int {
+    x := a * 9 + b
+    y := x - a
+    z := y + 8
+    return z
+}
+fn h9(a: int, b: int) -> int {
+    x := a * 10 + b
+    y := x - a
+    z := y + 9
+    return z
+}
+fn h10(a: int, b: int) -> int {
+    x := a * 11 + b
+    y := x - a
+    z := y + 10
+    return z
+}
+fn h11(a: int, b: int) -> int {
+    x := a * 12 + b
+    y := x - a
+    z := y + 11
+    return z
+}
+fn rec(n: int, acc: int) -> int {
+    if n == 0 { return acc }
+    t := h0(n, acc) + h1(n, acc) + h2(n, acc) + h3(n, acc) + h4(n, acc) + h5(n, acc) + h6(n, acc) + h7(n, acc) + h8(n, acc) + h9(n, acc) + h10(n, acc) + h11(n, acc)
+    return rec(n - 1, (acc + t + n * 3) % 1000)
+}
+fn main() -> int { return rec(7777, 1) % 256 }

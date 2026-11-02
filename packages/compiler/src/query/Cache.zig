@@ -103,6 +103,23 @@ pub const Key = struct {
 /// matches that persistence). The manifest is rebuilt fresh each build from the files
 /// discover actually touched (it is NOT carried forward blindly): a file dropped from
 /// the graph drops out of the manifest, and a re-read file overwrites its entry.
+/// A lock-free atomic-bool spinlock: 0.16's `std.Io.Mutex` needs an `Io` to block, but
+/// the critical sections it guards are tiny (an appendSlice, a hashmap upsert), so a
+/// spinlock keeps its users Io-free and safe under the parallel codegen fan-out.
+pub const SpinLock = struct {
+    state: std.atomic.Value(bool) = .init(false),
+
+    pub fn lock(self: *SpinLock) void {
+        while (self.state.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlock(self: *SpinLock) void {
+        self.state.store(false, .release);
+    }
+};
+
 pub const Pack = struct {
     // "TOYPACK5": bumped when `ctime` was added to each manifest record (TOYPACK4 added
     // the manifest section itself). An older-magic file fails the magic check in `load` =>
@@ -198,23 +215,18 @@ pub const Pack = struct {
     /// it safe if a future change parallelizes load).
     manifest_cur: std.StringHashMapUnmanaged(ManifestEntry) = .{},
     /// Guards `blobs`/`recs`/`index` against the codegen fan-out's concurrent `put`s.
-    /// A lock-free atomic-bool spinlock: 0.16's `std.Io.Mutex` needs an `Io` to block,
-    /// but the critical sections here are tiny (an appendSlice + a hashmap upsert), so a
-    /// spinlock keeps the module Io-free and safe under parallel fan-out.
-    lock_state: std.atomic.Value(bool) = .init(false),
+    spin: SpinLock = .{},
 
     pub fn init(gpa: std.mem.Allocator) Pack {
         return .{ .gpa = gpa };
     }
 
     fn lock(self: *Pack) void {
-        while (self.lock_state.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
+        self.spin.lock();
     }
 
     fn unlock(self: *Pack) void {
-        self.lock_state.store(false, .release);
+        self.spin.unlock();
     }
 
     pub fn deinit(self: *Pack) void {

@@ -108,6 +108,16 @@ pub fn forEachValueUse(func: *const Ir.Function, ctx: anytype, comptime f: fn (@
     }
 }
 
+/// Visit every value-USE of one instruction (never `none_value`).
+pub fn forEachInstrUse(ins: *Ir.Instr, ctx: anytype, comptime f: fn (@TypeOf(ctx), Ir.ValueId) void) void {
+    const Adaptor = struct {
+        fn each(c: @TypeOf(ctx), p: *Ir.ValueId) void {
+            if (p.* != Ir.none_value) f(c, p.*);
+        }
+    };
+    eachInstrUseOperand(&ins.op, ctx, Adaptor.each);
+}
+
 /// Set `flags[v]` for an in-bounds `v` — the shared visitor for marking a value
 /// used (with `forEachValueUse`) or defined (with `forEachValueDef`).
 pub fn markUsed(flags: []bool, v: Ir.ValueId) void {
@@ -127,20 +137,69 @@ pub fn forEachValueDef(func: *const Ir.Function, ctx: anytype, comptime f: fn (@
 /// from old id to new id. `none_value` is passed through `map` too (callers'
 /// maps must preserve it). Used by value-pruning to renumber after compaction.
 pub fn remapValues(func: *Ir.Function, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ir.ValueId) Ir.ValueId) void {
+    for (func.blocks) |*b| remapBlockValues(b, ctx, map);
+}
+
+/// `remapValues` over one block: every ValueId site (defs + uses) of `b` through `map`.
+pub fn remapBlockValues(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ir.ValueId) Ir.ValueId) void {
     const Adaptor = struct {
         fn each(c: @TypeOf(ctx), p: *Ir.ValueId) void {
             p.* = map(c, p.*);
         }
     };
-    for (func.blocks) |*b| {
-        // DEF remapping (result + params) stays inline — it is not part of the USE
-        // spine (mirrors the forEachValueDef/forEachValueUse split above).
-        for (b.params) |*p| p.* = map(ctx, p.*);
-        for (b.instrs) |*ins| {
-            ins.result = map(ctx, ins.result);
-            eachInstrUseOperand(&ins.op, ctx, Adaptor.each);
+    // DEF remapping (result + params) stays inline — it is not part of the USE
+    // spine (mirrors the forEachValueDef/forEachValueUse split above).
+    for (b.params) |*p| p.* = map(ctx, p.*);
+    for (b.instrs) |*ins| {
+        ins.result = map(ctx, ins.result);
+        eachInstrUseOperand(&ins.op, ctx, Adaptor.each);
+    }
+    eachTermUseOperand(&b.term, ctx, Adaptor.each);
+}
+
+/// Rewrite every SlotId site of `b` (a `slot_addr`, a call's slot args and `ret_slot`, a
+/// terminator's slot operands) through `map`. `none_slot` is passed through `map` too.
+/// Exhaustive like the value spine, so a new op that names a slot fails to compile here.
+pub fn remapBlockSlots(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ir.SlotId) Ir.SlotId) void {
+    const ops = struct {
+        fn args(c: @TypeOf(ctx), as: []Ir.Operand) void {
+            for (as) |*a| switch (a.*) {
+                .slot => |*s| s.* = map(c, s.*),
+                .value, .none => {},
+            };
         }
-        eachTermUseOperand(&b.term, ctx, Adaptor.each);
+    };
+    for (b.instrs) |*ins| switch (ins.op) {
+        .slot_addr => |*s| s.* = map(ctx, s.*),
+        .call => |*c| {
+            ops.args(ctx, c.args);
+            c.ret_slot = map(ctx, c.ret_slot);
+        },
+        .call_indirect => |*c| {
+            ops.args(ctx, c.args);
+            c.ret_slot = map(ctx, c.ret_slot);
+        },
+        .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_byte, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .overflow => {},
+    };
+    switch (b.term) {
+        .br => |*br| ops.args(ctx, br.args),
+        .ret => |*o| switch (o.*) {
+            .slot => |*s| s.* = map(ctx, s.*),
+            .value, .none => {},
+        },
+        .cond_br, .@"unreachable", .panic => {},
+    }
+}
+
+/// Rewrite the BlockId successors of `b`'s terminator through `map`.
+pub fn remapBlockTargets(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ir.BlockId) Ir.BlockId) void {
+    switch (b.term) {
+        .br => |*br| br.dest = map(ctx, br.dest),
+        .cond_br => |*c| {
+            c.t = map(ctx, c.t);
+            c.f = map(ctx, c.f);
+        },
+        .ret, .@"unreachable", .panic => {},
     }
 }
 

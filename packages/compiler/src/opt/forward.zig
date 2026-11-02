@@ -29,7 +29,8 @@
 //!       .unknown                     -> clear ALL avail        (might write anywhere)
 //!   load{addr}: a=resolve(addr).
 //!       .slot{S,off} && !escaped[S] && avail has {S,off}=V -> FORWARD: rewrite every
-//!           use of this load's result to V (SSA: defined once). The load (and its
+//!           use of this load's result to V (SSA: defined once). With no avail entry,
+//!           the load's own result becomes avail[{S,off}] for a later load. The load (and its
 //!           feeder slot_addr/field_addr) then go dead -> DCE prunes them next round
 //!           -> the real dual-metric win (fewer values, smaller frame, fewer words).
 //!   call:  clear ALL avail (may write through an escaped addr / have effects).
@@ -47,7 +48,7 @@ const Ir = @import("../ir/Ir.zig");
 const Opt = @import("Opt.zig");
 const walk = @import("walk.zig");
 
-const AbstractAddr = union(enum) {
+pub const AbstractAddr = union(enum) {
     /// Names slot S at byte offset `off`.
     slot: struct { s: Ir.SlotId, off: u32 },
     /// Could name anything — never forward through / into this.
@@ -140,6 +141,10 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                                 remap[ins.result] = applyRemap(remap, v);
                                 stats.loads_forwarded += 1;
                                 forwarded_any = true;
+                            } else {
+                                // A later load of the same cell, with nothing written in
+                                // between, reads this load's value.
+                                recordStore(gpa, &avail, sl.s, sl.off, ins.result) catch return error.OutOfMemory;
                             }
                         },
                         .unknown => {}, // unknown load addr: nothing to forward.
@@ -190,7 +195,7 @@ fn applyRemap(remap: []const Ir.ValueId, v: Ir.ValueId) Ir.ValueId {
 }
 
 /// Trace a ptr value's defining op to an abstract address.
-fn resolve(def: []const ?Ir.Op, ptr: Ir.ValueId) AbstractAddr {
+pub fn resolve(def: []const ?Ir.Op, ptr: Ir.ValueId) AbstractAddr {
     if (ptr == Ir.none_value or ptr >= def.len) return .unknown;
     const op = def[ptr] orelse return .unknown;
     return switch (op) {
@@ -540,4 +545,26 @@ test "forward: chain forwards both reads of a local (forward_chain shape)" {
     // add now reads %0, %0.
     try testing.expectEqual(@as(Ir.ValueId, 0), func.blocks[0].instrs[7].op.add.lhs);
     try testing.expectEqual(@as(Ir.ValueId, 0), func.blocks[0].instrs[7].op.add.rhs);
+}
+
+test "forward: a second load of an unwritten cell reads the first, but not across a call" {
+    const gpa = testing.allocator;
+    // %0=slot_addr s0; %1=load %0; %2=load %0; call @f(); %3=load %0;
+    // %4=add %1,%2; %5=add %4,%3; ret %5  ->  %2 reads %1, %3 stays a load.
+    var instrs = try gpa.alloc(Ir.Instr, 7);
+    instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
+    instrs[1] = .{ .result = 1, .op = .{ .load = .{ .addr = 0, .ty = Ir.Type.int } } };
+    instrs[2] = .{ .result = 2, .op = .{ .load = .{ .addr = 0, .ty = Ir.Type.int } } };
+    instrs[3] = .{ .result = Ir.none_value, .op = .{ .call = .{ .callee = .{ .kind = .user_fn, .name = "f" }, .args = try gpa.alloc(Ir.Operand, 0), .ret_slot = Ir.none_slot } } };
+    instrs[4] = .{ .result = 3, .op = .{ .load = .{ .addr = 0, .ty = Ir.Type.int } } };
+    instrs[5] = .{ .result = 4, .op = .{ .add = .{ .lhs = 1, .rhs = 2 } } };
+    instrs[6] = .{ .result = 5, .op = .{ .add = .{ .lhs = 4, .rhs = 3 } } };
+    var func = try oneBlock(gpa, 1, instrs, 5, 6);
+    defer func.deinit(gpa);
+
+    var st: Opt.Stats = .{};
+    try testing.expect(try run(gpa, &func, &st));
+    try testing.expectEqual(@as(usize, 1), st.loads_forwarded);
+    try testing.expectEqual(@as(Ir.ValueId, 1), func.blocks[0].instrs[5].op.add.rhs);
+    try testing.expectEqual(@as(Ir.ValueId, 3), func.blocks[0].instrs[6].op.add.rhs);
 }

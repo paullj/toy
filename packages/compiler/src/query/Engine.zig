@@ -39,6 +39,7 @@ const Mono = @import("../symbols/Mono.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Typecheck = @import("../types.zig");
 const Phase = @import("Phase.zig");
+const InlineUnits = @import("InlineUnits.zig");
 
 const Engine = @This();
 
@@ -471,6 +472,9 @@ pub const Frozen = struct {
     /// A base fn's or instance's closure facts (`Fingerprint.ownerFacts`), folded into its key;
     /// empty for every other unit and for a body with no env slot and no boxed local.
     closure_facts: []const u8 = &.{},
+    /// The program's other units, which the inliner reads callee IR from. Null lowers
+    /// every call as a call.
+    units: ?InlineUnits.Units = null,
 };
 
 /// Fail a unit's lowering, keeping its first diagnostic where the driver reports it: such
@@ -508,6 +512,7 @@ pub fn lowerFitted(
     sym: Link.SymName,
     diags: *std.ArrayList(CodegenIr.Diagnostic),
     stats: *Opt.Stats,
+    callees: ?Opt.inliner.Lookup,
 ) error{OutOfMemory}!Ir.Function {
     const before = diags.items.len;
     stats.* = .{};
@@ -515,7 +520,7 @@ pub fn lowerFitted(
         var irf = try body.run(gpa, in, sym, diags);
         errdefer irf.deinit(gpa);
         if (diags.items.len != before) return irf;
-        try Opt.run(gpa, &irf, cfg, stats);
+        try Opt.optimize(gpa, &irf, cfg, callees, stats);
         const c = in.closure;
         const owner = c.owner orelse return irf;
         if (!c.frame_envs or !Closure.ownerHasFrameEnv(c.lambda_units, owner)) return irf;
@@ -528,7 +533,7 @@ pub fn lowerFitted(
     errdefer irf.deinit(gpa);
     stats.* = .{};
     if (diags.items.len != before) return irf;
-    try Opt.run(gpa, &irf, cfg, stats);
+    try Opt.optimize(gpa, &irf, cfg, callees, stats);
     return irf;
 }
 
@@ -540,9 +545,13 @@ pub fn lowerFitted(
 pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayList(CodegenIr.Diagnostic), stats: *Opt.Stats) error{OutOfMemory}!Ir.Function {
     const in = fr.in;
     const before = diags.items.len;
+    const cfg = fr.profile.opt;
+    var scope = try InlineUnits.CallerScope.init(gpa, fr);
+    defer scope.deinit();
+    const callees = scope.lookup();
     var irf = switch (fr.body) {
-        .source => |s| return lowerFitted(gpa, in, fr.profile.opt, .{ .source = .{ .decl = s.decl, .is_entry = s.is_entry } }, fr.sym, diags, stats),
-        .lambda => |ui| return lowerFitted(gpa, in, fr.profile.opt, .{ .lambda = ui }, fr.sym, diags, stats),
+        .source => |s| return lowerFitted(gpa, in, cfg, .{ .source = .{ .decl = s.decl, .is_entry = s.is_entry } }, fr.sym, diags, stats, callees),
+        .lambda => |ui| return lowerFitted(gpa, in, cfg, .{ .lambda = ui }, fr.sym, diags, stats, callees),
         .derive => |d| try DeriveEmit.lower(gpa, in, d.*, fr.sym, diags),
         .erased => |u| try DeriveEmit.lowerErased(gpa, in, u.ty, u.kind, fr.sym, diags),
         .adapter => |a| try AdapterEmit.lowerAdapter(gpa, in, a.*, fr.sym, diags),
@@ -550,7 +559,7 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
     errdefer irf.deinit(gpa);
     stats.* = .{};
     if (diags.items.len != before) return irf;
-    try Opt.run(gpa, &irf, fr.profile.opt, stats);
+    try Opt.optimize(gpa, &irf, cfg, callees, stats);
     return irf;
 }
 
@@ -615,11 +624,28 @@ pub fn codegen(
     slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs };
 }
 
-/// The key of a body from source: its AST fingerprint over its callees' identities and
-/// signatures in walk order, the layouts it touches, an instance's type-args and bounds,
-/// and its closure facts, xor'd with the opt level and the unit's OWN emitted symbol
-/// (`Key.codegen` is the one place that fold lives).
+/// The key of a body from source: its own content (`sourceFp`) and that of every callee
+/// the inliner can splice into it (`InlineUnits.Reach`), xor'd with the opt level and the
+/// unit's OWN emitted symbol (`Key.codegen` is the one place that fold lives).
 fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl: Ast.Index) !Cache.Key {
+    var fp = try sourceFp(gpa, fr, decl);
+    var reach = try InlineUnits.Reach.init(gpa, fr, decl);
+    defer reach.deinit();
+    if (reach.names.items.len != 0) {
+        var h = std.hash.Wyhash.init(fp);
+        for (reach.names.items, reach.facts.items) |name, f| {
+            h.update(name);
+            h.update(std.mem.asBytes(&f.fp));
+        }
+        fp = h.final();
+    }
+    return Key.codegen(target, fp, fr.profile, fr.sym);
+}
+
+/// A body's own content: its AST fingerprint over its callees' identities and signatures
+/// in walk order, the layouts it touches, an instance's type-args and bounds, its closure
+/// facts, and its lines when the profile tracks them.
+pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index) !u64 {
     const in = &fr.in;
     var callee_sigs: std.ArrayList(Fingerprint.Sig) = .empty;
     defer callee_sigs.deinit(gpa);
@@ -649,7 +675,7 @@ fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl
         Walk.walk(.{ .tree = in.tree, .tokens = in.tokens, .source = in.source }, decl, &lv) catch unreachable;
         fp = h.final();
     }
-    return Key.codegen(target, fp, fr.profile, fr.sym);
+    return fp;
 }
 
 /// [C2] checked: the first symbol a keyed unit's code `fc` relocates to that its key does
@@ -661,8 +687,16 @@ fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl
 pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link.FnCode) !?[]const u8 {
     var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
     defer sigs.deinit(gpa);
+    var inlined: std.ArrayList([]const u8) = .empty;
+    defer inlined.deinit(gpa);
     switch (fr.body) {
-        .source => |src| try AstWalk.walkCalls(gpa, &fr.in, src.decl, fr.in.sig, &sigs),
+        .source => |src| {
+            try AstWalk.walkCalls(gpa, &fr.in, src.decl, fr.in.sig, &sigs);
+            // An inlined body's calls are folded through that callee's own content.
+            var reach = try InlineUnits.Reach.init(gpa, fr, src.decl);
+            defer reach.deinit();
+            for (reach.facts.items) |f| try inlined.appendSlice(gpa, f.calls);
+        },
         else => {},
     }
     for (fc.relocs) |r| {
@@ -676,6 +710,7 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
             if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];
         } else t.name;
         if (folds(fr, sigs.items, base)) continue;
+        if (InlineUnits.containsName(inlined.items, base)) continue;
         return t.name;
     }
     return null;

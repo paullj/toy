@@ -441,10 +441,11 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
 }
 
 /// The profiles debug info is checked under: debug at its own -O0 and at -O1 (`-O` stays
-/// an override), and release, which carries none.
+/// an override), and release, which carries none. Debug -O1 leaves inlining out: an
+/// inlined callee's code takes its caller's lines, and the link drops the callee.
 const debug_cases = [_]struct { name: []const u8, flags: []const []const u8, debug: bool }{
     .{ .name = "debug", .flags = &.{ "--profile", "debug" }, .debug = true },
-    .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1" }, .debug = true },
+    .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1", "--no-opt", "inline" }, .debug = true },
     .{ .name = "release", .flags = &.{ "--profile", "release" }, .debug = false },
 };
 
@@ -454,10 +455,11 @@ fn lldbCrashed(o: Out) bool {
     return o.term != .exited or std.mem.indexOf(u8, o.err, "PLEASE submit a bug report") != null;
 }
 
+// `return y - x` keeps code on line 3 at -O1: a bare `return y` forwards to nothing.
 const dwarf_util =
     \\pub fn sq(x: int) -> int {
     \\    y := x * x
-    \\    return y
+    \\    return y - x
     \\}
     \\
 ;
@@ -467,7 +469,7 @@ const dwarf_prog =
     \\fn main() -> int {
     \\    x := 5
     \\    y := util.sq(x)
-    \\    return y - 25
+    \\    return y - 20
     \\}
     \\
 ;
