@@ -39,6 +39,7 @@ const LowerClosure = @import("../lower/closure.zig");
 const Closure = @import("../symbols/Closure.zig");
 const Mono = @import("../symbols/Mono.zig");
 const Derive = @import("../symbols/Derive.zig");
+const StdNames = @import("../symbols/StdNames.zig");
 const Typecheck = @import("../types.zig");
 const Phase = @import("Phase.zig");
 const InlineUnits = @import("InlineUnits.zig");
@@ -683,7 +684,8 @@ pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index) !u64
 /// [C2] checked: the first symbol a keyed unit's code `fc` relocates to that its key does
 /// not fold, or null. A miss serves a caller lowered against a stale callee, or one
 /// program's code to another that shares the cache (#35), so `--verify` fails on it.
-/// Exempt are a compiler builtin (its signature is the compiler's), the unit itself, its
+/// Exempt are a compiler builtin and a bundled `core/rt` fn (the compiler build fixes
+/// either's signature), the unit itself, its
 /// own lambdas and the adapters of what its key folds: each is named after the unit or
 /// the folded symbol and lowered fresh every build.
 pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link.FnCode) !?[]const u8 {
@@ -706,7 +708,7 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
             .func, .import => |sn| sn,
             else => continue,
         };
-        if (t.kind == .builtin or std.mem.eql(u8, t.name, fr.sym.name)) continue;
+        if (t.kind == .builtin or StdNames.isBundledRuntimeSym(t.name) or std.mem.eql(u8, t.name, fr.sym.name)) continue;
         if (std.mem.startsWith(u8, t.name, fr.sym.name) and std.mem.startsWith(u8, t.name[fr.sym.name.len..], "$l")) continue;
         const base = for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
             if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];

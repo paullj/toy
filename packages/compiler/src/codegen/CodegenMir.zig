@@ -312,6 +312,15 @@ test "mir: a reference live across a safepoint gets a stack-map row naming its s
     try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, row.payload[12..16], .little));
 }
 
+test "mir: a call to a core/rt fn is no safepoint and gets no stack-map row" {
+    const gpa = testing.allocator;
+    var func = try refAcrossCallFn(gpa, .{ .kind = .user_fn, .name = "core/rt/str.str_eq" });
+    defer func.deinit(gpa);
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), fc.safepoint_maps.len);
+}
+
 test "mir: a call to a builtin that never collects is no safepoint and keeps the reference in a register" {
     const gpa = testing.allocator;
     var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "gc_span_count" });

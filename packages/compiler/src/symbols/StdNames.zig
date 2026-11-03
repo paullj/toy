@@ -53,6 +53,18 @@ pub const ElemPrim = enum {
     }
 };
 
+/// The `core/rt` fns lowering emits calls to, by symbol. Lower passes each the arguments
+/// its bundled signature declares, which a test in `types/runtime.zig` pins.
+pub const RuntimeFn = enum {
+    str_eq,
+
+    pub fn name(f: RuntimeFn) []const u8 {
+        return switch (f) {
+            .str_eq => "core/rt/str.str_eq",
+        };
+    }
+};
+
 /// Where a receiver-method desugar reads the receiver type it selects the method on.
 pub const RecvSource = enum {
     /// The sugar node's own type (`node_types[i]`).
@@ -220,6 +232,24 @@ pub fn isCoreModule(bundled: bool, path: []const u8) bool {
 /// put such a module on disk.
 pub fn isRuntimeModule(path: []const u8) bool {
     return std.mem.startsWith(u8, path, "core/rt/");
+}
+
+/// A fn of a bundled `core/rt` module, by symbol. Its signature and body come with the
+/// compiler build (bundled source folds into the cache stamp), as a builtin's do, so a
+/// call lowering emits to one needs nothing in the caller's key.
+pub fn isBundledRuntimeSym(name: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, name, '.') orelse return false;
+    const path = name[0..dot];
+    if (!isRuntimeModule(path)) return false;
+    for (@import("bundled_std").modules) |m| if (std.mem.eql(u8, m.path, path)) return true;
+    return false;
+}
+
+test "isBundledRuntimeSym: a bundled core/rt fn only" {
+    try std.testing.expect(isBundledRuntimeSym("core/rt/str.str_eq"));
+    try std.testing.expect(!isBundledRuntimeSym("core/rt/not_bundled.f"));
+    try std.testing.expect(!isBundledRuntimeSym("core/mem.ga_push$int"));
+    try std.testing.expect(!isBundledRuntimeSym("core/rt/str"));
 }
 
 /// The self-check modules only force or count collections for their tests, which std/gc

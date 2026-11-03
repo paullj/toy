@@ -2,12 +2,15 @@
 # none may reach a GC allocation (T0082), so a call to one is never a point where the
 # collector can run.
 
-pub fn str_eq(a: str, b: str) -> bool {
-    n := a.len()
-    if n != b.len() { return false }
+# `a == b`, each str passed as its two words, pointer then length. With the lengths equal,
+# every index below them is in range, so the bytes are read with no bounds check.
+pub fn str_eq(a: rawptr, a_len: int, b: rawptr, b_len: int) -> bool {
+    if a_len != b_len { return false }
     i := 0
-    while i < n {
-        if a.byte_at(i) != b.byte_at(i) { return false }
+    while i < a_len {
+        x := unsafe { load_byte(offset(a, i)) }
+        y := unsafe { load_byte(offset(b, i)) }
+        if x != y { return false }
         i += 1
     }
     return true
