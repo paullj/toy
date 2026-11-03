@@ -1,7 +1,8 @@
-//! The conservative, non-moving mark-sweep collector: the `gc_alloc` allocator, the
-//! `gc_collect` stop-the-world collection, the `gc_mark`/`gc_mark_leaf` marking
-//! wrappers, and the `gc_span_count`/`gc_stats` counters — plus the heap ABI (control
-//! block, span prologue, and large-object layout) they all read.
+//! The non-moving mark-sweep collector (precise roots in toy frames, conservative words in
+//! builtin and C frames and in non-container objects): the `gc_alloc` allocator, the
+//! `gc_collect` stop-the-world collection, the `gc_mark`/`gc_mark_leaf` marking wrappers,
+//! and the `gc_span_count`/`gc_stats` counters — plus the heap ABI (control block, span
+//! prologue, and large-object layout) they all read.
 
 const std = @import("std");
 const Aarch64 = @import("../Aarch64.zig");
@@ -20,7 +21,7 @@ const patchCbzTo = em.patchCbzTo;
 const patchBCondTo = em.patchBCondTo;
 const patchBTo = em.patchBTo;
 
-// A conservative, non-moving MARK-SWEEP collector, hand-emitted like `print`/`panic`.
+// A non-moving MARK-SWEEP collector, hand-emitted like `print`/`panic`.
 // Appended once at link time (emit.zig) when any fn references a heap intrinsic. The
 // collector's control block lives in the image's writable zero-fill `__DATA,__bss`, which
 // the linker adds whenever a reloc targets `.data`; each builtin reaches it PC-relatively
@@ -40,11 +41,11 @@ const patchBTo = em.patchBTo;
 // pacing, floored at 256 KiB). A fixed budget makes a growing live set pay a whole-heap
 // trace every 256 KiB: O(live) collections of O(live) work each. The collector walks the
 // FP chain enumerating each frame's roots by PRECISE stack-map lookup (a row per fn names
-// the managed cells, and a MIR fn adds a row per safepoint call whose roots differ;
-// hand-emitted builtin and foreign C frames have no row and fall back to a conservative
-// word scan of the frame's memory, which never sees a pointer held only in a register:
-// a toy caller keeps each reference it passes to C in a slot its own row names), traces
-// marked objects to a fixpoint over a malloc-backed mark stack
+// the managed cells, and a row per safepoint call adds the spill slots whose roots differ,
+// so every toy frame is precise; hand-emitted builtin and foreign C frames have no row and
+// fall back to a conservative word scan of the frame's memory, which never sees a pointer
+// held only in a register: a toy caller keeps each reference it passes to C in a slot its
+// own row names), traces marked objects to a fixpoint over a malloc-backed mark stack
 // (resolving each candidate word's span through a hash table of span pages built per
 // collection), and linear-sweeps every span (dead cells → freelists, mark bits cleared).
 // All emitted bodies are PURE fixed AArch64 (only mmap+malloc flags / lengths are baked;
@@ -693,10 +694,11 @@ pub fn lowerGcMarkLeaf(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
 /// root scan. Walks the x29 chain from its own frame outward; for each parent frame it
 /// identifies the enclosing fn by the child-saved return address and looks the precise root
 /// map of that return address up in the address-keyed stack-map table (`text_off -> root
-/// bitmap`, a row per fn and per MIR safepoint call), enumerating only the managed cells
-/// the map names. A frame with no map entry (a hand-emitted builtin,
-/// a failed lower, or a foreign C-runtime frame — all carrying the `0xFFFFFFFF` conservative
-/// marker) falls back to a whole-frame word scan. Precise roots are always a subset of that
+/// bitmap`, a row per fn and per safepoint call), enumerating only the managed cells the
+/// map names. Every toy frame has a map. Only a frame no toy fn owns (a hand-emitted
+/// builtin or a foreign C-runtime frame, both carrying the `0xFFFFFFFF` conservative
+/// marker) falls back to a whole-frame word scan, as their memory has no layout the
+/// compiler knows. Precise roots are always a subset of that
 /// whole-frame set, and the marker validates each candidate before any dereference, so a
 /// misidentified frame over-retains at worst — never a use-after-free. OBJECT TRACING is
 /// descriptor-driven where a descriptor rode the push: on pop, a container (descriptor 1)
@@ -778,8 +780,8 @@ pub fn lowerGcCollect(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     // text_base, less 4 to land on the `bl`), scan the address-keyed stack map for the
     // greatest row off <= that fn offset, and enumerate ITS precise root cells at
     // `parent_sp + sp_off`. A row-less/sentinel/foreign frame carries the `0xFFFFFFFF`
-    // marker → fall back to the whole-frame conservative scan (matching the old behavior for
-    // builtin/C-runtime frames). The marker validates every candidate before dereferencing,
+    // marker → fall back to the whole-frame conservative scan, which only builtin and
+    // C-runtime frames take. The marker validates every candidate before dereferencing,
     // so a misidentified frame over-retains at worst.
     // Loop-carried state (all callee-saved, surviving emitConservativeMark/emitPush):
     //   x19=CB, x25=text_base, x26=&stackmap, x27=cur fp, x28=parent fp,

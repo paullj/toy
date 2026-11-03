@@ -59,14 +59,15 @@ pub const Operand = union(enum) {
 };
 
 /// A memory slot: one frame location. Carries only its type; the byte offset is
-/// assigned by codegen's `FrameLayout` (spill-everything). Locals, params, the
+/// assigned by codegen's `FrameLayout`. Locals, params, the
 /// for-loop induction var, match bindings, and every aggregate live in slots.
 pub const Slot = struct {
     type: Type,
 };
 
 /// An SSA value definition: a scalar temporary or a merge (block-param) value.
-/// Carries only its type; its frame slot is assigned by codegen (spill-all).
+/// Carries only its type; codegen keeps a scalar one in a register (spilling it to a
+/// stack slot only where it must) and gives an aggregate one a frame cell.
 pub const ValueDef = struct {
     type: Type,
 };
@@ -201,7 +202,7 @@ pub const Op = union(enum) {
     /// `bnot` (which is `!bool` = cmp #0 + cset eq).
     bcompl: ValueId,
 
-    /// f64 constant (the raw bit pattern is materialized into a GPR value cell).
+    /// f64 constant (the raw bit pattern is materialized into a GPR).
     fconst: f64,
     fadd: Bin,
     fsub: Bin,
@@ -280,7 +281,7 @@ pub const Terminator = union(enum) {
     };
 };
 
-/// The hash seed every literal is interned under, by lower and by both backends' panic
+/// The hash seed every literal is interned under, by lower and by codegen's panic
 /// messages, so one message that is also a display literal dedups to one `__cstring` entry.
 /// FROZEN: changing it re-hashes every literal, so the `.cstr` reloc targets in cached
 /// FnCode blobs would no longer line up with the literal table.

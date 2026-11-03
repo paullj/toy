@@ -107,7 +107,7 @@ jobs:
   gc-stress:
     needs: changes
     if: needs.changes.outputs.gc == 'true'
-    name: GC stress + MIR corpus (${{ matrix.os }})
+    name: GC stress corpus (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -126,9 +126,6 @@ jobs:
       # at -O0 and -O1 must still meet its # expect: lines.
       - name: GC stress corpus
         run: mise run test:gc-stress
-      # The same corpus with --backend=mir, plain and under GC stress.
-      - name: MIR backend corpus
-        run: mise run test:mir
 
   fuzz:
     needs: changes
@@ -150,7 +147,8 @@ jobs:
           restore-keys: zig-cache-fuzz-${{ runner.os }}-
       # Seeded + bounded (FUZZ_SEED / FUZZ_ITERS / FUZZ_DIFF_ITERS), so the run terminates
       # in a few minutes and reproducibly. Forced to Debug by build.zig so the parser
-      # invariants fire. The differential phase builds each program with both backends.
+      # invariants fire. The differential phase builds each program at every level, with
+      # and without GC stress.
       - name: Front-end and differential fuzzer
         run: zig build fuzz
         env:

@@ -1,9 +1,9 @@
 //! Exact constant-fold arithmetic for the opt stage.
 //!
-//! These helpers MUST replicate what `CodegenIr.genArith` + `Aarch64` emit
-//! bit-for-bit, otherwise opt-on diverges from opt-off (the differential test
-//! is the backstop, but correctness lives here). Verified against
-//! `CodegenIr.genArith` + `Aarch64`:
+//! These helpers MUST replicate what the instruction selector (`codegen/mir/aarch64/
+//! Isel.zig`, `alu`) emits bit-for-bit, otherwise opt-on diverges from opt-off (the
+//! differential test is the backstop, but correctness lives here). Verified against
+//! that selection:
 //!   add/sub/mul : 64-bit two's-complement WRAPPING (`+%`/`-%`/`*%`).
 //!   sdiv        : SIGNED. aarch64 hardware does NOT trap: /0 yields 0,
 //!                 INT_MIN / -1 yields INT_MIN. Zig `@divTrunc` TRAPS on both
@@ -35,7 +35,7 @@ pub fn foldBin(kind: BinKind, l: i64, r: i64) i64 {
 
 pub const ShiftKind = enum { shl, lshr, ashr };
 
-/// Go-semantics shift fold — the value-domain mirror of `CodegenIr.genShift`.
+/// Go-semantics shift fold — the value-domain mirror of `Isel.shift`.
 /// The amount is compared UNSIGNED against `width` (matching the `csel …,hs`
 /// guard): amt>=width → 0 (shl/lshr) or sign-fill (ashr, = `l >> 63`). Below width
 /// the amount is < 64, so a plain native shift in the u64/i64 domain. Returns the
@@ -101,7 +101,7 @@ pub fn neg(v: i64) i64 {
 }
 
 /// Width-normalize a folded 64-bit result to its result type's canonical form —
-/// the value-domain mirror of `CodegenIr.normalizeWidth` (signed narrow →
+/// the value-domain mirror of `Isel.normalize` (signed narrow →
 /// sign-extend, unsigned narrow → zero-extend). Exhaustive over `IntWidth` (no
 /// `else`) so a new width class is a build break, not a silent fold divergence.
 /// Identity for non-integers and platform/w64 ints → byte-identical for existing
@@ -117,7 +117,7 @@ pub fn wrapTo(ty: Ir.Type, x: i64) i64 {
 }
 
 /// Whether `l op r` overflows integer type `ty`, the value-domain mirror of
-/// `CodegenIr.genOverflow`. A narrow type's operands fit 32 bits, so the 64-bit result is
+/// `Isel.overflow`. A narrow type's operands fit 32 bits, so the 64-bit result is
 /// exact and overflows when it does not survive `wrapTo`; a 64-bit type is judged exactly.
 pub fn overflows(kind: Ir.Overflow.Kind, l: i64, r: i64, ty: Ir.Type) bool {
     if (ty.intBits() < 64) {

@@ -1,0 +1,29 @@
+# Feature: #323: a recursive Vec/Map walk 60000 calls deep runs at debug -O0; its frames once held a cell per IR value and overflowed the 8 MiB stack near depth 16000
+# expect: stdout "60000\n"
+# expect: exit 0
+import std/io
+import std/vec
+import std/map
+
+fn walk(v: Vec[int], m: Map[int, int], i: int) -> int {
+    if i >= v.len() { return 0 }
+    k := v[i] - i + m.get(i % 10).or(0) - i % 10
+    k + 1 + walk(v, m, i + 1)
+}
+
+fn main() -> int {
+    v: Vec[int] = []
+    m: Map[int, int] = Map.new()
+    i := 0
+    while i < 10 {
+        m.set(i, i)
+        i += 1
+    }
+    i = 0
+    while i < 60000 {
+        v.push(i)
+        i += 1
+    }
+    io.println(walk(v, m, 0))
+    0
+}

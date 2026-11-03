@@ -153,7 +153,7 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
 
 // Rewrite an integer-producing instruction to its folded `iconst`, wrapping to
 // the RESULT value's own width — forwarding rewrites operands, never a result
-// id/type, so this stays sound at -O1 (mirrors CodegenIr.normalizeWidth).
+// id/type, so this stays sound at -O1 (mirrors Isel.normalize).
 fn commitFoldedInt(func: *Ir.Function, known: []Known, ins: *Ir.Instr, res: Ir.ValueId, x: i64) void {
     const ty = if (res != Ir.none_value) func.values[res].type else Ir.Type.int;
     const wrapped = arith.wrapTo(ty, x);

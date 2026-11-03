@@ -586,14 +586,14 @@ pub fn link(io: Io, gpa: std.mem.Allocator, fns: []const FnCode, si: *SymInterne
 }
 
 /// The 4-byte conservative marker `0xFFFFFFFF`: a row-less fn's payload, telling the
-/// collector to fall back to a whole-frame scan for frames it maps (builtins, failed
-/// lowers, and the sentinel past __text).
+/// collector to fall back to a whole-frame scan for frames it maps (builtins and the
+/// sentinel past __text).
 const conservative_marker = [4]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
 
 /// Build the GC stack-map table (see `Linked.stack_map`) as a `buildSideTable` payload:
 /// one row per fn `{fn-start offset, root_bitmap}` plus a final `{text_size, conservative}`
 /// sentinel, rows sorted ascending by off (fn starts are distinct; sentinel last). A fn
-/// with an empty `root_bitmap` (a builtin / failed lower) contributes the 4-byte
+/// with an empty `root_bitmap` (a builtin) contributes the 4-byte
 /// conservative marker instead. `site_h[i]` is fn i's handle (→ `offsets`).
 fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32) ![]u8 {
     const SmEnt = struct { off: u64, payload: []const u8 };

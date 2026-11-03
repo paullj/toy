@@ -1,15 +1,15 @@
 //! AArch64 instruction selection: `Ir.Function` to MIR on virtual registers.
 //!
 //! Each scalar IR value becomes the virtual register of the same index (linear scan gives
-//! it a slot only if it spills).
-//! Aggregate IR values (a merge of a str/struct/enum) stay memory: their bytes live in their
-//! cell and the selector copies them. A shape the selector does not cover yet fails with
-//! `error.Unsupported` and a `Fallback` reason, and the caller lowers that fn with the spill
-//! backend instead.
+//! it a slot only if it spills). Aggregate IR values (a merge of a str/struct/enum) stay
+//! memory: their bytes live in their cell and the selector copies them. A value shape the
+//! selector does not cover (an aggregate or unit value where a scalar register is needed,
+//! or a value with no memory where an address is) fails with `error.Unsupported`, which the
+//! build reports as an internal error.
 //!
-//! The calling convention comes from `Abi` exactly as the spill backend uses it. Argument
-//! and result registers appear as physical operands next to the virtual ones; the selector
-//! never names x9-x15 or v16-v18, which belong to the allocator's and encoder's scratch.
+//! The calling convention comes from `Abi`. Argument and result registers appear as
+//! physical operands next to the virtual ones; the selector never names x9-x15 or v16-v18,
+//! which belong to the allocator's and encoder's scratch.
 //!
 //! GC facts for the allocator (which values are references, which calls are safepoints,
 //! what a call keeps rooted) come from `GcFacts`, shared by every target.
@@ -31,17 +31,6 @@ const Mem = Mir.Mem;
 
 pub const Func = Mir.Function(Inst);
 
-/// Why a fn fell back to the spill backend, as `--codegen-stats` counts it.
-pub const Fallback = enum {
-    /// An aggregate or unit IR value where a scalar register is needed.
-    non_scalar_value,
-    /// The frame, with the allocator's spill slots, outgrows codegen's budget, or a
-    /// branch outgrows its immediate.
-    too_large,
-    /// An instruction needs more registers at once than the allocator has.
-    regalloc,
-};
-
 pub const Error = error{ OutOfMemory, Unsupported };
 
 pub const Input = struct {
@@ -59,9 +48,9 @@ pub fn newFunc(gpa: std.mem.Allocator, ir: *const Ir.Function) error{OutOfMemory
 }
 
 /// Select `in.ir` into `f` (from `newFunc(in.ir)`).
-/// Panic messages join `literals`. On `error.Unsupported`, `why` says what was missing.
-pub fn select(gpa: std.mem.Allocator, in: Input, f: *Func, literals: *std.ArrayList(Link.Literal), why: *Fallback) Error!void {
-    var s: S = .{ .gpa = gpa, .in = in, .ir = in.ir, .f = f, .literals = literals, .why = why };
+/// Panic messages join `literals`.
+pub fn select(gpa: std.mem.Allocator, in: Input, f: *Func, literals: *std.ArrayList(Link.Literal)) Error!void {
+    var s: S = .{ .gpa = gpa, .in = in, .ir = in.ir, .f = f, .literals = literals };
     return s.run();
 }
 
@@ -71,16 +60,10 @@ const S = struct {
     ir: *const Ir.Function,
     f: *Func,
     literals: *std.ArrayList(Link.Literal),
-    why: *Fallback,
     block: u32 = 0,
     line: u32 = Ir.no_line,
     /// An aggregate value the current instruction writes as a scalar (`def`).
     pending: ?struct { t: Reg, v: Ir.ValueId } = null,
-
-    fn fail(s: *S, why: Fallback) Error {
-        s.why.* = why;
-        return error.Unsupported;
-    }
 
     fn emit(s: *S, op: Inst.Op) error{OutOfMemory}!void {
         try s.f.blocks[s.block].insts.append(s.gpa, .{ .op = op, .line = s.line });
@@ -99,10 +82,10 @@ const S = struct {
     }
 
     /// A register holding IR value `v`. An aggregate value read as a scalar is the first
-    /// word of its cell, as the spill backend reads it.
+    /// word of its cell.
     fn val(s: *S, v: Ir.ValueId) Error!Reg {
         const ty = s.valueType(v);
-        if (ty.kind == .unit) return s.fail(.non_scalar_value);
+        if (ty.kind == .unit) return error.Unsupported;
         if (isScalar(ty)) return Reg.virt(v);
         const t = try s.temp(.gpr);
         try s.emit(.{ .load = .{ .rt = t, .mem = Mem.frame(.{ .value = v }, 0) } });
@@ -113,7 +96,7 @@ const S = struct {
     /// scalar goes through a temporary into the first word of its cell, by `flush`.
     fn def(s: *S, v: Ir.ValueId) Error!Reg {
         const ty = s.valueType(v);
-        if (ty.kind == .unit) return s.fail(.non_scalar_value);
+        if (ty.kind == .unit) return error.Unsupported;
         if (isScalar(ty)) return Reg.virt(v);
         std.debug.assert(s.pending == null);
         const t = try s.temp(.gpr);
@@ -320,8 +303,8 @@ const S = struct {
         }
     }
 
-    /// Re-canonicalize a narrow integer in `r` to its width, as the spill backend's
-    /// `normalizeWidth` does.
+    /// Re-canonicalize a narrow integer in `r` to its width (`opt/arith.zig` folds the
+    /// same value).
     fn normalize(s: *S, r: Reg, ty: Type) error{OutOfMemory}!void {
         if (!ty.isInteger()) return;
         const op: Inst.UnaryOp = switch (ty.int_desc.width) {
@@ -440,7 +423,7 @@ const S = struct {
         try s.normalize(d, ty);
     }
 
-    /// Whether `o.lhs op o.rhs` overflows `o.ty`, as the spill backend's `genOverflow`.
+    /// Whether `o.lhs op o.rhs` overflows `o.ty`.
     fn overflow(s: *S, res: Ir.ValueId, o: Ir.Overflow) Error!void {
         const d = try s.def(res);
         const lhs = try s.val(o.lhs);
@@ -513,7 +496,7 @@ const S = struct {
                 try s.packC(ty, Mem.reg(try s.val(c.args[i].value), 0), Mem.frame(.c_scratch, img));
                 src.* = .{ .image_addr = img };
             } else {
-                try s.packC(ty, s.memOf(c.args[i]) orelse return s.fail(.non_scalar_value), Mem.frame(.c_scratch, img));
+                try s.packC(ty, s.memOf(c.args[i]) orelse return error.Unsupported, Mem.frame(.c_scratch, img));
                 src.* = .{ .image = img };
             }
             img += FrameLayout.roundUp16(Abi.cLayout(ty, s.in.layouts).size);
@@ -622,7 +605,7 @@ const S = struct {
                     uses |= Mir.regBit(Reg.fp(v));
                 },
                 .gpr_ptr => |r| {
-                    try s.emit(.{ .addr = .{ .rd = Reg.gp(r), .mem = mem orelse return s.fail(.non_scalar_value) } });
+                    try s.emit(.{ .addr = .{ .rd = Reg.gp(r), .mem = mem orelse return error.Unsupported } });
                     uses |= Mir.regBit(Reg.gp(r));
                 },
                 .stack => |st| {
@@ -651,7 +634,7 @@ const S = struct {
                 },
                 .stack_ptr => |off| {
                     const t = try s.temp(.gpr);
-                    try s.emit(.{ .addr = .{ .rd = t, .mem = mem orelse return s.fail(.non_scalar_value) } });
+                    try s.emit(.{ .addr = .{ .rd = t, .mem = mem orelse return error.Unsupported } });
                     try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(.outgoing, off) } });
                 },
                 .zero => {},
@@ -758,7 +741,7 @@ const S = struct {
             const dst = Mem.frame(.{ .value = p }, 0);
             if (s.memOf(arg)) |src| return s.emit(.{ .copy = .{ .dst = dst, .src = src, .size = s.typeSize(pty) } });
             // A one-word aggregate (a box) fed by its handle as a scalar value.
-            if (s.typeSize(pty) > 8) return s.fail(.non_scalar_value);
+            if (s.typeSize(pty) > 8) return error.Unsupported;
             return s.emit(.{ .store = .{ .rt = try s.val(arg.value), .mem = dst } });
         }
         const d = try s.def(p);

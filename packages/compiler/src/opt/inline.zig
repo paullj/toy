@@ -50,9 +50,9 @@ pub const Lookup = struct {
 /// body stay calls: the lookup hands over callee IR that already had its own callees
 /// inlined, which bounds the depth.
 pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, lookup: Lookup, max: usize, stats: *Stats) error{OutOfMemory}!bool {
-    // Spill-all gives every inlined value its own frame cell, so inlining grows the frame
-    // by each spliced body; a recursion multiplies that by its depth and could overflow
-    // the stack where the uninlined build does not.
+    // Each spliced body brings its slots, aggregate cells and spills into the frame, so
+    // inlining grows it; a recursion multiplies that by its depth and could overflow the
+    // stack where the uninlined build does not.
     if (calls(func, func.name.name)) return false;
     var sp: Splicer = try .init(gpa, func);
     defer sp.deinit();

@@ -25,6 +25,11 @@ toy run main.toy --profile release    # the same as --release
 
 When a new pass is added, `release` runs it too.
 
+Both profiles share one backend, which keeps values in registers and gives a function's
+frame only its locals, its aggregate values and the values it must keep across a call.
+So a debug build differs from release only in what the table lists, and its frames are
+small enough for deep recursion.
+
 Index bounds, division and remainder by zero, and `expect` are checked in both profiles.
 
 ## Integer overflow

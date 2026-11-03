@@ -28,7 +28,7 @@ either runs cleanly or, under `errors/`, fails compilation on purpose.
 | `fs/`           | `std/fs`: `read_file`, `write_file`, `append_file`, `remove` and `exists` in the fixture's cwd, each `IoError`, and `File` handles from `open`, `create` and `append` (chunked reads, writes, use after close) |
 | `float/`        | `std/float`: float `Display` (shortest round-trip digits, exponent outside [1e-4, 1e16), inf/NaN, fields) and `float.parse` round trips |
 | `gc/`           | the mark-sweep collector: roots, tracing, reclaiming churned garbage, and `std/gc`'s `collect()` / `collections()` |
-| `frames/`       | function frames past the 4 KiB a single instruction addresses (about 5 KiB, 40 KiB and 1 MiB), with heap roots at the far end across collections |
+| `frames/`       | function frames past the 4 KiB a single instruction addresses (about 5 KiB, 40 KiB and 1 MiB), with heap roots at the far end across collections, and recursion deep enough to need small frames |
 | `errors/`       | programs that are *supposed* to fail to compile           |
 
 ## Annotation convention
@@ -81,8 +81,3 @@ collects before every heap allocation, at `-O0` and at `-O1`, and must meet the 
 allocates, not only in one that outgrows the collection budget. A program whose output
 counts collections, or that allocates too much to collect each time, opts out with
 `# gc-stress: skip`.
-
-`TOY_BACKEND=mir ./zig-out/bin/toy-corpus-test` builds every program with the hidden
-`--backend=mir` flag at `-O0` and at `-O1` against the same `# expect:` lines, so the MIR
-backend is checked against everything the default spill backend meets. It combines with
-`TOY_GC_STRESS=1`; `mise run test:mir` runs both.

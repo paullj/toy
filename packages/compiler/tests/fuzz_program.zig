@@ -14,7 +14,7 @@
 //! down, and every loop runs a fresh counter that nothing else may assign or pass as a
 //! `mut` argument. Divisors and shift amounts are masked into range. The checked `+`, `-`
 //! and `*` stay in on purpose (rarely): their overflow panics are part of what both
-//! backends must agree on.
+//! builds must agree on.
 
 const std = @import("std");
 

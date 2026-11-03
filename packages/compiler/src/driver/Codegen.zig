@@ -17,7 +17,7 @@ const Typecheck = @import("../types.zig");
 const Mono = @import("../symbols/Mono.zig");
 const Graph = @import("Graph.zig");
 const ResolveGraph = @import("../resolve_graph.zig");
-const CodegenIr = @import("../codegen/CodegenIr.zig");
+const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
 const Profile = @import("Profile.zig");
@@ -74,7 +74,7 @@ pub const EmitError = struct {
 pub const LinkedProgram = struct {
     text: []u8,
     entry_off: u32,
-    diags: []CodegenIr.Diagnostic,
+    diags: []Diagnostic,
     owned_msgs: [][]u8,
     /// Interned `__cstring` bytes. Owned; empty for string-free programs.
     cstrings: []u8 = &.{},
@@ -89,8 +89,6 @@ pub const LinkedProgram = struct {
     /// from the codegen cache this build. Surfaced via `--codegen-stats`.
     codegen_compiled: usize = 0,
     codegen_cached: usize = 0,
-    /// Under `--backend=mir`: how many freshly lowered fns took MIR, and which fell back.
-    mir: Engine.MirStats = .{},
     /// dual-metric: summed opt counters over freshly-lowered fns, the total
     /// IR instruction count after opt, and the emitted aarch64 instruction count
     /// (text.len/4). No owned slices → deinit unchanged. Cached fns contribute 0
@@ -125,7 +123,7 @@ pub const LowerProgramResult = union(enum) {
 /// A lowering diagnostic as the CLI renders it. One with no source position of its own (a
 /// frame that outgrew codegen) points at the failing unit's declaration, so the user learns
 /// which function to split; a unit with no declaration renders without a snippet.
-fn emitErrorOf(graph: *const Graph.Graph, d: CodegenIr.Diagnostic, module: u32, decl: Ast.Index) EmitError {
+fn emitErrorOf(graph: *const Graph.Graph, d: Diagnostic, module: u32, decl: Ast.Index) EmitError {
     if (d.end != 0) return .{ .message = d.message, .span = d.span(), .module = module };
     const m = &graph.modules[module];
     if (decl == Ast.none or decl.int() >= m.nodes.len) return .{ .message = d.message, .span = null, .module = module };
@@ -163,9 +161,7 @@ fn relink(
     // backing array here, never its elements.
     var fns: std.ArrayList(Link.FnCode) = .empty;
     defer fns.deinit(gpa);
-    var mir: Engine.MirStats = .{};
     for (slots) |*s| {
-        mir.add(s.mir);
         try fns.append(gpa, s.fc.?);
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
@@ -175,11 +171,10 @@ fn relink(
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
     };
-    lp.diags = try gpa.alloc(CodegenIr.Diagnostic, 0);
+    lp.diags = try gpa.alloc(Diagnostic, 0);
     lp.owned_msgs = try gpa.alloc([]u8, 0);
     lp.codegen_compiled = compiled;
     lp.codegen_cached = cached_n;
-    lp.mir = mir;
     lp.opt_stats = opt_stats;
     lp.ir_instrs = ir_instrs;
     // Dual-metric machine-code count: aarch64 is fixed-width 4-byte instrs, so
@@ -496,7 +491,7 @@ const Plan = struct {
         return facts;
     }
 
-    fn emitError(p: *const Plan, d: CodegenIr.Diagnostic, i: usize) EmitError {
+    fn emitError(p: *const Plan, d: Diagnostic, i: usize) EmitError {
         const u = p.units[i];
         return emitErrorOf(p.graph, d, p.moduleOf(u), p.declOf(u));
     }
@@ -745,7 +740,7 @@ pub fn renderIr(
     defer plan.deinit(gpa);
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    var diags: std.ArrayList(CodegenIr.Diagnostic) = .empty;
+    var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
     for (0..plan.units.len) |i| {
         const fr = plan.frozenFor(i);
@@ -967,7 +962,7 @@ fn unfoldedCalls(gpa: std.mem.Allocator, plan: *const Plan, unfolded: *std.Array
         var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
         defer sigs.deinit(gpa);
         try AstWalk.walkCalls(gpa, &fr.in, fr.body.source.decl, fr.in.sig, &sigs);
-        var diags: std.ArrayList(CodegenIr.Diagnostic) = .empty;
+        var diags: std.ArrayList(Diagnostic) = .empty;
         defer diags.deinit(gpa);
         var stats: Opt.Stats = .{};
         var func = try Engine.lowerUnit(gpa, &fr, &diags, &stats);

@@ -1832,11 +1832,10 @@ fn strBase(b: *Builder, node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
 /// builtin, which `gc_alloc`s exactly `len_lhs+len_rhs` packed bytes and copies both in.
 /// The four scalar args are read from the operands' frame slots BEFORE the call — a raw
 /// heap pointer is never held across the call (its sole safepoint), while the operand str
-/// VALUES stay slot-rooted so the conservative frame scan keeps their buffers marked across
-/// any collection the alloc triggers. The builtin returns the str reg-pair, which
+/// VALUES stay slot-rooted so the caller's stack map keeps their buffers marked across any
+/// collection the alloc triggers. The builtin returns the str reg-pair, which
 /// `placeResult` stores x0->slot@0, x1->slot@8. Out-of-lining (vs an inline byte-copy loop)
-/// keeps a concat's cost off the caller's spill-all frame, so concats do not stack up toward
-/// `FrameTooLarge`.
+/// keeps each concat's loop, its values and their register pressure out of the caller.
 fn lowerStrConcat(b: *Builder, node_idx: Ast.Index, lhs: Ast.Index, rhs: Ast.Index) error{OutOfMemory}!Ir.Operand {
     const int_ty = Typecheck.Type.int;
     const res_ty = b.in.nodes.typeOf(node_idx);
@@ -2034,7 +2033,7 @@ pub fn emitGcAlloc(b: *Builder, size: u32) error{OutOfMemory}!Ir.ValueId {
 /// cell pointer, but typing it `.int` hides it from the precise root map (an integer
 /// word and a live heap handle look identical). `.rawptr` is ABI-identical to `.int`
 /// (scalar, 8 bytes, integer class — byte-neutral through codegen) yet marks the value
-/// cell as managed, so the root projector emits it and `verifyRefsSpilled` covers it.
+/// as a reference, so the allocator keeps it in a stack-mapped slot across a safepoint.
 /// Box STORES keep their `.int` store-width (never read by the projector).
 pub const box_repr_ty: Typecheck.Type = Typecheck.Type.rawptr;
 
@@ -2971,10 +2970,9 @@ fn lowerConvMethod(b: *Builder, node_idx: Ast.Index, cv: ConvCall) error{OutOfMe
     const e = b.in.enum_layouts[call_ty.enum_id];
     const dst_T = Typecheck.somePayload(e);
 
-    // int→char / char→byte are heavy (~24 / ~12 SSA cells); inlining >10 / >20 per fn
-    // overflowed the imm12 frame cap. Emit each as ONE shared witness and CALL it (O(1)/site).
-    // float -> int is one too (never inlined); `v` is then the raw f64 value cell, which
-    // convCallWitness passes as a float arg -> v0.
+    // int→char / char→byte are heavy (~24 / ~12 IR values each); one shared witness CALLED
+    // from every site keeps each site's code O(1). float -> int is one too (never inlined);
+    // `v` is then the raw f64 value, which convCallWitness passes as a float arg -> v0.
     if (convWitnessKind(&b.in, recv_ty, call_ty)) |kind| return convCallWitness(b, kind, v, call_ty);
 
     // int→int narrow: a per-(width,signedness) family — no single program-global

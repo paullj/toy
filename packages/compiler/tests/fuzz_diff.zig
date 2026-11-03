@@ -1,11 +1,14 @@
 //! The differential half of `zig build fuzz`: build one generated program
-//! (`fuzz_program.zig`) with each backend at each optimization level, run every binary,
-//! and require the same exit and the same stdout from all of them. The spill backend at
-//! -O0 is the oracle (#38 bring-up), so a difference is a MIR or pass miscompile, or a
-//! GC root the stress collector freed under one of them.
+//! (`fuzz_program.zig`) at each optimization level, with and without `--gc-stress`, run
+//! every binary, and require the same exit and the same stdout from all of them. Each
+//! level hands the register allocator different code for the same program: -O0 keeps
+//! every call and slot, -O1 folds, forwards and inlines, and -O1 without the inliner
+//! keeps the calls but not the loads. So a difference is a pass miscompile, an allocator
+//! or selector bug that only some shapes reach, or a GC root the stress collector freed
+//! under one of them. Debug -O0 is the oracle.
 //!
 //! The release profile wraps where debug panics on overflow, so release builds are
-//! compared with their own oracle, spill under `--release`.
+//! compared with their own oracle, plain `--release`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,41 +19,16 @@ pub const Variant = struct {
     flags: []const []const u8,
     /// The variant whose result this one must reproduce.
     oracle: usize,
-
-    fn isMir(v: Variant) bool {
-        for (v.flags) |f| if (std.mem.eql(u8, f, "--backend=mir")) return true;
-        return false;
-    }
 };
 
-/// Whether `--codegen-stats` output says MIR lowered every fn, with no spill fallback.
-fn mirLoweredAll(stats: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, stats, '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "mir: ")) continue;
-        var words = std.mem.tokenizeScalar(u8, line, ' ');
-        while (words.next()) |w| if (std.mem.eql(u8, w, "fallback=0")) return true;
-        return false;
-    }
-    return false;
-}
-
-test "mirLoweredAll: only a stats line with no fallback passes" {
-    try std.testing.expect(mirLoweredAll("codegen: compiled=3 cached=0\nmir: lowered=3 fallback=0\n"));
-    try std.testing.expect(!mirLoweredAll("mir: lowered=2 fallback=1 regalloc=1\n"));
-    try std.testing.expect(!mirLoweredAll("mir: lowered=2 fallback=10\n"));
-    try std.testing.expect(!mirLoweredAll("codegen: compiled=3 cached=0\n"));
-}
-
 pub const variants = [_]Variant{
-    .{ .name = "spill -O0", .flags = &.{ "--backend=spill", "-O0" }, .oracle = 0 },
-    .{ .name = "spill -O1", .flags = &.{ "--backend=spill", "-O1" }, .oracle = 0 },
-    .{ .name = "mir -O0", .flags = &.{ "--backend=mir", "-O0" }, .oracle = 0 },
-    .{ .name = "mir -O1", .flags = &.{ "--backend=mir", "-O1" }, .oracle = 0 },
-    .{ .name = "mir -O0 --gc-stress", .flags = &.{ "--backend=mir", "-O0", "--gc-stress" }, .oracle = 0 },
-    .{ .name = "mir -O1 --gc-stress", .flags = &.{ "--backend=mir", "-O1", "--gc-stress" }, .oracle = 0 },
-    .{ .name = "spill --release", .flags = &.{ "--backend=spill", "--release" }, .oracle = 6 },
-    .{ .name = "mir --release", .flags = &.{ "--backend=mir", "--release" }, .oracle = 6 },
+    .{ .name = "-O0", .flags = &.{"-O0"}, .oracle = 0 },
+    .{ .name = "-O1", .flags = &.{"-O1"}, .oracle = 0 },
+    .{ .name = "-O1 --no-opt inline", .flags = &.{ "-O1", "--no-opt", "inline" }, .oracle = 0 },
+    .{ .name = "-O0 --gc-stress", .flags = &.{ "-O0", "--gc-stress" }, .oracle = 0 },
+    .{ .name = "-O1 --gc-stress", .flags = &.{ "-O1", "--gc-stress" }, .oracle = 0 },
+    .{ .name = "--release", .flags = &.{"--release"}, .oracle = 5 },
+    .{ .name = "--release --gc-stress", .flags = &.{ "--release", "--gc-stress" }, .oracle = 5 },
 };
 
 /// How a run ended. A run past `run_timeout` is a result too: a miscompiled loop bound
@@ -180,8 +158,6 @@ fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ toy, "build", "main.toy", "-o", tag, "--color", "never", "--no-cache" });
     try argv.appendSlice(gpa, variants[k].flags);
-    const mir = variants[k].isMir();
-    if (mir) try argv.append(gpa, "--codegen-stats");
     const res = try std.process.run(gpa, io, .{
         .argv = argv.items,
         .cwd = .{ .path = dir_path },
@@ -189,9 +165,7 @@ fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8
     });
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
-    // A fn the MIR backend gives up on builds with the spill one, and would then compare
-    // spill with spill: a fallback fails the variant as a build failure would.
-    if (res.term != .exited or res.term.exited != 0 or (mir and !mirLoweredAll(res.stdout))) {
+    if (res.term != .exited or res.term.exited != 0) {
         return .{ .build_failed = try std.mem.concat(gpa, u8, &.{ res.stdout, res.stderr }) };
     }
     defer dir.deleteFile(io, tag) catch {};
@@ -284,7 +258,7 @@ test "each variant is held to its own profile's oracle" {
     try std.testing.expectEqual(variants.len - 1, firstMismatch(&outs));
 }
 
-test "generated programs build and agree across backends and levels" {
+test "generated programs build and agree across levels and gc stress" {
     const harness = @import("harness.zig");
     try harness.skipUnlessBackend(std.testing.io);
     const gpa = std.testing.allocator;

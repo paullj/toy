@@ -834,11 +834,8 @@ test "char->byte try_into is a shared witness — 22 in one fn compile (pre-fix 
     // Each is now one CALL to the shared `TryInto$char_to_byte` witness. Codepoints 65..86
     // all fit `byte`, so every `or(0)` yields the codepoint; the two edge checks
     // (b0, b21) exit non-42 on any miscompile, else 42.
-    // 22 is the smallest count that clears the pre-fix ~21-site overflow; the spill-all frame
-    // now overflows at 25, so this test sits ~2 sites under the cap. A per-site frame-cost bump
-    // (wider ret_slot, an extra spill) could regress it — and raising N cannot buy more margin,
-    // since frame overflow at high site counts is inherent to spill-all (plain local-heavy code
-    // overflows at ~90 locals), not to this witness.
+    // 22 is the smallest count that cleared the pre-fix ~21-site overflow; it pins that each
+    // site stays one call to the witness.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -3314,7 +3311,7 @@ test "integration: emitted binary runs with the right exit code" {
         // first arg is clobbered. Proves eval-to-temps-then-marshal.
         .{ .src = "fn id(x: int) -> int {\n return x\n}\nfn add2(a: int, b: int) -> int {\n return a + b\n}\nfn main() -> int {\n return add2(id(40), id(2))\n}\n", .name = "nested", .expect = 42 },
         // > 8 args: a 10-int-param sum called with 1..10 → 55. Proves the outgoing
-        // region + the incoming-stack-arg ldrFp copy + sp 16-alignment at the call
+        // region + the incoming-stack-arg copy + sp 16-alignment at the call
         // (a misaligned sp would fault on the kernel's alignment check).
         .{ .src = "fn sum10(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int) -> int {\n return a + b + c + d + e + f + g + h + i + j\n}\nfn main() -> int {\n return sum10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)\n}\n", .name = "tenargs", .expect = 55 },
         // A void call as an expression statement: result discarded, then return 5.
