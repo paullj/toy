@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 // The same fixture playwright.config.ts builds the page from.
 const run = JSON.parse(readFileSync('e2e/fixtures/peers.json', 'utf8'));
@@ -7,6 +7,11 @@ const names = [...new Set(run.results.map((r: { name: string }) => r.name))] as 
 type Result = { name: string; lang: string; source: string };
 const results = (name: string) => run.results.filter((r: Result) => r.name === name) as Result[];
 const langs = (name: string) => results(name).map((r) => r.lang);
+
+// A tooltip of a chart the mouse crossed while scrolling can still be fading out.
+async function expectOneTip(page: Page) {
+	await expect(page.locator('.peer-tip')).toHaveCount(1);
+}
 
 test.beforeEach(async ({ page }) => {
 	await page.goto('/benchmarks/');
@@ -38,6 +43,7 @@ test('toy bars come from the newest main record on the peers machine, others fro
 	await chart.scrollIntoViewIfNeeded();
 	const box = (await chart.locator('svg .lc-bar').first().boundingBox())!;
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await expectOneTip(page);
 	await expect(page.locator('.peer-tip')).toContainText('595.0 ms');
 });
 
@@ -72,6 +78,7 @@ test('hovering a bar names its toolchain', async ({ page }) => {
 	// The tooltip's hit area covers the bars, so hover by position rather than on the bar node.
 	const box = (await chart.locator('svg .lc-bar').nth(1).boundingBox())!;
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await expectOneTip(page);
 	await expect(page.locator('.peer-tip')).toContainText(run.toolchains.c.version);
 });
 
@@ -81,6 +88,7 @@ test('in the memory view, a peer that uses less reads as less memory, not faster
 	await chart.scrollIntoViewIfNeeded();
 	const box = (await chart.locator('svg .lc-bar').nth(1).boundingBox())!;
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await expectOneTip(page);
 	await expect(page.locator('.peer-tip')).toContainText('less memory than toy');
 	await expect(page.locator('.peer-tip')).not.toContainText('faster');
 });
