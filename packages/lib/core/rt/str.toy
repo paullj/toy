@@ -1,0 +1,14 @@
+# The `str` runtime: fns lowered code calls for `str` operators. Like every `core/rt` fn,
+# none may reach a GC allocation (T0082), so a call to one is never a point where the
+# collector can run.
+
+pub fn str_eq(a: str, b: str) -> bool {
+    n := a.len()
+    if n != b.len() { return false }
+    i := 0
+    while i < n {
+        if a.byte_at(i) != b.byte_at(i) { return false }
+        i += 1
+    }
+    return true
+}

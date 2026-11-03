@@ -1,0 +1,9 @@
+# No `core/rt` fn may reach a GC allocation (T0082), and the error shows the call path.
+# The folder holds the runtime module itself, which only a dev build allows.
+# dev-core-imports
+# expect: compile-error "[T0082]: core/rt fn 'first_len' can reach a GC allocation: first_len -> core/rt/probe.helper -> std/vec.Vec.new$str -> core/mem.ga_new$str -> gc_alloc"
+import core/rt/probe
+
+fn main() -> int {
+    return probe.first_len("ab")
+}

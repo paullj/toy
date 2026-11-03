@@ -63,6 +63,7 @@ const nearmiss = @import("diagnostics/nearmiss.zig");
 const Engine = @import("query/Engine.zig");
 const Walk = @import("ast/Walk.zig");
 const ClosureTables = @import("types/closure_tables.zig");
+const runtime_rule = @import("types/runtime.zig");
 const Span = @import("diagnostics/model.zig").Span;
 const Io = std.Io;
 
@@ -2575,6 +2576,7 @@ pub fn checkGraph(
     adapters = try ClosureTables.appendCallbackAdapters(gpa, t.graph, bodies, instances, fns, sigs, methods, derives, lambda_units, layouts, adapters);
     var esc = try ClosureTables.analyzeEscapes(&t, fns, sigs, node_types, callees, bodies, instances, methods, lambda_units, layouts, enum_layouts);
     defer esc.deinit(gpa);
+    try runtime_rule.check(&t, bodies, sigs, methods, instances, derives, layouts);
     const owner_closures = try ClosureTables.buildOwnerClosures(gpa, bodies, esc.unboxable);
     errdefer Closure.freeOwnerClosures(gpa, owner_closures);
     layouts = try ClosureTables.appendEnvLayouts(gpa, layouts, lambda_units, esc.frame, bodies, owner_closures);

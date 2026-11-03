@@ -145,6 +145,10 @@ pub const DebugInput = struct {
     /// The entry module, which names the compile unit.
     cu_file: u32,
     comp_dir: []const u8,
+    /// How many leading `files` the table always lists. A later file is listed, with
+    /// every file before it, only when a kept fn is in it, so a module every program
+    /// carries but few call into (`core/rt`) does not change every image.
+    fixed_files: u32 = std.math.maxInt(u32),
 };
 
 /// In-session symbol→handle map. Never persisted: the on-disk identity is the
@@ -831,7 +835,24 @@ fn buildDwarf(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, 
             return a.text_off < b.text_off;
         }
     }.less);
-    return Dwarf.build(gpa, .{ .files = in.files, .cu_file = in.cu_file, .comp_dir = in.comp_dir, .fns = dfns.items, .text_size = text_size });
+    return Dwarf.build(gpa, .{ .files = in.files[0..listedFiles(in, dfns.items)], .cu_file = in.cu_file, .comp_dir = in.comp_dir, .fns = dfns.items, .text_size = text_size });
+}
+
+/// How many leading `in.files` the line table lists (see `DebugInput.fixed_files`).
+fn listedFiles(in: DebugInput, fns: []const Dwarf.Fn) usize {
+    var n: usize = @min(in.fixed_files, in.files.len);
+    for (fns) |f| n = @max(n, f.file + 1);
+    return n;
+}
+
+test "listedFiles: a file past the fixed ones is listed only when a fn is in it" {
+    const files = [_][]const u8{ "main.toy", "util.toy", "/<toy>/core/rt/str.toy", "/<toy>/core/rt/more.toy" };
+    const in: DebugInput = .{ .files = &files, .cu_file = 0, .comp_dir = "", .fixed_files = 2 };
+    const in_main = [_]Dwarf.Fn{.{ .name = "main", .text_off = 0, .size = 4, .file = 0, .rows = &.{} }};
+    try std.testing.expectEqual(@as(usize, 2), listedFiles(in, &in_main));
+    const in_rt = [_]Dwarf.Fn{ in_main[0], .{ .name = "str_eq", .text_off = 4, .size = 4, .file = 2, .rows = &.{} } };
+    try std.testing.expectEqual(@as(usize, 3), listedFiles(in, &in_rt));
+    try std.testing.expectEqual(@as(usize, 4), listedFiles(.{ .files = &files, .cu_file = 0, .comp_dir = "" }, &in_main));
 }
 
 /// Whether a reloc names a function whose `__text` offset the link resolves: every

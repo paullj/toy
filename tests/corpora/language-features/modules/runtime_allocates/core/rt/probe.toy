@@ -1,0 +1,11 @@
+import std/vec
+
+pub fn first_len(s: str) -> int {
+    return helper(s)
+}
+
+fn helper(s: str) -> int {
+    xs := Vec[str].new()
+    xs.push(s)
+    return xs.len()
+}

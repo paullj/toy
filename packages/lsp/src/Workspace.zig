@@ -86,7 +86,7 @@ test "an import resolves to another OPEN document's unsaved text, with no disk a
     var g = try ws.discover(gpa, "file:///ws/main.toy", "import helper\nfn main() -> int { return helper.seven() }\n");
     defer g.deinit(gpa);
     try testing.expect(g.err == null);
-    try testing.expectEqual(@as(usize, 2), g.modules.len);
+    try testing.expectEqual(@as(u32, 2), g.seeded_from);
 }
 
 test "with the disk off, an import no document provides is a missing module, not an I/O error" {
@@ -123,7 +123,7 @@ test "an import finds an open document whose uri percent-encodes its path" {
     var g = try ws.discover(gpa, "file:///my%20ws/main.toy", "import helper\nfn main() -> int { return helper.seven() }\n");
     defer g.deinit(gpa);
     try testing.expect(g.err == null);
-    try testing.expectEqual(@as(usize, 2), g.modules.len);
+    try testing.expectEqual(@as(u32, 2), g.seeded_from);
 }
 
 test "the search roots resolve an import from an extra root, and a clash is R0014" {
@@ -137,7 +137,7 @@ test "the search roots resolve an import from an extra root, and a clash is R001
     var g = try ws.discover(gpa, "file:///ws/src/main.toy", src);
     defer g.deinit(gpa);
     try testing.expect(g.err == null);
-    try testing.expectEqual(@as(usize, 2), g.modules.len);
+    try testing.expectEqual(@as(u32, 2), g.seeded_from);
 
     try docs.put(gpa, "file:///ws/src/extra.toy", "pub fn seven() -> int { return 8 }\n", 1);
     var clash = try ws.discover(gpa, "file:///ws/src/main.toy", src);

@@ -470,6 +470,61 @@ fn main() -> int { return match outer() { .ok(_) -> unrelated(0), .err(_) -> 42 
 }
 run_from_widen
 
+# core/rt no-allocation rule (T0082) over a warm cache: the runtime fn `first` is unchanged
+# while its callee `helper`, in another runtime module, starts to allocate. The warm build
+# MUST fail with the call path (the cached `first` does not keep its old verdict); undoing
+# the edit builds again, SOUND against a --no-cache build. The runtime modules sit on disk,
+# which a dev build's --dev-core-imports allows.
+run_core_rt() {
+  local d="$work/core_rt"; mkdir -p "$d/core/rt"
+  ( cd "$d" && rm -rf .toy )
+  printf '%s' 'import core/rt/probe
+fn main() -> int { return probe.first("ab") }
+' > "$d/prog.toy"
+  printf '%s' 'import core/rt/util
+pub fn first(s: str) -> int { return util.helper(s) }
+' > "$d/core/rt/probe.toy"
+  local clean='pub fn helper(s: str) -> int { return s.len() }
+'
+  local allocating='import std/vec
+pub fn helper(s: str) -> int {
+    xs := Vec[str].new()
+    xs.push(s)
+    return xs.len()
+}
+'
+  printf '%s' "$clean" > "$d/core/rt/util.toy"
+  ( cd "$d" && "$toyc" --dev-core-imports -o base.bin prog.toy >/dev/null 2>&1 ) \
+    || { fail_one "core_rt: cold build failed"; return; }
+
+  printf '%s' "$allocating" > "$d/core/rt/util.toy"
+  local out rc
+  out="$( cd "$d" && "$toyc" --dev-core-imports -o inc.bin prog.toy 2>&1 )"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail_one "core_rt: warm build after the callee allocates STALE-SUCCEEDED (expected T0082)"
+    return
+  fi
+  if ! grep -q "T0082.*first -> core/rt/util.helper -> std/vec.Vec.new\$str" <<<"$out"; then
+    fail_one "core_rt: failed but without the T0082 call path [$out]"
+    return
+  fi
+
+  printf '%s' "$clean" > "$d/core/rt/util.toy"
+  ( cd "$d" && "$toyc" --dev-core-imports -o inc.bin prog.toy >/dev/null 2>&1 ) \
+    || { fail_one "core_rt: warm build after undoing the edit failed"; return; }
+  ( cd "$d" && "$toyc" --dev-core-imports -o force.bin --no-cache prog.toy >/dev/null 2>&1 ) \
+    || { fail_one "core_rt: force build failed"; return; }
+  local ih fh
+  ih="$(texthash "$d/inc.bin")"; fh="$(texthash "$d/force.bin")"
+  if [ "$ih" != "$fh" ]; then
+    fail_one "core_rt: SOUNDNESS — inc __text ($ih) != force __text ($fh) [STALE-CACHE MISCOMPILE]"
+    return
+  fi
+  echo "  OK   core_rt: callee allocates -> T0082 with the path; undo SOUND"
+  pass=$((pass + 1))
+}
+run_core_rt
+
 # alias target flip: the dependent fn's resolved param Type changes (structT id flips),
 # so it re-lowers; SOUNDNESS = inc __text == force __text (no stale alias-resolved body).
 run_scenario alias_target \

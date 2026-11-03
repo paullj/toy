@@ -665,7 +665,7 @@ pub fn lowerGraphProgram(
             else => null,
         };
     }
-    const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "" } else null;
+    const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "", .fixed_files = graph.seeded_from } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
     const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug, profile);
