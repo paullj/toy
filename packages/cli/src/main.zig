@@ -23,7 +23,6 @@ const Codegen = toyc.DriverCodegen;
 const Orchestrator = @import("Orchestrator.zig").Orchestrator;
 const ResolveGraph = toyc.ResolveGraph;
 const TypecheckGraph = toyc.TypecheckGraph;
-const CodegenIr = toyc.CodegenIr;
 const Opt = toyc.Opt;
 const Profile = toyc.Profile;
 const Engine = toyc.QueryEngine;
@@ -449,10 +448,6 @@ fn applyParsed(gpa: std.mem.Allocator, comptime cmd: cli.Spec.Command, p: anytyp
     for (p.opt) |pass| st.profile.opt.set(optPass(pass), true);
     for (p.no_opt) |pass| st.profile.opt.set(optPass(pass), false);
     st.profile.gc_stress = p.gc_stress;
-    if (p.backend) |b| st.profile.backend = switch (b) {
-        .spill => .spill,
-        .mir => .mir,
-    };
     if (try buildSevRules(gpa, p, sev_rules)) |e| return try cliValueError(usage, e);
     st.sev = .{ .rules = sev_rules.items, .deny_warnings = p.deny_warnings };
     // p.file is a variadic slice borrowing argv/arena; copy the ELEMENTS (slices) —
@@ -980,12 +975,6 @@ fn emitExecutable(
 
     if (codegen_stats) {
         try out.print("codegen: compiled={d} cached={d}\n", .{ lp.codegen_compiled, lp.codegen_cached });
-        if (profile.backend == .mir) {
-            try out.print("mir: lowered={d} fallback={d}", .{ lp.mir.lowered, lp.mir.fallbacks() });
-            var it = lp.mir.fallback.iterator();
-            while (it.next()) |e| if (e.value.* != 0) try out.print(" {t}={d}", .{ e.key, e.value.* });
-            try out.writeAll("\n");
-        }
         try out.flush();
     }
 

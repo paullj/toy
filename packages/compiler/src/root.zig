@@ -43,7 +43,6 @@ pub const ControlFlow = @import("ControlFlow.zig");
 pub const TypecheckGraph = @import("types_graph.zig");
 pub const LayoutEngine = @import("layout/Engine.zig");
 pub const Aarch64 = @import("codegen/Aarch64.zig");
-pub const CodegenIr = @import("codegen/CodegenIr.zig");
 pub const CodegenMir = @import("codegen/CodegenMir.zig");
 pub const CodegenRuntime = @import("codegen/runtime/runtime.zig");
 pub const Abi = @import("codegen/abi/Abi.zig");
@@ -112,7 +111,6 @@ test {
     _ = TypecheckGraph;
     _ = LayoutEngine;
     _ = Aarch64;
-    _ = CodegenIr;
     _ = CodegenMir;
     _ = CodegenRuntime;
     _ = Abi;

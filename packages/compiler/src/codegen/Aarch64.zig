@@ -232,16 +232,6 @@ pub fn ldrSp(rt: u32, byteOff: u32) u32 {
     return 0xF9400000 | (scaled << 10) | (SP << 5) | rt;
 }
 
-/// ldr rt, [x29, #byteOff] — 64-bit load; base is FP(29). byteOff multiple of 8.
-/// Used to read incoming stack arguments (the (8+k)th param at [x29,#16+k*8]).
-/// ldr x9,[x29,#16] → 0xF9400BA9.
-pub fn ldrFp(rt: u32, byteOff: u32) u32 {
-    std.debug.assert(byteOff % 8 == 0);
-    const scaled: u32 = byteOff / 8;
-    std.debug.assert(scaled <= max_scaled);
-    return 0xF9400000 | (scaled << 10) | (FP << 5) | rt;
-}
-
 /// bl #(imm26 words) — branch-and-link, PC-relative by a signed *word* offset
 /// (the raw imm26 field). The linker patches the placeholder `bl #0` with
 /// imm26 = (target_off − site_off) / 4 for each `.call26` relocation.
@@ -616,18 +606,6 @@ pub fn fcmp(dn: u32, dm: u32) u32 {
     return 0x1E602000 | (dm << 16) | (dn << 5);
 }
 
-/// ldr dt, [sp, #byteOff] — 64-bit FP load; byteOff a multiple of 8 (scaled
-/// imm12). ldr d16,[sp,#8] → 0xFD4007F0.
-pub fn ldrFpSp(dt: u32, byteOff: u32) u32 {
-    return ldrFpRegUoff(dt, SP, byteOff);
-}
-
-/// str dt, [sp, #byteOff] — 64-bit FP store; byteOff a multiple of 8. str
-/// d16,[sp,#8] → 0xFD0007F0.
-pub fn strFpSp(dt: u32, byteOff: u32) u32 {
-    return strFpRegUoff(dt, SP, byteOff);
-}
-
 /// ldr dt, [rn, #byteOff] — 64-bit FP load, arbitrary base. ldr d16,[x12,#8] → 0xFD400590.
 pub fn ldrFpRegUoff(dt: u32, rn: u32, byteOff: u32) u32 {
     std.debug.assert(byteOff % 8 == 0 and byteOff / 8 <= max_scaled);
@@ -771,8 +749,6 @@ test "fp encoders" {
     try testing.expectEqual(@as(u32, 0x1E710A10), fmul(16, 16, 17)); // fmul d16,d16,d17
     try testing.expectEqual(@as(u32, 0x1E711A10), fdiv(16, 16, 17)); // fdiv d16,d16,d17
     try testing.expectEqual(@as(u32, 0x1E712200), fcmp(16, 17)); // fcmp d16,d17
-    try testing.expectEqual(@as(u32, 0xFD4007F0), ldrFpSp(16, 8)); // ldr d16,[sp,#8]
-    try testing.expectEqual(@as(u32, 0xFD0007F0), strFpSp(16, 8)); // str d16,[sp,#8]
     try testing.expectEqual(@as(u32, 0x9E620010), scvtf(16, 0)); // scvtf d16, x0
     try testing.expectEqual(@as(u32, 0x9E620020), scvtf(0, 1)); // scvtf d0, x1
     try testing.expectEqual(@as(u32, 0x9E780200), fcvtzs(0, 16)); // fcvtzs x0, d16
@@ -894,11 +870,6 @@ test "load/store sp-relative" {
     try testing.expectEqual(@as(u32, 0xF90003E0), strSp(0, 0)); // str x0,[sp,#0]
     try testing.expectEqual(@as(u32, 0xF94007E0), ldrSp(0, 8)); // ldr x0,[sp,#8]
     try testing.expectEqual(@as(u32, 0xF94007E1), ldrSp(1, 8)); // ldr x1,[sp,#8]
-}
-
-test "load/store fp-relative" {
-    try testing.expectEqual(@as(u32, 0xF9400BA9), ldrFp(9, 16)); // ldr x9,[x29,#16]
-    try testing.expectEqual(@as(u32, 0xF9400FA9), ldrFp(9, 24)); // ldr x9,[x29,#24]
 }
 
 test "branch/system and frame constants" {

@@ -6,7 +6,7 @@ const Ast = @import("../ast/Ast.zig");
 const AstWalk = @import("AstWalk.zig");
 const Cache = @import("Cache.zig");
 const Closure = @import("../symbols/Closure.zig");
-const CodegenIr = @import("../codegen/CodegenIr.zig");
+const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const Engine = @import("Engine.zig");
 const Fingerprint = @import("Fingerprint.zig");
 const Ir = @import("../ir/Ir.zig");
@@ -270,7 +270,7 @@ const Inliner = struct {
         const facts = try self.units.cache.factsOf(self.gpa, self.units, name) orelse return null;
         const fr = self.units.find(name).?;
         const decl = facts.decl;
-        var diags: std.ArrayList(CodegenIr.Diagnostic) = .empty;
+        var diags: std.ArrayList(Diagnostic) = .empty;
         defer diags.deinit(self.gpa);
         var irf = try lower.lowerFn(self.gpa, fr.in, decl, fr.sym, false, &diags);
         errdefer irf.deinit(self.gpa);

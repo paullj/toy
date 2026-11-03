@@ -37,9 +37,9 @@ site (no central ledger); `#6` marks dead code.
 | Lock | Meaning | Home |
 |---|---|---|
 | **#1** | A compiled program is output-identical (exit code + stdout match its `# expect:` directives) AND deterministic. | the corpus harness (definition) |
-| **#2** | Value model: scalar / control-flow merge values are single-definition SSA `Value`s; named locals and all aggregates live in memory slots; merges carried as block params via store-before-br ("phi = memory"). | inline (`lower.zig`, `ir/Ir.zig`, `codegen/CodegenIr.zig`, `codegen/frame/FrameLayout.zig`) |
+| **#2** | Value model: scalar / control-flow merge values are single-definition SSA `Value`s; named locals and all aggregates live in memory slots; merges carried as block params, which the register allocator's move resolver turns into parallel moves on each edge. | inline (`lower.zig`, `ir/Ir.zig`, `codegen/mir/Moves.zig`, `codegen/frame/FrameLayout.zig`) |
 | **#3** | The ABI (register/stack placement, x8 sret, NGRN/NSAA) is decided in exactly one place — codegen's `Abi` module; the IR carries no registers, offsets, or calling convention. | inline (`ir/Ir.zig`, `codegen/abi/Abi.zig`) |
-| **#4** | Spill-everything frame layout: every slot AND every value gets its own never-reused, type-sized, 8-byte-aligned frame cell in one deterministic IR-order pass. | inline (`codegen/frame/FrameLayout.zig`, `codegen/CodegenIr.zig`) |
+| **#4** | Frame layout: every slot and every aggregate value gets its own never-reused, type-sized, 8-byte-aligned frame cell in one deterministic IR-order pass; scalar values live in registers, and linear scan's spill slots and callee-saved registers sit above that fixed part. | inline (`codegen/frame/FrameLayout.zig`, `codegen/mir/Mir.zig`) |
 | **#6** | The `smod` / `%` modulo opcode sketch, retained per the design but DEAD (the source has no `%`). | inline (`ir/Ir.zig`) — scheduled for removal |
 | **#7** | VERIFY byte-identity (== `[C11]`): re-lowering every fn twice asserts per-fn `FnCode` byte-identity. | the corpus harness, which builds in `--verify` mode (definition) |
 

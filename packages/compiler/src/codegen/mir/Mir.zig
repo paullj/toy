@@ -1,4 +1,5 @@
-//! MIR: machine IR, the backend between `Ir` and machine code (#199, epic #38).
+//! MIR: machine IR, the backend between `Ir` and machine code (#199, epic #38). It is the
+//! only backend, in every profile: debug differs only in skipping the IR passes.
 //!
 //! PIPELINE (per fn): `Ir.Function` -> instruction selection (a target's `Isel`) -> MIR on
 //! virtual registers -> register allocator -> MIR on physical registers -> encoder (a
@@ -24,8 +25,7 @@
 //! needs from `Frame.newSpill`. Afterwards no virtual register remains (`allPhysical`). The
 //! target supplies its registers per class and the instructions that move a value between
 //! registers and slots (`LinearScan` names the exact declarations). The allocator is
-//! `LinearScan`: Wimmer-Franz linear scan with live-range splitting. The spill backend
-//! (`CodegenIr`, `--backend=spill`) is the oracle MIR is checked against (#38).
+//! `LinearScan`: Wimmer-Franz linear scan with live-range splitting.
 //!
 //! SAFEPOINTS AND STACK MAPS. A call that may reach the collector is a safepoint
 //! (`CallRegs.safepoint`); a call to a runtime builtin that never does is not. The
@@ -36,15 +36,17 @@
 //! the IR slots and aggregate values (memory the map always names) that is the precise
 //! map of that call. Virtual registers the selector makes for its own temporaries
 //! are never live across a call (`tempsStayLocal`), so none holds a reference there.
+//! Every toy frame is precise this way; the collector scans a whole frame conservatively
+//! only for frames no toy fn owns (hand-written builtins, C code).
 //! A loop back edge carries a `safepoint_poll` placeholder where a concurrent collector's
 //! poll goes (#83). It encodes to nothing now.
 //!
 //! FRAME. The frame keeps the x29 chain in every profile (backtraces, the GC walk and
 //! profilers follow it), and `sp` stays fixed after the prologue, so a callee's `x29 + 16`
-//! is the caller's `sp`, which the collector's frame walk relies on. Its fixed part is the
-//! spill backend's `FrameLayout` (outgoing args, slots, value cells, sret save); under
-//! linear scan only aggregate values get a cell. Spill slots follow it, and the
-//! callee-saved registers the allocator used sit at the top, just below the saved x29.
+//! is the caller's `sp`, which the collector's frame walk relies on. Its fixed part is
+//! `FrameLayout` (outgoing args, slots, aggregate value cells, sret save, C scratch);
+//! scalar values get no cell. Spill slots follow it, and the callee-saved registers the
+//! allocator used sit at the top, just below the saved x29.
 
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");

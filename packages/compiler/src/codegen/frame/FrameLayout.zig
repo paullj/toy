@@ -1,13 +1,8 @@
-//! Spill-everything frame layout.
-//!
-//! Replaces the FOUR frame-sizing walkers (countSlots*/collectSlots*,
-//! measureOutgoing*, measureDepth*/measureExpr, buildSlotTable temp logic) with
-//! ONE deterministic pass over the lowered `Ir.Function`. The rule is dead
-//! simple: every IR `Slot` AND every SSA `Value` gets its OWN stack slot, laid
-//! sequentially, type-sized and 8-byte aligned, NEVER reused. This trivially
-//! eliminates the recurring frame-undersizing SIGBUS class (a value/temp landing
-//! past the frame) at the cost of larger frames — slot-coloring is a deferred
-//! optimization (do NOT do it here).
+//! The fixed part of a fn's frame: everything whose bytes live in memory, laid out in one
+//! deterministic pass over the lowered `Ir.Function`. Every IR `Slot` and every aggregate
+//! IR value (a merge of a str/struct/enum) gets its own cell, laid sequentially,
+//! type-sized and 8-byte aligned. Scalar values get no cell: the register allocator keeps
+//! them in registers and adds its spill slots above this layout (`mir/Mir.zig`, `Frame`).
 //!
 //! LAYOUT (deterministic, in IR index order):
 //!   [ saved x29/x30 ]  <- handled by the prologue (stp ..., #-16!); NOT part of
@@ -22,14 +17,12 @@
 //!   [ slot region    ]  each Ir.Slot: roundUp8(running) then its 8-min-aligned
 //!                       size (str 16, struct/enum roundUp8(layout size),
 //!                       scalar 8).
-//!   [ value region   ]  each Ir.ValueDef: one slot, roundUp8(size) (scalars 8;
-//!                       an aggregate-typed value — should not occur under
-//!                       the value model, aggregates live in slots — still gets a sized
-//!                       cell defensively).
+//!   [ value region   ]  each aggregate Ir.ValueDef: one cell, roundUp8(size).
 //!   [ sret save slot ]  one 8-byte cell IF the return is a >16B aggregate (the
 //!                       incoming x8 is spilled here once; the body's calls
 //!                       clobber x8).
-//!   frame = roundUp16(out_base + slots + values + maybe-sret).
+//!   [ C scratch      ]  the C images of the extern call that needs the most.
+//!   frame = roundUp16(out_base + slots + values + maybe-sret + C scratch).
 //!
 //! DETERMINISM: pure, slice-indexed, no hashmaps / pointer iteration / globals.
 //! Same IR + layouts => same offsets => same bytes. This underpins the VERIFY
@@ -70,13 +63,9 @@ pub const MAX_FRAME: u32 = (4095 << 12) | 0xFF0;
 /// aggregate (no x8 buffer to save).
 pub const NO_SRET: u32 = std.math.maxInt(u32);
 
-/// `value_off[v] == NO_CELL`: value `v` has no cell, because a register allocator keeps
-/// it in a register and gives it a spill slot only if it needs one (`Cells.aggregates`).
+/// `value_off[v] == NO_CELL`: scalar value `v` has no cell, because the register
+/// allocator keeps it in a register and gives it a spill slot only if it needs one.
 pub const NO_CELL: u32 = std.math.maxInt(u32);
-
-/// Which IR values get a frame cell: every one (the spill-everything backends), or only
-/// the aggregates, whose bytes live in memory (a backend that allocates registers).
-pub const Cells = enum { every_value, aggregates };
 
 pub const Error = error{ OutOfMemory, FrameTooLarge, ParamOffsetTooLarge };
 
@@ -93,23 +82,14 @@ sret_save_off: u32,
 c_scratch_off: u32 = 0,
 /// sp-relative byte offset of each `Ir.Slot`, indexed by `SlotId`. Owned.
 slot_off: []u32,
-/// sp-relative byte offset of each `Ir.ValueDef`, indexed by `ValueId`. Owned.
+/// sp-relative byte offset of each `Ir.ValueDef`, indexed by `ValueId`, or `NO_CELL`.
+/// Owned.
 value_off: []u32,
 
 pub fn deinit(self: *FrameLayout, gpa: std.mem.Allocator) void {
     gpa.free(self.slot_off);
     gpa.free(self.value_off);
     self.* = undefined;
-}
-
-/// sp-relative byte offset of slot `sid`.
-pub fn slotAddr(self: *const FrameLayout, sid: Ir.SlotId) u32 {
-    return self.slot_off[sid];
-}
-
-/// sp-relative byte offset of value `vid`.
-pub fn valueAddr(self: *const FrameLayout, vid: Ir.ValueId) u32 {
-    return self.value_off[vid];
 }
 
 fn roundUp8(n: u32) u32 {
@@ -141,7 +121,7 @@ pub fn largestSlot(func: *const Ir.Function, layouts: []const Layout, enum_layou
 /// Per-slot frame size: a slot must hold the WHOLE value. str is 16 (ptr,len);
 /// struct/enum take their layout size rounded to 8 (so the next slot stays
 /// 8-aligned; struct align is <=8 today). Everything else is one 8-byte word.
-pub fn slotSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
+fn slotSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
     return switch (ty.kind) {
         .str => 16,
         .@"struct", .@"enum" => roundUp8(Abi.typeSize(ty, layouts, enum_layouts)),
@@ -152,24 +132,13 @@ pub fn slotSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLay
     };
 }
 
-/// Compute the spill-everything frame for `func`. Pure over the IR + read-only
-/// layout tables; allocates only the two offset slices (owned by the caller).
+/// Compute the fixed frame for `func`. Pure over the IR + read-only layout tables;
+/// allocates only the two offset slices (owned by the caller).
 pub fn compute(
     gpa: std.mem.Allocator,
     func: *const Ir.Function,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
-) Error!FrameLayout {
-    return computeCells(gpa, func, layouts, enum_layouts, .every_value);
-}
-
-/// `compute`, with the IR values that get a cell chosen by `cells`.
-pub fn computeCells(
-    gpa: std.mem.Allocator,
-    func: *const Ir.Function,
-    layouts: []const Layout,
-    enum_layouts: []const EnumLayout,
-    cells: Cells,
 ) Error!FrameLayout {
     // (1) out_base: the widest outgoing stack-arg region over all call sites.
     // For each `call` instr, plan its outbound args (Abi.planCall) and take the
@@ -230,11 +199,11 @@ pub fn computeCells(
         slot_off[i] = try place(&running, out_base, slotSize(slot.type, layouts, enum_layouts));
     }
 
-    // (3) value region: each SSA value its OWN slot (spill-all), 8-aligned.
+    // (3) value region: each aggregate value its own cell, 8-aligned.
     const value_off = try gpa.alloc(u32, func.values.len);
     errdefer gpa.free(value_off);
     for (func.values, 0..) |vdef, i| {
-        if (cells == .aggregates and !Abi.isAggregate(vdef.type)) {
+        if (!Abi.isAggregate(vdef.type)) {
             value_off[i] = NO_CELL;
             continue;
         }
@@ -302,6 +271,23 @@ pub fn computeCells(
         .slot_off = slot_off,
         .value_off = value_off,
     };
+}
+
+/// Whether `func`'s fixed frame fits codegen's budget. Only `FrameTooLarge` says no: any
+/// other layout error is codegen's to report, whatever the caller does about the frame.
+pub fn fits(
+    gpa: std.mem.Allocator,
+    func: *const Ir.Function,
+    layouts: []const Layout,
+    enum_layouts: []const EnumLayout,
+) error{OutOfMemory}!bool {
+    var fl = compute(gpa, func, layouts, enum_layouts) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FrameTooLarge => return false,
+        error.ParamOffsetTooLarge => return true,
+    };
+    fl.deinit(gpa);
+    return true;
 }
 
 /// The C image an extern call passes argument `i` through: its extern struct type, or null
@@ -463,9 +449,9 @@ pub fn wordRootTag(
 
 /// The ROOT MAP the runtime reads: `roots` as a count-prefixed packed list of
 /// `(sp_off, tag)` pairs, `[u32 n][{u32 sp_off, u32 tag} × n]`, little-endian. A
-/// successfully-lowered fn always yields ≥4 bytes (`[u32 0]` when root-less); an empty
-/// payload is the collector's "treat this frame conservatively" signal, reserved for
-/// unmapped frames (builtins / failed lowers) that never run this. Caller owns the result.
+/// lowered toy fn always yields ≥4 bytes (`[u32 0]` when root-less); an empty payload is
+/// the collector's "treat this frame conservatively" signal, reserved for the frames no
+/// toy fn owns (hand-written builtins, C code) that never run this. Caller owns the result.
 pub fn encodeRoots(gpa: std.mem.Allocator, roots: []const Root) error{OutOfMemory}![]u8 {
     const buf = try gpa.alloc(u8, 4 + roots.len * 8);
     std.mem.writeInt(u32, buf[0..4], @intCast(roots.len), .little);
@@ -474,23 +460,6 @@ pub fn encodeRoots(gpa: std.mem.Allocator, roots: []const Root) error{OutOfMemor
         std.mem.writeInt(u32, buf[4 + i * 8 + 4 ..][0..4], @intFromEnum(r.tag), .little);
     }
     return buf;
-}
-
-/// Whether a cell of type `ty` holds ANY managed pointer the collector must see —
-/// asked through the SAME `projectCell` authority the root map uses, so the spill
-/// verifier and the projector can never diverge on what counts as managed. A flat
-/// kind check would miss a by-value aggregate that carries a box in one of its
-/// fields (the projector recurses into it; a `.rawptr`/`.str`/box test would not).
-pub fn cellHasManaged(
-    gpa: std.mem.Allocator,
-    ty: Type,
-    layouts: []const Layout,
-    enum_layouts: []const EnumLayout,
-) error{OutOfMemory}!bool {
-    var roots: std.ArrayList(Root) = .empty;
-    defer roots.deinit(gpa);
-    try projectCell(ty, 0, layouts, enum_layouts, &roots, gpa);
-    return roots.items.len != 0;
 }
 
 const testing = std.testing;
@@ -578,13 +547,13 @@ test "frame: empty fn (no slots, no values, no calls) -> frame 0" {
     try testing.expectEqual(@as(usize, 0), fl.value_off.len);
 }
 
-test "frame: scalar slots + scalar values lay out sequentially, 8-aligned, 16-aligned frame" {
+test "frame: slots and aggregate values lay out sequentially, 8-aligned, 16-aligned frame; scalar values get no cell" {
     const gpa = testing.allocator;
-    // 2 int slots + 3 int values, no calls.
+    // 2 int slots, an int value, a str value, an int value, no calls.
     var func = try buildSimple(
         gpa,
         &.{ Type.int, Type.int },
-        &.{ Type.int, Type.int, Type.int },
+        &.{ Type.int, Type.str, Type.int },
         0,
         Type.int,
     );
@@ -593,14 +562,14 @@ test "frame: scalar slots + scalar values lay out sequentially, 8-aligned, 16-al
     var fl = try compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
 
-    // out_base 0; slots at 0,8; values at 16,24,32; running=40; frame roundUp16(40)=48.
+    // out_base 0; slots at 0,8; the str value at 16; running=32; frame 32.
     try testing.expectEqual(@as(u32, 0), fl.out_base);
     try testing.expectEqual(@as(u32, 0), fl.slot_off[0]);
     try testing.expectEqual(@as(u32, 8), fl.slot_off[1]);
-    try testing.expectEqual(@as(u32, 16), fl.value_off[0]);
-    try testing.expectEqual(@as(u32, 24), fl.value_off[1]);
-    try testing.expectEqual(@as(u32, 32), fl.value_off[2]);
-    try testing.expectEqual(@as(u32, 48), fl.frame);
+    try testing.expectEqual(NO_CELL, fl.value_off[0]);
+    try testing.expectEqual(@as(u32, 16), fl.value_off[1]);
+    try testing.expectEqual(NO_CELL, fl.value_off[2]);
+    try testing.expectEqual(@as(u32, 32), fl.frame);
     try testing.expectEqual(NO_SRET, fl.sret_save_off);
 }
 
@@ -669,22 +638,22 @@ test "frame: aggregate slot uses roundUp8 of its layout size" {
     try testing.expectEqual(@as(u32, 48), fl.frame);
 }
 
-test "frame: many block-arg (merge) value slots each get their own cell" {
+test "frame: many aggregate merge values each get their own cell" {
     const gpa = testing.allocator;
-    // simulate a deeply-nested chain that produced many SSA values: 20 int values.
+    // a deeply-nested chain of str merges: 20 str values.
     var vtypes: [20]Type = undefined;
-    for (&vtypes) |*v| v.* = Type.int;
+    for (&vtypes) |*v| v.* = Type.str;
     var func = try buildSimple(gpa, &.{}, &vtypes, 0, Type.int);
     defer func.deinit(gpa);
 
     var fl = try compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
 
-    // 20 values * 8 = 160; each at i*8.
+    // 20 values * 16 = 320; each at i*16.
     for (0..20) |i| {
-        try testing.expectEqual(@as(u32, @intCast(i * 8)), fl.value_off[i]);
+        try testing.expectEqual(@as(u32, @intCast(i * 16)), fl.value_off[i]);
     }
-    try testing.expectEqual(@as(u32, 160), fl.frame);
+    try testing.expectEqual(@as(u32, 320), fl.frame);
 }
 
 test "frame: out_base reserves the widest outgoing stack-arg region over call sites" {
@@ -739,10 +708,10 @@ test "frame: out_base reserves the widest outgoing stack-arg region over call si
     var fl = try compute(gpa, &func, ls, el);
     defer fl.deinit(gpa);
 
-    // out_base = 16; slots/values shifted up by it.
+    // out_base = 16; slots shifted up by it.
     try testing.expectEqual(@as(u32, 16), fl.out_base);
     try testing.expectEqual(@as(u32, 16), fl.slot_off[0]); // the one slot at out_base
-    try testing.expectEqual(@as(u32, 24), fl.value_off[0]); // first value after the slot
+    try testing.expectEqual(@as(u32, 32), fl.frame);
 }
 
 test "frame: sret return reserves an 8-byte save slot atop the frame" {
@@ -783,24 +752,34 @@ test "frame: a C callback adapter sizes sret and its C image by the C layout" {
 
 test "frame: a frame past 4095 bytes lays out; FrameTooLarge only past MAX_FRAME" {
     const gpa = testing.allocator;
-    // 600 int values * 8 = 4800, past the old imm12 budget (#32).
-    var vtypes: [600]Type = undefined;
-    for (&vtypes) |*v| v.* = Type.int;
+    // 300 str values * 16 = 4800, past the old imm12 budget (#32).
+    var vtypes: [300]Type = undefined;
+    for (&vtypes) |*v| v.* = Type.str;
     var func = try buildSimple(gpa, &.{}, &vtypes, 0, Type.int);
     defer func.deinit(gpa);
     var fl = try compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
     try testing.expectEqual(@as(u32, 4800), fl.frame);
-    try testing.expectEqual(@as(u32, 4792), fl.valueAddr(599));
+    try testing.expectEqual(@as(u32, 4784), fl.value_off[299]);
 
     var slot = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 0, Type.unit);
     defer slot.deinit(gpa);
-    const fits = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME - 8, .@"align" = 8 }};
-    var at_cap = try compute(gpa, &slot, &fits, &.{});
+    const at_cap_layout = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME - 8, .@"align" = 8 }};
+    var at_cap = try compute(gpa, &slot, &at_cap_layout, &.{});
     defer at_cap.deinit(gpa);
     try testing.expectEqual(MAX_FRAME, at_cap.frame);
     const over = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME + 1, .@"align" = 8 }};
     try testing.expectError(error.FrameTooLarge, compute(gpa, &slot, &over, &.{}));
+}
+
+test "frame: fits is false only past MAX_FRAME" {
+    const gpa = testing.allocator;
+    var func = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 0, Type.unit);
+    defer func.deinit(gpa);
+    const small = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = 4096, .@"align" = 8 }};
+    const big = [_]Layout{.{ .name = "B", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME + 1, .@"align" = 8 }};
+    try testing.expect(try fits(gpa, &func, &small, &.{}));
+    try testing.expect(!try fits(gpa, &func, &big, &.{}));
 }
 
 test "frame: slots summing past 4 GiB give FrameTooLarge, not a wrapped total" {
@@ -858,10 +837,10 @@ test "roots: scalar-only fn yields [u32 0]" {
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, bytes);
 }
 
-test "roots: a lone rawptr VALUE is projected at its value cell" {
+test "roots: a str VALUE is projected at its value cell" {
     const gpa = testing.allocator;
-    // one int slot (off 0), one rawptr value (off 8) — the retyped box handle.
-    var func = try buildSimple(gpa, &.{Type.int}, &.{Type.rawptr}, 0, Type.int);
+    // one int slot (off 0), one str value (off 8): its pointer half is the root.
+    var func = try buildSimple(gpa, &.{Type.int}, &.{Type.str}, 0, Type.int);
     defer func.deinit(gpa);
     var fl = try compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
@@ -869,7 +848,7 @@ test "roots: a lone rawptr VALUE is projected at its value cell" {
     defer gpa.free(bm);
     try testing.expectEqual(@as(usize, 1), bm.len);
     try testing.expectEqual(fl.value_off[0], bm[0].off);
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(bm[0].tag)); // rawptr → conservative tag 0
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(bm[0].tag)); // str → conservative tag 0
     const bytes = try encodeRoots(gpa, bm);
     defer gpa.free(bytes);
     try testing.expectEqual(@as(usize, 12), bytes.len); // [u32 n][{off,tag}]
@@ -877,11 +856,11 @@ test "roots: a lone rawptr VALUE is projected at its value cell" {
     try testing.expectEqual(fl.value_off[0], std.mem.readInt(u32, bytes[4..8], .little));
 }
 
-test "cells: aggregates-only gives scalar values no cell and no root; wordRootTag names the word's tag" {
+test "cells: scalar values get no cell and no root; wordRootTag names the word's tag" {
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{Type.rawptr}, &.{ Type.rawptr, Type.int, Type.str }, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try computeCells(gpa, &func, &.{}, &.{}, .aggregates);
+    var fl = try compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
     try testing.expectEqual(NO_CELL, fl.value_off[0]);
     try testing.expectEqual(NO_CELL, fl.value_off[1]);
@@ -1101,25 +1080,4 @@ test "roots: projection is deterministic (two calls byte-identical)" {
     const b = try encodeRoots(gpa, rb);
     defer gpa.free(b);
     try testing.expectEqualSlices(u8, a, b);
-}
-
-test "cellHasManaged: matches the projector on leaves, aggregates, and scalars" {
-    const gpa = testing.allocator;
-    // A by-value aggregate carrying a box in a field is managed — a flat kind check
-    // (rawptr/str/box) would miss it, leaving the spill verifier blind to it.
-    var ls: [3]Layout = undefined;
-    ls[0] = try mkLayoutFields(gpa, &.{}, &.{}, 8, .ref);
-    ls[1] = try mkLayoutFields(gpa, &.{Type.structT(0)}, &.{0}, 8, .none);
-    ls[2] = try mkLayoutFields(gpa, &.{ Type.structT(1), Type.int }, &.{ 0, 8 }, 16, .none);
-    defer for (&ls) |*l| {
-        gpa.free(l.field_types);
-        gpa.free(l.offsets);
-    };
-
-    try testing.expect(try cellHasManaged(gpa, Type.rawptr, &.{}, &.{}));
-    try testing.expect(try cellHasManaged(gpa, Type.str, &.{}, &.{}));
-    try testing.expect(try cellHasManaged(gpa, Type.structT(0), &ls, &.{})); // box leaf
-    try testing.expect(try cellHasManaged(gpa, Type.structT(2), &ls, &.{})); // aggregate -> box
-    try testing.expect(!try cellHasManaged(gpa, Type.int, &.{}, &.{}));
-    try testing.expect(!try cellHasManaged(gpa, Type.unit, &.{}, &.{}));
 }

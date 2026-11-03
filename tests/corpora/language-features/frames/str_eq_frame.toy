@@ -1,4 +1,4 @@
-# Feature: a function frame past 4095 bytes builds and runs: 20 inlined `str ==` (about 40 IR values each, every one with its own frame cell) give `count` a frame of several KiB at -O0 and -O1, its heap roots past the old limit survive collections while it is live (#32)
+# Feature: the #38 baseline: 20 `str ==` in one fn build and run at -O0 and -O1 (they once gave `count` a frame of several KiB, when every IR value had its own frame cell), and its heap roots survive collections while it is live (#32)
 # expect: stdout "3\nkeep-me\n7\n"
 # expect: exit 0
 import std/io

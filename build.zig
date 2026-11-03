@@ -214,8 +214,8 @@ pub fn build(b: *std.Build) void {
     // invariant asserts only exist when `std.debug.runtime_safety` is on, so a
     // ReleaseFast build would silently turn the whole run into a no-op. Seeded +
     // bounded (FUZZ_SEED / FUZZ_ITERS envs), so it terminates fast and reproducibly.
-    // A differential phase (FUZZ_DIFF_ITERS) then builds generated programs with both
-    // backends at each level and fails on any difference in exit code or stdout.
+    // A differential phase (FUZZ_DIFF_ITERS) then builds generated programs at each level,
+    // with and without GC stress, and fails on any difference in exit code or stdout.
     const fuzz_exe = b.addExecutable(.{
         .name = "toy-fuzz",
         .root_module = b.createModule(.{
@@ -236,7 +236,7 @@ pub fn build(b: *std.Build) void {
     // The fuzzer reads its seed corpus from tests/corpora relative to cwd, so it must
     // run from the build root (the default cwd for `zig build` run steps).
     if (b.args) |args| run_fuzz.addArgs(args);
-    const fuzz_step = b.step("fuzz", "Build + run the bounded, seeded fuzzer: front-end, then spill-vs-MIR differential (FUZZ_SEED / FUZZ_ITERS / FUZZ_DIFF_ITERS envs)");
+    const fuzz_step = b.step("fuzz", "Build + run the bounded, seeded fuzzer: front-end, then the opt-level and GC-stress differential (FUZZ_SEED / FUZZ_ITERS / FUZZ_DIFF_ITERS envs)");
     fuzz_step.dependOn(&run_fuzz.step);
     // Also install the fuzz binary so it can be run directly for long soak runs.
     b.installArtifact(fuzz_exe);

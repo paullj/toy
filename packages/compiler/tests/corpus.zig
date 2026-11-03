@@ -49,11 +49,6 @@
 //! fixture whose output counts collections, or that allocates too much to collect on
 //! every allocation, opts out with `# gc-stress: skip`.
 //!
-//! `TOY_BACKEND=mir` builds every `.expect` fixture with `--backend=mir` at -O0 and at -O1
-//! against the same expectations the spill backend meets: the differential gate of the MIR
-//! backend (#199). A fixture fails if any of its fns falls back to spill. It combines with
-//! `TOY_GC_STRESS=1`.
-//!
 //! This file is its own test binary, `toy-corpus-test`. Run it under `zig build test`,
 //! or `zig build test-bin` then `./zig-out/bin/toy-corpus-test`. `TOY_CORPUS=<substr>`
 //! runs only the fixtures whose path contains it:
@@ -721,10 +716,6 @@ fn compileAndRun(
     };
     defer lp.deinit(gpa);
     if (lp.diags.len > 0) return .{ .compile_error = try std.fmt.allocPrint(gpa, "codegen diagnostics ({d})\n", .{lp.diags.len}) };
-    // A fn MIR cannot select is quietly lowered by spill, which would leave the MIR
-    // differential testing nothing.
-    if (profile.backend == .mir and lp.mir.fallbacks() != 0)
-        return .{ .compile_error = try std.fmt.allocPrint(gpa, "mir: {d} fn(s) fell back to spill\n", .{lp.mir.fallbacks()}) };
 
     const image = try DriverCodegen.buildImage(io, gpa, out_name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, libs.linking, lp.debug);
     defer gpa.free(image);
@@ -883,20 +874,20 @@ fn checkExpectFixture(
     var e = try parseExpect(gpa, source);
     defer e.deinit(gpa);
 
-    if (!stress and backend == .spill) {
+    if (!stress) {
         var r = try compileAndRun(gpa, io, cache, entry, out_name, &e, cwd, .debug);
         defer r.deinit(gpa);
         return judge(gpa, entry, e, r);
     }
-    if (stress and e.gc_stress_skip) return null;
+    if (e.gc_stress_skip) return null;
     const levels = [_]struct { opt: toyc.Opt.Config, tag: []const u8 }{ .{ .opt = .O0, .tag = "-O0" }, .{ .opt = .O1, .tag = "-O1" } };
     for (levels) |lv| {
         // A distinct binary per build: macOS can kill a binary rewritten at the same path.
         const out = try std.fmt.allocPrint(gpa, "{s}{s}", .{ out_name, lv.tag });
         defer gpa.free(out);
-        var r = try compileAndRun(gpa, io, cache, entry, out, &e, cwd, .{ .name = .debug, .opt = lv.opt, .gc_stress = stress, .backend = backend });
+        var r = try compileAndRun(gpa, io, cache, entry, out, &e, cwd, .{ .name = .debug, .opt = lv.opt, .gc_stress = true });
         defer r.deinit(gpa);
-        const name = try std.fmt.allocPrint(gpa, "{s} [{s}{s}{s}]", .{ entry, if (stress) "gc-stress " else "", if (backend == .mir) "mir " else "", lv.tag });
+        const name = try std.fmt.allocPrint(gpa, "{s} [gc-stress {s}]", .{ entry, lv.tag });
         defer gpa.free(name);
         if (try judge(gpa, name, e, r)) |msg| return msg;
     }
@@ -905,8 +896,6 @@ fn checkExpectFixture(
 
 /// The GC stress mode, read once from `TOY_GC_STRESS` before the workers start.
 var stress = false;
-/// The backend every build uses, read once from `TOY_BACKEND` before the workers start.
-var backend: Profile.Backend = .spill;
 
 /// One fixture: its cwd-relative path (owned) and how its corpus checks it.
 const Fixture = struct { path: []const u8, mode: Mode };
@@ -990,7 +979,7 @@ const Run = struct {
     fn check(run: *Run, cache: Cache, cwd: []const u8, i: usize) !?[]const u8 {
         const f = run.fixtures[i];
         return switch (f.mode) {
-            .diagnostics => if (stress or backend != .spill) null else checkFixture(run.gpa, run.io, cache, f.path),
+            .diagnostics => if (stress) null else checkFixture(run.gpa, run.io, cache, f.path),
             .expect => {
                 const out_name = try std.fmt.allocPrint(run.gpa, "{s}/f{d}", .{ run.out_dir, i });
                 defer run.gpa.free(out_name);
@@ -1025,10 +1014,6 @@ fn runCorpus(gpa: std.mem.Allocator) !void {
     defer picked.deinit(gpa);
     stress = if (testing.environ.getPosix("TOY_GC_STRESS")) |v| v.len != 0 else false;
     if (stress) std.debug.print("corpus: GC stress mode (--gc-stress at -O0 and -O1)\n", .{});
-    if (testing.environ.getPosix("TOY_BACKEND")) |v| if (v.len != 0) {
-        backend = std.meta.stringToEnum(Profile.Backend, v) orelse return error.BadToyBackend;
-    };
-    if (backend != .spill) std.debug.print("corpus: --backend={t} at -O0 and -O1\n", .{backend});
     const filter: ?[]const u8 = if (testing.environ.getPosix("TOY_CORPUS")) |sub| (if (sub.len == 0) null else sub) else null;
     for (all.items) |f| {
         if (filter == null or std.mem.indexOf(u8, f.path, filter.?) != null) try picked.append(gpa, f);

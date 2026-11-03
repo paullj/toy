@@ -1,7 +1,7 @@
-//! The MIR backend (`--backend=mir`): `Ir.Function` -> `Link.FnCode` through instruction
-//! selection, a register allocator and the encoder (see `mir/Mir.zig` for the design). A
-//! fn the selector cannot handle yet comes back as a `Fallback`, and the caller lowers it
-//! with the spill backend (`CodegenIr`), so a build mixes both per fn.
+//! The backend: `Ir.Function` -> `Link.FnCode` through instruction selection, a register
+//! allocator and the encoder (see `mir/Mir.zig` for the design). A fn it cannot lower
+//! (a frame past codegen's budget, or a shape the selector does not cover) comes back as a
+//! diagnostic and an empty `FnCode`, so the build fails cleanly.
 //!
 //! STACK MAPS. Under linear scan the fn's `root_bitmap` names only its memory roots (the
 //! reference words of its IR slots and aggregate values), and `safepoint_maps` adds one
@@ -20,25 +20,23 @@ const Target = @import("mir/aarch64/Target.zig");
 const Isel = @import("mir/aarch64/Isel.zig");
 const Emit = @import("mir/aarch64/Emit.zig");
 
-pub const Fallback = Isel.Fallback;
+const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
-pub const Result = union(enum) {
-    code: Link.FnCode,
-    fallback: Fallback,
-};
-
-/// Lower `func` with the MIR backend, or say why it must take the spill one. A frame the
-/// fixed layout already rejects falls back too, so the spill backend reports it.
+/// Lower `func` to machine code. A fn the backend cannot lower records one diagnostic in
+/// `diags` and returns an empty `FnCode`; the caller fails the build on it. Caller owns
+/// the result.
 pub fn lowerMir(
     gpa: std.mem.Allocator,
     func: *const Ir.Function,
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
     is_entry: bool,
-) error{OutOfMemory}!Result {
-    var frame: Mir.Frame = .{ .layout = FrameLayout.computeCells(gpa, func, layouts, enum_layouts, .aggregates) catch |e| switch (e) {
+    diags: *std.ArrayList(Diagnostic),
+) error{OutOfMemory}!Link.FnCode {
+    var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, layouts, enum_layouts) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.FrameTooLarge, error.ParamOffsetTooLarge => return .{ .fallback = .too_large },
+        error.FrameTooLarge => return fail(gpa, func, diags, frameTooLargeMessage(func, layouts, enum_layouts)),
+        error.ParamOffsetTooLarge => return fail(gpa, func, diags, "too many parameters for codegen (stack-arg offset out of range)"),
     } };
     defer frame.deinit(gpa);
     const roots = try FrameLayout.collectRoots(gpa, func, &frame.layout, layouts, enum_layouts);
@@ -53,7 +51,6 @@ pub fn lowerMir(
 
     var mf = try Isel.newFunc(gpa, func);
     defer mf.deinit(gpa);
-    var why: Fallback = undefined;
     Isel.select(gpa, .{
         .ir = func,
         .layouts = layouts,
@@ -61,9 +58,9 @@ pub fn lowerMir(
         .is_entry = is_entry,
         .fl = &frame.layout,
         .roots = roots,
-    }, &mf, &literals, &why) catch |e| switch (e) {
+    }, &mf, &literals) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Unsupported => return .{ .fallback = why },
+        error.Unsupported => return fail(gpa, func, diags, "internal compiler error: codegen met a value shape it does not cover"),
     };
     if (std.debug.runtime_safety) {
         std.debug.assert(try mf.tempsStayLocal(gpa));
@@ -73,17 +70,17 @@ pub fn lowerMir(
 
     var maps = LinearScan.LinearScan(Target).run(gpa, &mf, &frame) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Unallocatable => return .{ .fallback = .regalloc },
+        error.Unallocatable => return fail(gpa, func, diags, "internal compiler error: an instruction needs more registers than codegen has"),
     };
     defer maps.deinit(gpa);
     std.debug.assert(mf.allPhysical());
-    if (frame.size() > FrameLayout.MAX_FRAME) return .{ .fallback = .too_large };
+    if (frame.size() > FrameLayout.MAX_FRAME) return fail(gpa, func, diags, frameTooLargeMessage(func, layouts, enum_layouts));
 
     var out: Emit.Out = .{};
     defer out.deinit(gpa);
     Emit.encode(gpa, &mf, &frame, func.line, &out) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.BranchOutOfRange => return .{ .fallback = .too_large },
+        error.BranchOutOfRange => return fail(gpa, func, diags, "function too large for codegen (a branch is out of range)"),
     };
 
     const root_bitmap = try FrameLayout.encodeRoots(gpa, roots);
@@ -101,7 +98,7 @@ pub fn lowerMir(
         for (owned_literals) |l| gpa.free(l.bytes);
         gpa.free(owned_literals);
     }
-    return .{ .code = .{
+    return .{
         .sym = .{ .kind = func.name.kind, .name = name },
         .code = code,
         .relocs = try out.relocs.toOwnedSlice(gpa),
@@ -109,7 +106,27 @@ pub fn lowerMir(
         .root_bitmap = root_bitmap,
         .safepoint_maps = safepoint_maps,
         .lines = lines,
-    } };
+    };
+}
+
+/// Record `message` against `func` and return its empty `FnCode`, so the driver fails the
+/// build on the diagnostic rather than linking a half-lowered fn.
+fn fail(gpa: std.mem.Allocator, func: *const Ir.Function, diags: *std.ArrayList(Diagnostic), message: []const u8) error{OutOfMemory}!Link.FnCode {
+    try diags.append(gpa, .{ .byte_offset = 0, .end = 0, .message = message });
+    return .{
+        .sym = .{ .kind = func.name.kind, .name = try gpa.dupe(u8, func.name.name) },
+        .code = &.{},
+        .relocs = &.{},
+        .literals = &.{},
+    };
+}
+
+/// A struct or enum may take a whole frame (T0077 stops only a larger one), and then the
+/// frame has no room for the fn's other values; "too many locals" would misname that.
+fn frameTooLargeMessage(func: *const Ir.Function, layouts: []const types.Layout, enum_layouts: []const types.EnumLayout) []const u8 {
+    if (FrameLayout.largestSlot(func, layouts, enum_layouts) > FrameLayout.MAX_FRAME - 64 * 1024)
+        return "function frame too large for codegen (one value nearly fills the 16 MiB frame; hold large data in a Vec)";
+    return "function frame too large for codegen (too many locals)";
 }
 
 /// The `FnCode.safepoint_maps` rows: per safepoint call at `offs[i]`, the memory roots plus
@@ -170,6 +187,16 @@ fn hasWord(fc: Link.FnCode, w: u32) bool {
     return false;
 }
 
+/// `lowerMir` on a fn it must lower without a diagnostic.
+fn lowerOk(gpa: std.mem.Allocator, func: *const Ir.Function) !Link.FnCode {
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    var fc = try lowerMir(gpa, func, &.{}, &.{}, false, &diags);
+    errdefer fc.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
+    return fc;
+}
+
 /// `fn f(a: int, b: int) -> int { ret a + b }`, both params in slots.
 fn addFn(gpa: std.mem.Allocator) !Ir.Function {
     const values = try gpa.alloc(Ir.ValueDef, 5);
@@ -204,13 +231,11 @@ test "mir: a fn lowers through MIR with the x29 frame, its params stored to thei
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
-    var fl = try FrameLayout.computeCells(gpa, &func, &.{}, &.{}, .aggregates);
+    var fl = try FrameLayout.compute(gpa, &func, &.{}, &.{});
     defer fl.deinit(gpa);
 
-    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
-    try testing.expect(r == .code);
-    defer r.code.deinit(gpa);
-    const fc = r.code;
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
     try testing.expectEqual(Aarch64.stpFpLrPre, wordsOf(fc)[0]);
     try testing.expectEqual(Aarch64.movFpSp, wordsOf(fc)[1]);
     try testing.expectEqual(Aarch64.ret, wordsOf(fc)[wordsOf(fc).len - 1]);
@@ -224,11 +249,9 @@ test "mir: linear scan keeps the values in registers: no value cells, the sum st
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
-    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
-    try testing.expect(r == .code);
-    defer r.code.deinit(gpa);
-    const fc = r.code;
-    // Two param slots only: 16 bytes, where the spill backend also gives the five values a cell.
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
+    // Two param slots only: 16 bytes, and no cell for any of the five values.
     try testing.expect(hasWord(fc, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 16)));
     try testing.expect(hasWord(fc, Aarch64.addReg(0, 10, 11)));
     // prologue (3) + 2 param stores + 2 slot addresses and loads + add + epilogue (3)
@@ -273,10 +296,8 @@ test "mir: a reference live across a safepoint gets a stack-map row naming its s
     const gpa = testing.allocator;
     var func = try refAcrossCallFn(gpa, .{ .kind = .user_fn, .name = "g" });
     defer func.deinit(gpa);
-    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
-    try testing.expect(r == .code);
-    defer r.code.deinit(gpa);
-    const fc = r.code;
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
     // The fn-start row: the rawptr param slot at sp+0.
     try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, fc.root_bitmap);
     var rows: Link.SafepointRows = .{ .bytes = fc.safepoint_maps };
@@ -292,22 +313,90 @@ test "mir: a call to a builtin that never collects is no safepoint and keeps the
     const gpa = testing.allocator;
     var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "gc_span_count" });
     defer func.deinit(gpa);
-    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
-    try testing.expect(r == .code);
-    defer r.code.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), r.code.safepoint_maps.len);
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), fc.safepoint_maps.len);
     // Only the param slot: no spill slot, but x19 saved below x29.
-    try testing.expect(hasWord(r.code, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 32)));
-    try testing.expect(hasWord(r.code, Aarch64.unscaledOff(.x, false, 19, Aarch64.FP, -8)));
+    try testing.expect(hasWord(fc, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 32)));
+    try testing.expect(hasWord(fc, Aarch64.unscaledOff(.x, false, 19, Aarch64.FP, -8)));
 }
 
-test "mir: a shape the selector does not cover falls back with its reason" {
+test "mir: a shape the selector does not cover is an internal-error diagnostic and an empty fn" {
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
     func.values[1].type = Type.unit;
-    const r = try lowerMir(gpa, &func, &.{}, &.{}, false);
-    try testing.expectEqual(Result{ .fallback = .non_scalar_value }, r);
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    var fc = try lowerMir(gpa, &func, &.{}, &.{}, false, &diags);
+    defer fc.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), diags.items.len);
+    try testing.expect(std.mem.startsWith(u8, diags.items[0].message, "internal compiler error"));
+    try testing.expectEqual(@as(usize, 0), fc.code.len);
+}
+
+fn slotsOnlyFn(gpa: std.mem.Allocator, slot_types: []const Type) !Ir.Function {
+    var blocks = try gpa.alloc(Ir.Block, 1);
+    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = try gpa.alloc(Ir.Instr, 0), .term = .{ .ret = .none } };
+    const slots = try gpa.alloc(Ir.Slot, slot_types.len);
+    for (slots, slot_types) |*sl, t| sl.* = .{ .type = t };
+    return .{
+        .name = .{ .kind = .user_fn, .name = "f" },
+        .params = try gpa.alloc(Ir.SlotId, 0),
+        .ret_type = Type.unit,
+        .slots = slots,
+        .values = try gpa.alloc(Ir.ValueDef, 0),
+        .blocks = blocks,
+        .entry = 0,
+        .exit = 0,
+        .literals = try gpa.alloc(Ir.Literal, 0),
+    };
+}
+
+test "mir: a frame that one value nearly fills says so, not too many locals" {
+    const gpa = testing.allocator;
+    const Case = struct { sizes: []const u32, message: []const u8 };
+    const cases = [_]Case{
+        .{ .sizes = &.{ FrameLayout.MAX_FRAME, 8 }, .message = "function frame too large for codegen (one value nearly fills the 16 MiB frame; hold large data in a Vec)" },
+        .{ .sizes = &.{ 14 << 20, 14 << 20 }, .message = "function frame too large for codegen (too many locals)" },
+    };
+    for (cases) |k| {
+        var layouts: [2]types.Layout = undefined;
+        for (&layouts, k.sizes) |*l, sz| l.* = .{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = sz, .@"align" = 8 };
+        var func = try slotsOnlyFn(gpa, &.{ Type.structT(0), Type.structT(1) });
+        defer func.deinit(gpa);
+        var diags: std.ArrayList(Diagnostic) = .empty;
+        defer diags.deinit(gpa);
+        var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, &diags);
+        defer fc.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), diags.items.len);
+        try testing.expectEqualStrings(k.message, diags.items[0].message);
+    }
+}
+
+test "mir: the prologue zeroes a frame env's container word" {
+    const gpa = testing.allocator;
+    // struct 0 = a gc_array box (a Vec); struct 1 = a frame env { n: int, xs: Vec, s: str }.
+    var env_types = [_]Type{ Type.int, Type.structT(0), Type.str };
+    var env_offs = [_]u32{ 0, 8, 16 };
+    const layouts = [_]types.Layout{
+        .{ .name = "V", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = 8, .@"align" = 8, .native_family = .gc_array },
+        .{ .name = "env$f$l0", .field_names = &.{}, .field_types = &env_types, .offsets = &env_offs, .size = 32, .@"align" = 8 },
+    };
+    var func = try slotsOnlyFn(gpa, &.{ Type.int, Type.structT(1) });
+    defer func.deinit(gpa);
+    var fl = try FrameLayout.compute(gpa, &func, &layouts, &.{});
+    defer fl.deinit(gpa);
+
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, &diags);
+    defer fc.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
+    const env = fl.slot_off[1];
+    try testing.expect(hasWord(fc, Aarch64.strSp(Aarch64.XZR, env + 8)));
+    try testing.expect(!hasWord(fc, Aarch64.strSp(Aarch64.XZR, env)));
+    try testing.expect(!hasWord(fc, Aarch64.strSp(Aarch64.XZR, env + 16)));
 }
 
 test "mir: a back edge carries the safepoint placeholder and emits no poll" {
@@ -340,8 +429,7 @@ test "mir: a back edge carries the safepoint placeholder and emits no poll" {
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    var why: Fallback = undefined;
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals, &why);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;
@@ -380,8 +468,7 @@ test "mir: a loop closed by a cond_br polls too" {
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    var why: Fallback = undefined;
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals, &why);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;

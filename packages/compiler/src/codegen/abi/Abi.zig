@@ -61,7 +61,7 @@ pub const AbiClass = enum { scalar, fp, reg_pair, indirect, zero };
 
 /// The allocator's size-class ladder (bytes). `gc_alloc` rounds a small request up to
 /// the first class `>= size`; a request past the last class is a large object. The one
-/// authority for the taxonomy — `CodegenIr` reads it at its emit sites and `sizeClassFor`
+/// authority for the taxonomy — the collector (`runtime/gc.zig`) reads it and `sizeClassFor`
 /// derives a type's static class from it, so the descriptor and the allocator agree.
 pub const size_classes = [_]u16{ 16, 32, 48, 64, 96, 128, 192, 256, 512, 1024, 2048, 4096, 8192 };
 
@@ -89,7 +89,7 @@ pub fn descriptorFor(ty: Type, layouts: []const Layout, enum_layouts: []const En
 /// little-endian record `{size, align, size_class, hash_off, eq_off, trace_off}`, where each
 /// `*_off` is an erased unit's `__text` byte offset (0 = absent). This is the SINGLE authority
 /// for those offsets: `link.buildDescTable` writes them, `link.emit` reserves table entries by
-/// `stride`, and the collector's descriptor reads (`CodegenIr` ga/mp trace) index by them.
+/// `stride`, and the collector's descriptor reads (`runtime/trace.zig`, ga/mp trace) index by them.
 /// The `.toy` runtime hard-codes the same numbers and cannot import this authority (no Zig
 /// consts in `.toy`) — the `descriptor record layout` test below pins the mirror.
 /// CAUTION: `trace_off == 40` here is the DESCRIPTOR's field; a *container header* also has a

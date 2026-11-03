@@ -63,7 +63,10 @@ const E = struct {
         return @intCast(e.out.code.items.len);
     }
 
-    /// `rd = base + off` for any offset (see `CodegenIr.Gen.regAddr`).
+    /// `rd = base + off` for any offset: `add rd, base, #off` while it fits the unshifted
+    /// imm12, else the 4 KiB pages then the rest while the page count fits an imm12, else
+    /// `off` built whole in FO. Frames and types (T0077) stop below 16 MiB, so the last
+    /// form is a backstop that keeps an offset past them correct instead of truncated.
     fn regAddr(e: *E, rd: u32, base: u32, off: u32) error{OutOfMemory}!void {
         std.debug.assert(rd != Aarch64.SP);
         if (off <= 0xFFF) return e.word(Aarch64.addImm(rd, base, @intCast(off)));

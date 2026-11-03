@@ -122,9 +122,8 @@ fn lowerDigitsToStr(gpa: std.mem.Allocator, comptime signed: bool) error{OutOfMe
 // x2=ptr_b, x3=len_b). Appended at link time (emit.zig) when any fn references
 // `__str_concat`; it allocates, so its used-scan pulls in `gc_alloc` (and `gc_collect`).
 //
-// Out-of-lining the copy (vs inlining two IR byte-copy loops per call site) keeps a
-// concat's frame cost off the caller: the spill-all frame model gives every SSA value its
-// own slot, so an inlined copy loop would let a handful of concats overflow `FrameTooLarge`.
+// Out-of-lining the copy (vs inlining two IR byte-copy loops per call site) keeps each
+// concat's loops, values and register pressure out of the caller.
 //
 // The four inputs are saved to the 48-byte scratch BEFORE `gc_alloc` (which clobbers
 // x0-x18); a collection the alloc triggers conservatively scans this frame, so the saved

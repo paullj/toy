@@ -26,8 +26,8 @@
 //! the seed so the exact failure reproduces with `FUZZ_SEED=<seed>`.
 //!
 //! A second, differential phase (`fuzz_diff.zig`) then generates `FUZZ_DIFF_ITERS`
-//! runnable programs and fails on any program whose builds with `--backend=spill` and
-//! `--backend=mir`, at -O0, -O1 and `--release`, disagree on exit code or stdout.
+//! runnable programs and fails on any program whose builds at -O0, -O1 and `--release`,
+//! with and without `--gc-stress`, disagree on exit code or stdout.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -49,7 +49,7 @@ const default_seed: u64 = 0x0123_4567_89ab_cdef;
 /// Bounded default iteration count: small enough that `zig build fuzz` finishes in
 /// a few seconds (CI-runnable), overridable via `FUZZ_ITERS` for long soak runs.
 const default_iters: usize = 5000;
-/// A differential program costs eight builds and eight runs, about a third of a second.
+/// A differential program costs seven builds and seven runs, about a third of a second.
 const default_diff_iters: usize = 30;
 
 // A parser-invariant assert (or any other panic) aborts the process; before it
@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("fuzz: differential: {d} programs, {d} builds each\n", .{ diff_iters, fuzz_diff.variants.len });
     if (!try fuzz_diff.fuzz(gpa, io, toy_exe, ".zig-cache/fuzz-diff", seed, diff_iters)) std.process.exit(1);
-    std.debug.print("fuzz: {d} programs agree across backends and levels\n", .{diff_iters});
+    std.debug.print("fuzz: {d} programs agree across levels and gc stress\n", .{diff_iters});
 }
 
 /// Run ONE input through the front-end. Returns true if the parse was clean (so we

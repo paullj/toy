@@ -21,8 +21,9 @@ const Token = @import("../ast/Token.zig").Token;
 const Lexer = @import("../lex.zig");
 const Cache = @import("Cache.zig");
 const Key = @import("Key.zig");
-const CodegenIr = @import("../codegen/CodegenIr.zig");
 const CodegenMir = @import("../codegen/CodegenMir.zig");
+const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
+const FrameLayout = @import("../codegen/frame/FrameLayout.zig");
 const Ast = @import("../ast/Ast.zig");
 const Fingerprint = @import("Fingerprint.zig");
 const AstWalk = @import("AstWalk.zig");
@@ -418,9 +419,8 @@ pub fn barrier(
 const OptOut = struct {
     stats: Opt.Stats = .{},
     ir_instrs: usize = 0,
-    mir: MirStat = .off,
     /// The first lowering diagnostic of a unit that failed with `error.CodegenDiagnostic`.
-    diag: ?CodegenIr.Diagnostic = null,
+    diag: ?Diagnostic = null,
 };
 
 /// One codegen job's slot. Each job owns exactly one slot (no locks).
@@ -429,41 +429,11 @@ pub const Slot = struct {
     cached: bool = false,
     err: ?anyerror = null,
     /// With `err == error.CodegenDiagnostic`: the lowering's first diagnostic.
-    diag: ?CodegenIr.Diagnostic = null,
+    diag: ?Diagnostic = null,
     /// dual-metric, set only when the unit is freshly lowered (cached units leave these at
     /// 0). Accumulated into the LinkedProgram in the collect loop.
     opt_stats: Opt.Stats = .{},
     ir_instrs: usize = 0,
-    /// Which backend lowered a freshly lowered unit under `--backend=mir`.
-    mir: MirStat = .off,
-};
-
-/// Under `--backend=mir`, whether a unit went through MIR or fell back to the spill
-/// backend, and why. `off` for other builds and cached units.
-pub const MirStat = union(enum) {
-    off,
-    lowered,
-    fallback: CodegenMir.Fallback,
-};
-
-/// `MirStat`s summed over a build's units, for `--codegen-stats`.
-pub const MirStats = struct {
-    lowered: usize = 0,
-    fallback: std.EnumArray(CodegenMir.Fallback, usize) = .initFill(0),
-
-    pub fn add(m: *MirStats, s: MirStat) void {
-        switch (s) {
-            .off => {},
-            .lowered => m.lowered += 1,
-            .fallback => |why| m.fallback.getPtr(why).* += 1,
-        }
-    }
-
-    pub fn fallbacks(m: MirStats) usize {
-        var n: usize = 0;
-        for (m.fallback.values) |v| n += v;
-        return n;
-    }
 };
 
 /// What one codegen unit lowers.
@@ -511,7 +481,7 @@ pub const Frozen = struct {
 
 /// Fail a unit's lowering, keeping its first diagnostic where the driver reports it: such
 /// a diagnostic is an internal error, and its text must reach the user.
-fn failLowering(diags: []const CodegenIr.Diagnostic, out: ?*OptOut) error{CodegenDiagnostic} {
+fn failLowering(diags: []const Diagnostic, out: ?*OptOut) error{CodegenDiagnostic} {
     if (out) |o| o.diag = diags[0];
     return error.CodegenDiagnostic;
 }
@@ -521,7 +491,7 @@ pub const Fitted = union(enum) {
     source: struct { decl: Ast.Index, is_entry: bool },
     lambda: u32,
 
-    fn run(f: Fitted, gpa: std.mem.Allocator, in: lower.Inputs, sym: Link.SymName, diags: *std.ArrayList(CodegenIr.Diagnostic)) error{OutOfMemory}!Ir.Function {
+    fn run(f: Fitted, gpa: std.mem.Allocator, in: lower.Inputs, sym: Link.SymName, diags: *std.ArrayList(Diagnostic)) error{OutOfMemory}!Ir.Function {
         return switch (f) {
             .source => |s| lower.lowerFn(gpa, in, s.decl, sym, s.is_entry, diags),
             .lambda => |ui| LowerClosure.lowerLambda(gpa, in, ui, sym, diags),
@@ -529,11 +499,16 @@ pub const Fitted = union(enum) {
     }
 };
 
-/// Lower one body and run the opt stage on it in place. A frame env must never make a body
-/// fail at -O1 that builds at -O0, so when the body's owner keeps a frame env and the
-/// optimized frame would overflow codegen's budget, the body is lowered again with every
-/// env in a GC cell. A lambda unit reads its env the same way wherever it lives, so the
-/// fallback stays local to this body, and it is a pure function of the body's inputs. A
+/// Lower one body and run the opt stage on it in place. When the body's owner keeps a
+/// frame env and the optimized fixed frame would overflow codegen's budget, the body is
+/// lowered again with every env in a GC cell, so a frame env alone does not fail an -O1
+/// build that builds at -O0. A lambda unit reads its env the same way wherever it lives,
+/// so the fallback stays local to this body, and it is a pure function of the body's
+/// inputs. Register allocation keeps scalar values out of the frame, but one local struct
+/// or enum can still fill most of the 16 MiB frame, so the check stays until env storage
+/// has one owner (#205). Only the fixed layout is measured, since the allocator's spill
+/// slots are known only after codegen: a frame-env body within a few spill slots of the
+/// cap can still fail -O1 with codegen's frame diagnostic where its -O0 build fits. A
 /// lowering that reports a diagnostic is returned before the opt stage sees it, for the
 /// caller to fail on. `stats` are the final lowering's.
 pub fn lowerFitted(
@@ -542,7 +517,7 @@ pub fn lowerFitted(
     cfg: Opt.Config,
     body: Fitted,
     sym: Link.SymName,
-    diags: *std.ArrayList(CodegenIr.Diagnostic),
+    diags: *std.ArrayList(Diagnostic),
     stats: *Opt.Stats,
     callees: ?Opt.inliner.Lookup,
 ) error{OutOfMemory}!Ir.Function {
@@ -556,7 +531,7 @@ pub fn lowerFitted(
         const c = in.closure;
         const owner = c.owner orelse return irf;
         if (!c.frame_envs or !Closure.ownerHasFrameEnv(c.lambda_units, owner)) return irf;
-        if (try CodegenIr.frameFits(gpa, &irf, in.layouts, in.enum_layouts)) return irf;
+        if (try FrameLayout.fits(gpa, &irf, in.layouts, in.enum_layouts)) return irf;
         irf.deinit(gpa);
     }
     var heap = in;
@@ -574,7 +549,7 @@ pub fn lowerFitted(
 /// eligible param (`Spec.eligibleMask`), but `lowerFitted` gives it none anyway: its
 /// owner has no lambda unit. A lowering that reports a diagnostic is returned before the
 /// opt stage sees it, for the caller to fail on.
-pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayList(CodegenIr.Diagnostic), stats: *Opt.Stats) error{OutOfMemory}!Ir.Function {
+pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayList(Diagnostic), stats: *Opt.Stats) error{OutOfMemory}!Ir.Function {
     const in = fr.in;
     const before = diags.items.len;
     const cfg = fr.profile.opt;
@@ -598,11 +573,8 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
 /// Lower one unit to machine code (Ast→Ir→OPT→FnCode) with a throwaway diag sink (a
 /// diagnostic fails the build at relink, surfaced via `error.CodegenDiagnostic`). The IR
 /// is built and freed here and never escapes, keeping the codegen cache ONE-TIER [C8].
-/// `audit` runs the spill tripwire, a `--verify` runtime check like the determinism and
-/// cache audits: every reference must be spill-backed for the collector's conservative
-/// frame scan to see it.
-fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, audit: bool, opt_out: ?*OptOut) !Link.FnCode {
-    var diags: std.ArrayList(CodegenIr.Diagnostic) = .empty;
+fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, opt_out: ?*OptOut) !Link.FnCode {
+    var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
     var opt_st: Opt.Stats = .{};
     var irf = try lowerUnit(gpa, fr, &diags, &opt_st);
@@ -614,19 +586,7 @@ fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, audit: bool, opt_out: ?*
         .source => |s| s.is_entry,
         else => false,
     };
-    if (audit) try CodegenIr.verifyRefsSpilled(gpa, &irf, fr.in.layouts, fr.in.enum_layouts);
-    if (fr.profile.backend == .mir) {
-        switch (try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry)) {
-            .code => |fc| {
-                if (opt_out) |o| o.mir = .lowered;
-                return fc;
-            },
-            .fallback => |why| if (opt_out) |o| {
-                o.mir = .{ .fallback = why };
-            },
-        }
-    }
-    var fc = try CodegenIr.lowerIr(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry, &diags);
+    var fc = try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry, &diags);
     errdefer fc.deinit(gpa);
     // A codegen diagnostic means an unsupported construct slipped past the front-end; the
     // build fails cleanly rather than emitting a half-lowered function.
@@ -657,14 +617,13 @@ pub fn codegen(
         .derive => |d| try deriveKey(gpa, target, fr, d),
         .lambda, .erased, .adapter => null,
     };
-    const audit = self.mode == .verify;
-    if (key) |k| return self.serve(gpa, io, k, tmp_tag, slot, fr, audit);
+    if (key) |k| return self.serve(gpa, io, k, tmp_tag, slot, fr);
     var out: OptOut = .{};
-    const fc = lowerCode(gpa, fr, audit, &out) catch |e| {
+    const fc = lowerCode(gpa, fr, &out) catch |e| {
         slot.diag = out.diag;
         return e;
     };
-    slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs, .mir = out.mir };
+    slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs };
 }
 
 /// The key of a body from source: its own content (`sourceFp`) and that of every callee
@@ -807,14 +766,13 @@ fn serve(
     tmp_tag: usize,
     slot: *Slot,
     fr: *const Frozen,
-    audit: bool,
 ) !void {
     const cache = self.cache;
     const mode = self.mode;
 
     if (mode == .verify) {
         var opt_out: OptOut = .{};
-        var fresh = lowerCode(gpa, fr, audit, &opt_out) catch |e| {
+        var fresh = lowerCode(gpa, fr, &opt_out) catch |e| {
             slot.diag = opt_out.diag;
             return e;
         };
@@ -829,7 +787,7 @@ fn serve(
             if (!std.mem.eql(u8, fb, blob)) return error.VerifyCacheMismatch;
             was_cached = true;
         } else {
-            var fresh2 = try lowerCode(gpa, fr, audit, null);
+            var fresh2 = try lowerCode(gpa, fr, null);
             defer fresh2.deinit(gpa);
             const fb2 = try Link.pack(gpa, fresh2);
             defer gpa.free(fb2);
@@ -838,7 +796,7 @@ fn serve(
         }
         // A verify build re-lowers fresh, so it has honest opt stats even on a
         // cache hit (was_cached==true). Record them.
-        slot.* = .{ .fc = fresh, .cached = was_cached, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs, .mir = opt_out.mir };
+        slot.* = .{ .fc = fresh, .cached = was_cached, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs };
         return;
     }
 
@@ -857,7 +815,7 @@ fn serve(
 
     var opt_out: OptOut = .{};
     const comp_t0: i128 = if (self.probe != null) StageProbe.now(io) else 0;
-    var fc = lowerCode(gpa, fr, audit, &opt_out) catch |e| {
+    var fc = lowerCode(gpa, fr, &opt_out) catch |e| {
         slot.diag = opt_out.diag;
         return e;
     };
@@ -869,7 +827,7 @@ fn serve(
         cache.put(u8, io, key, tmp_tag, b) catch {};
         if (self.probe) |p| StageProbe.lap(io, &p.put_ns, put_t0);
     }
-    slot.* = .{ .fc = fc, .cached = false, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs, .mir = opt_out.mir };
+    slot.* = .{ .fc = fc, .cached = false, .opt_stats = opt_out.stats, .ir_instrs = opt_out.ir_instrs };
 }
 
 const testing = std.testing;

@@ -1,6 +1,6 @@
 # expect: exit 42
 # expect: stdout "8\n13\n2.5\n"
-# Feature: references the MIR backend keeps in registers stay roots across allocating
+# Feature: references the register allocator keeps in registers stay roots across allocating
 # calls. `Ref.new(30)` and `Ref.new(12)` are argument temporaries with no slot: they are
 # made, then `churn` allocates enough to collect many times before `pair` reads them, so a
 # reference held only in a register at a safepoint would be swept. `show` keeps an int, a

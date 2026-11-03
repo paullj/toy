@@ -349,7 +349,7 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     // fallback. At this size `main`'s frame fits at -O0 and with a heap env at -O1, but not
     // with the 240-byte frame env. If frames change size, these tripwires fire: retune
     // `g_bytes` so the build still falls back and the lean one still keeps its frame env.
-    const g_bytes: u32 = 16776096;
+    const g_bytes: u32 = 16776744;
     const tmp = ".toy-test-closures-frame";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
     defer Io.Dir.cwd().deleteTree(io, tmp) catch {};
