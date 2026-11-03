@@ -1304,7 +1304,7 @@ fn operandSlot(op: Ir.Operand) Ir.SlotId {
 /// here — they stay the inline `icmp` in `lowerBinary`/`genCond`, unchanged.
 ///   * unit  -> lower both operands for effect, then `bconst true` (the two `()` values are
 ///              always equal).
-///   * str   -> a heap-free len-compare then a per-byte `load_byte` loop (see `lowerStrEq`).
+///   * str   -> a call to `core/rt` `str_eq` (see `str_eq_sym`).
 ///   * struct/enum -> resolve the `Eq` witness and emit `witness(self-by-value, rhs)` ->
 ///              bool, byte-identical to the `p.eq(q)` method form (see `lowerStructEq`).
 /// `!=` wraps the resulting bool in a `bnot`.
@@ -1495,12 +1495,12 @@ fn lowerArithValue(b: *Builder, operand_ty: Typecheck.Type, lhs_node: Ast.Index,
     }
 }
 
-/// Heap-free lexicographic 3-way str comparison, extending `lowerStrEq`'s `load_byte`
-/// idiom: walk both byte spans in lockstep in a slot-counter loop, yielding an int
-/// discriminant (0=lt/1=eq/2=gt) through a join block param. A pure function of source
-/// (slot-counter + br-arg joins), so it is `--verify`-stable. Zero-extended bytes (0..255)
-/// make signed `lt`/`gt` correct. The first differing byte decides; if one span is a proper
-/// prefix of the other, the shorter is less; equal spans compare equal.
+/// Heap-free lexicographic 3-way str comparison: walk both byte spans in lockstep in a
+/// slot-counter loop, yielding an int discriminant (0=lt/1=eq/2=gt) through a join block
+/// param. A pure function of source (slot-counter + br-arg joins), so it is
+/// `--verify`-stable. Zero-extended bytes (0..255) make signed `lt`/`gt` correct. The first
+/// differing byte decides; if one span is a proper prefix of the other, the shorter is
+/// less; equal spans compare equal.
 fn lowerStrCmp(b: *Builder, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
     const int_ty = Typecheck.Type.int;
 
@@ -1519,8 +1519,8 @@ fn lowerStrCmp(b: *Builder, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutO
 }
 
 /// Heap-free lexicographic 3-way str comparison given the ADDRESSES of two `{ptr@0, len@8}`
-/// headers (factored out of `lowerStrCmp` mirroring `strEqAtPtrs`): the byte loop above,
-/// yielding an int discriminant (0=lt/1=eq/2=gt) through a join block param. Pure of source, so
+/// headers (factored out of `lowerStrCmp`): the byte loop above, yielding an int
+/// discriminant (0=lt/1=eq/2=gt) through a join block param. Pure of source, so
 /// `--verify`-stable. Reused by the auto-derive Ord emitter for a `str` FIELD (base =
 /// `field_addr(self, off)`), where there is no slot to name — only an address.
 pub fn strCmpAtPtrs(b: *Builder, lbase: Ir.ValueId, rbase: Ir.ValueId) error{OutOfMemory}!Ir.ValueId {
@@ -1535,7 +1535,7 @@ pub fn strCmpAtPtrs(b: *Builder, lbase: Ir.ValueId, rbase: Ir.ValueId) error{Out
     const rlen_addr = try b.emit(.{ .field_addr = .{ .base = rbase, .off = 8, .ty = int_ty } }, int_ty);
     const rl = try b.emit(.{ .load = .{ .addr = rlen_addr, .ty = int_ty } }, int_ty);
 
-    // i := 0 in a slot (the loop induction var, mirroring `lowerStrEq`).
+    // i := 0 in a slot (the loop induction var).
     const islot = try b.addSlot(int_ty);
     {
         const ia = try b.emit(.{ .slot_addr = islot }, int_ty);
@@ -1619,107 +1619,39 @@ pub fn strCmpAtPtrs(b: *Builder, lbase: Ir.ValueId, rbase: Ir.ValueId) error{Out
     return merge;
 }
 
-/// Heap-free str equality: compare lengths, then bytes at `ptr + i` via `load_byte`
-/// in a slot-counter loop, merging the bool result through a join block param. Built with
-/// the exact `lowerFor` (slot counter) + `lowerAndOrValue` (br-arg block-param join) idioms
-/// so it is a pure function of source (deterministic, `--verify`-stable). Returns the bool
-/// result value (the join's merge param). An empty string compares equal to another empty
-/// string (equal lengths -> `hdr` sees `i >= 0` immediately -> `eq_blk`).
-fn lowerStrEq(b: *Builder, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
-    const int_ty = Typecheck.Type.int;
-    const bool_ty = Typecheck.Type.bool;
+/// The `core/rt` fn every `str ==` calls. Out of line, one comparison is one call
+/// instead of a loop of about 37 IR values in the caller's frame, and it is no safepoint
+/// (T0082 holds every `core/rt` fn to never allocating).
+const str_eq_sym: Link.SymName = .{ .kind = .user_fn, .name = StdNames.RuntimeFn.str_eq.name() };
 
-    // Evaluate both str operands in the current block; each travels by slot.
+fn lowerStrEq(b: *Builder, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
     const lhs_op = try lowerExpr(b, lhs_node);
     const rhs_op = try lowerExpr(b, rhs_node);
     const ls = operandSlot(lhs_op);
     const rs = operandSlot(rhs_op);
     if (ls == Ir.none_slot or rs == Ir.none_slot) {
         try b.note(b.in.tree.nodes[(lhs_node).int()].main_token, "str '==' operand is not a slot in lower");
-        return try b.emit(.{ .bconst = false }, bool_ty);
+        return try b.emit(.{ .bconst = false }, Typecheck.Type.bool);
     }
-    const lbase = try b.emit(.{ .slot_addr = ls }, int_ty);
-    const rbase = try b.emit(.{ .slot_addr = rs }, int_ty);
+    const lbase = try b.emit(.{ .slot_addr = ls }, Typecheck.Type.int);
+    const rbase = try b.emit(.{ .slot_addr = rs }, Typecheck.Type.int);
     return strEqAtPtrs(b, lbase, rbase);
 }
 
-/// Heap-free str equality of two str aggregates given the ADDRESSES of their
-/// `{ptr@0, len@8}` headers (factored out of `lowerStrEq`): compare
-/// lengths, then bytes at `ptr + i` via `load_byte` in a slot-counter loop, merging the
-/// bool through a join block param. Pure of source (slot-counter + br-arg joins), so
-/// `--verify`-stable. Reused by the auto-derive emitter for a `str` FIELD (base =
-/// `field_addr(self, off)`), where there is no slot to name — only an address.
+/// str equality of the `{ptr@0, len@8}` headers at two addresses. `str_eq` takes each str
+/// as its pointer and length, so a str literal needs no slot of its own at -O1, where one
+/// passed to a call would keep its frame cell.
 pub fn strEqAtPtrs(b: *Builder, lbase: Ir.ValueId, rbase: Ir.ValueId) error{OutOfMemory}!Ir.ValueId {
     const int_ty = Typecheck.Type.int;
-    const bool_ty = Typecheck.Type.bool;
-
-    // ptr@0 + len@8 of each {ptr,len} aggregate.
-    const lp = try b.emit(.{ .load = .{ .addr = lbase, .ty = int_ty } }, int_ty);
-    const llen_addr = try b.emit(.{ .field_addr = .{ .base = lbase, .off = 8, .ty = int_ty } }, int_ty);
-    const ll = try b.emit(.{ .load = .{ .addr = llen_addr, .ty = int_ty } }, int_ty);
-    const rp = try b.emit(.{ .load = .{ .addr = rbase, .ty = int_ty } }, int_ty);
-    const rlen_addr = try b.emit(.{ .field_addr = .{ .base = rbase, .off = 8, .ty = int_ty } }, int_ty);
-    const rl = try b.emit(.{ .load = .{ .addr = rlen_addr, .ty = int_ty } }, int_ty);
-    const len_eq = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = ll, .rhs = rl } }, bool_ty);
-
-    // i := 0 in a slot (the loop induction var, mirroring `lowerFor`).
-    const islot = try b.addSlot(int_ty);
-    {
-        const ia = try b.emit(.{ .slot_addr = islot }, int_ty);
-        const zero = try b.emit(.{ .iconst = 0 }, int_ty);
-        _ = try b.emit(.{ .store = .{ .addr = ia, .val = zero, .ty = int_ty } }, null);
+    const ptr_ty = Typecheck.Type.rawptr;
+    const args = try b.gpa.alloc(Ir.Operand, 4);
+    errdefer b.gpa.free(args);
+    for ([_]Ir.ValueId{ lbase, rbase }, 0..) |base, i| {
+        args[2 * i] = .{ .value = try b.emit(.{ .load = .{ .addr = base, .ty = ptr_ty } }, ptr_ty) };
+        const len_addr = try b.emit(.{ .field_addr = .{ .base = base, .off = 8, .ty = int_ty } }, int_ty);
+        args[2 * i + 1] = .{ .value = try b.emit(.{ .load = .{ .addr = len_addr, .ty = int_ty } }, int_ty) };
     }
-
-    const hdr = try b.addBlock();
-    const body = try b.addBlock();
-    const inc = try b.addBlock();
-    const eq_blk = try b.addBlock();
-    const ne_blk = try b.addBlock();
-    const join = try b.addBlock();
-    const merge = try b.addParam(join, bool_ty);
-
-    // Unequal lengths short-circuit to false; equal lengths enter the byte loop.
-    b.setTerm(.{ .cond_br = .{ .cond = len_eq, .t = hdr, .f = ne_blk } });
-
-    // hdr: i >= len ? all bytes matched (eq_blk) : compare byte i (body).
-    b.switchTo(hdr);
-    const ia_h = try b.emit(.{ .slot_addr = islot }, int_ty);
-    const iv = try b.emit(.{ .load = .{ .addr = ia_h, .ty = int_ty } }, int_ty);
-    const done = try b.emit(.{ .icmp = .{ .cc = .ge, .lhs = iv, .rhs = ll } }, bool_ty);
-    b.setTerm(.{ .cond_br = .{ .cond = done, .t = eq_blk, .f = body } });
-
-    // body: load lp[i] and rp[i]; equal ? -> inc : ne_blk.
-    b.switchTo(body);
-    const lx = try b.emit(.{ .add = .{ .lhs = lp, .rhs = iv } }, int_ty);
-    const lbyte = try b.emit(.{ .load_byte = lx }, int_ty);
-    const rx = try b.emit(.{ .add = .{ .lhs = rp, .rhs = iv } }, int_ty);
-    const rbyte = try b.emit(.{ .load_byte = rx }, int_ty);
-    const byte_eq = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = lbyte, .rhs = rbyte } }, bool_ty);
-    b.setTerm(.{ .cond_br = .{ .cond = byte_eq, .t = inc, .f = ne_blk } });
-
-    // inc: i += 1; back-edge to hdr.
-    b.switchTo(inc);
-    {
-        const ia = try b.emit(.{ .slot_addr = islot }, int_ty);
-        const cur = try b.emit(.{ .load = .{ .addr = ia, .ty = int_ty } }, int_ty);
-        const one = try b.emit(.{ .iconst = 1 }, int_ty);
-        const next = try b.emit(.{ .add = .{ .lhs = cur, .rhs = one } }, int_ty);
-        const ia2 = try b.emit(.{ .slot_addr = islot }, int_ty);
-        _ = try b.emit(.{ .store = .{ .addr = ia2, .val = next, .ty = int_ty } }, null);
-    }
-    try brTo(b, hdr, .none);
-
-    // eq_blk / ne_blk: deliver the merge bool to the join.
-    b.switchTo(eq_blk);
-    const tv = try b.emit(.{ .bconst = true }, bool_ty);
-    try brTo(b, join, .{ .value = tv });
-
-    b.switchTo(ne_blk);
-    const fv = try b.emit(.{ .bconst = false }, bool_ty);
-    try brTo(b, join, .{ .value = fv });
-
-    b.switchTo(join);
-    return merge;
+    return try b.emit(.{ .call = .{ .callee = str_eq_sym, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.bool);
 }
 
 /// The emitted callee for a resolved conformance-witness `Method`: a derived unit's
@@ -1743,8 +1675,8 @@ pub fn witnessRet(b: *Builder, m: Typecheck.Method) Typecheck.Type {
 
 /// Heap-free per-byte hash of a str aggregate given the ADDRESS of its `{ptr@0, len@8}`
 /// header: fold each byte through the fxhash mixer `h := (rotl(h,5) ^ byte) *% K` (see
-/// `hashMix`) in a slot-counter loop, mirroring `strEqAtPtrs`'s `load_byte` walk (slot induction var +
-/// slot accumulator). Pure of source (deterministic block/slot ids), so `--verify`-stable.
+/// `hashMix`) in a slot-counter loop (slot induction var + slot accumulator). Pure of
+/// source (deterministic block/slot ids), so `--verify`-stable.
 /// An empty string hashes to `str_hash_seed` (the loop runs zero times). Returns the int
 /// hash value in the loop-exit block.
 pub fn hashStrAtPtr(b: *Builder, base: Ir.ValueId) error{OutOfMemory}!Ir.ValueId {
@@ -1763,7 +1695,7 @@ pub fn hashStrAtPtr(b: *Builder, base: Ir.ValueId) error{OutOfMemory}!Ir.ValueId
         const seed = try b.emit(.{ .iconst = str_hash_seed }, int_ty);
         _ = try b.emit(.{ .store = .{ .addr = ha, .val = seed, .ty = int_ty } }, null);
     }
-    // i := 0 in a slot (mirrors `lowerFor` / `strEqAtPtrs`).
+    // i := 0 in a slot (mirrors `lowerFor`).
     const islot = try b.addSlot(int_ty);
     {
         const ia = try b.emit(.{ .slot_addr = islot }, int_ty);
@@ -5708,16 +5640,15 @@ test "struct == lowers to a call to the Eq witness (no inline icmp)" {
     try testing.expect(std.mem.indexOf(u8, ir, "icmp") == null);
 }
 
-test "str == lowers to a heap-free len-compare + per-byte load_byte loop" {
+test "str == lowers to one call to core/rt str_eq, not an inline byte loop" {
     const gpa = testing.allocator;
     const ir = try renderUnit(gpa,
         \\fn cmp(a: str, b: str) -> bool { a == b }
         \\
     , "cmp", .{});
     defer gpa.free(ir);
-    try testing.expect(std.mem.indexOf(u8, ir, "load_byte") != null);
-    try testing.expect(std.mem.indexOf(u8, ir, "icmp ge") != null); // the i >= len loop guard
-    try testing.expect(std.mem.indexOf(u8, ir, "call") == null); // no witness fn, no heap
+    try testing.expect(std.mem.indexOf(u8, ir, "call @core/rt/str.str_eq(") != null);
+    try testing.expect(std.mem.indexOf(u8, ir, "load_byte") == null);
 }
 
 test "unit == folds to bconst true" {

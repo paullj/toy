@@ -9,6 +9,7 @@ const Abi = @import("../abi/Abi.zig");
 const FrameLayout = @import("../frame/FrameLayout.zig");
 const runtime = @import("../runtime/runtime.zig");
 const types = @import("../../types.zig");
+const StdNames = @import("../../symbols/StdNames.zig");
 
 /// Per IR value, how the collector traces its register when it holds a reference, or
 /// null. An aggregate value lives in memory the frame's map names, so it has none. A
@@ -53,7 +54,9 @@ pub fn callFacts(callee: Ir.SymName) CallFacts {
     return switch (callee.kind) {
         .builtin => .{ .safepoint = runtime.mayCollect(callee.name), .clobbered_gprs = runtime.calleeSavedClobbers(callee.name) },
         .import => .{ .keep_ref_args = true },
-        else => .{},
+        // T0082 proves every source fn of a `core/rt` module never reaches the collector.
+        // A minted unit (`$`) is left out: the rule does not walk adapters or spec units.
+        .user_fn => .{ .safepoint = !(StdNames.isRuntimeModule(callee.name) and std.mem.indexOfScalar(u8, callee.name, '$') == null) },
     };
 }
 
@@ -68,6 +71,12 @@ test "callFacts: builtins that never collect are no safepoint; a C call keeps it
     try testing.expect(c.safepoint and c.keep_ref_args);
     const t = callFacts(.{ .kind = .user_fn, .name = "f" });
     try testing.expect(t.safepoint and !t.keep_ref_args);
+}
+
+test "callFacts: a core/rt fn is no safepoint; a minted unit in a core/rt module still is" {
+    try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/str.str_eq" }).safepoint);
+    try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/str.f$int" }).safepoint);
+    try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/mem.ga_push$int" }).safepoint);
 }
 
 test "valueRefs: a rawptr value and a field address are references; an int is not" {

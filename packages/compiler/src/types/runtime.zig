@@ -349,3 +349,20 @@ test "T0082: a body with a type error gets no second, T0082 error" {
         "core/rt fn 'grow' can reach a GC allocation: grow -> a list literal",
     }, true);
 }
+
+fn expectStrEqAbi(sigs: []const Sig) !void {
+    const sig = for (sigs) |s| {
+        if (s.kind == .user_fn and std.mem.eql(u8, s.name, StdNames.RuntimeFn.str_eq.name())) break s;
+    } else return error.TestUnexpectedResult;
+    const want = [_]Typecheck.Kind{ .rawptr, .int, .rawptr, .int };
+    try testing.expectEqual(want.len, sig.params.len);
+    for (want, sig.params) |k, p| try testing.expectEqual(k, p.kind);
+    try testing.expectEqual(Typecheck.Kind.bool, sig.ret.kind);
+}
+
+test "the bundled str_eq takes the (ptr, len, ptr, len) -> bool that lower passes it" {
+    const gpa = testing.allocator;
+    const got = try runtimeErrors(gpa, ".toy-test-rt-abi", "pub fn f() -> int {\n    return 1\n}\n", &.{}, false, &expectStrEqAbi);
+    defer freeAll(gpa, got);
+    try testing.expectEqual(@as(usize, 0), got.len);
+}

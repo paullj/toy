@@ -90,9 +90,9 @@ fn eqKeyAtSlots(b: *L.Builder, ty: Typecheck.Type, lslot: Ir.SlotId, rslot: Ir.S
 }
 
 /// The bool eq of struct field `i` (at byte `off`, type `fty`) between the two receiver
-/// bases: int/bool inline `icmp eq`; `str` via the `{ptr,len}` byte-loop
-/// (`strEqAtPtrs`); a struct/enum field is copied into fresh temp slots (a `field_addr`
-/// is a ptr VALUE, not a slot operand — the ABI needs the field's own slot) then routed
+/// bases: int/bool inline `icmp eq`; `str` via the `core/rt` call (`strEqAtPtrs`); a
+/// struct/enum field is copied into fresh temp slots (a `field_addr` is a ptr VALUE, not
+/// a slot operand — the ABI needs the field's own slot) then routed
 /// through `structEqAtSlots`. A `()` field is zero-sized: eq true (all `()` are equal).
 fn deriveFieldEq(b: *L.Builder, fty: Typecheck.Type, off: u32, self_base: Ir.ValueId, other_base: Ir.ValueId) error{OutOfMemory}!Ir.ValueId {
     const int_ty = Typecheck.Type.int;
