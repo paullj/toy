@@ -205,22 +205,22 @@ for b in "${benches[@]}"; do
   printf "  %-20s %-8s %-10s %-12s %-12s %s\n" "$b" "$p" "$cname=$cval" "$efull" "$enoopt" "$res"
 done
 
-# DCE is exercised across the cascade benches but its standalone counter is only
-# nonzero once a producer pass (fold) has created dead values. Attribute it on
-# const_arith with `--opt=fold --opt=dce`: dced>0, and `-O1 --no-opt=dce` regresses the
-# emitted win (the folded const feeders survive as load/op/store words without it).
-sdce="$(limit 30 "$toyc" --no-cache --opt-stats --opt=fold --opt=dce -o "$work/dce.only" "$root/tests/corpora/opt/const_arith.toy" 2>&1)"
+# DCE is exercised across the cascade benches, but the backend drops a dead constant or
+# copy itself (#203), so a dead const feeder no longer shows DCE's emitted win. Attribute
+# it on dead_compare, a dead compare whose flag-setting `cmp` only the IR pass removes:
+# dced>0 under `--opt=fold --opt=dce`, and `-O1 --no-opt=dce` regresses the emitted count.
+sdce="$(limit 30 "$toyc" --no-cache --opt-stats --opt=fold --opt=dce -o "$work/dce.only" "$root/tests/corpora/opt/dead_compare.toy" 2>&1)"
 dval="$(stat_field "$sdce" dced)"
-sdcefull="$(limit 30 "$toyc" --no-cache --opt-stats -O1 -o "$work/dce.full" "$root/tests/corpora/opt/const_arith.toy" 2>&1)"
+sdcefull="$(limit 30 "$toyc" --no-cache --opt-stats -O1 -o "$work/dce.full" "$root/tests/corpora/opt/dead_compare.toy" 2>&1)"
 edcefull="$(stat_field "$sdcefull" emitted_instrs)"
-sdcenoopt="$(limit 30 "$toyc" --no-cache --opt-stats -O1 --no-opt=dce -o "$work/dce.noopt" "$root/tests/corpora/opt/const_arith.toy" 2>&1)"
+sdcenoopt="$(limit 30 "$toyc" --no-cache --opt-stats -O1 --no-opt=dce -o "$work/dce.noopt" "$root/tests/corpora/opt/dead_compare.toy" 2>&1)"
 edcenoopt="$(stat_field "$sdcenoopt" emitted_instrs)"
 dres="ok"
 if [ -z "$dval" ] || [ "$dval" -le 0 ]; then dres="FAIL(counter=$dval)"; fi
 if [ -z "$edcefull" ] || [ -z "$edcenoopt" ]; then dres="FAIL(parse)";
 elif [ "$edcenoopt" -le "$edcefull" ]; then dres="FAIL(no-regress $edcenoopt<=$edcefull)"; fi
-[ "$dres" != "ok" ] && fail "const_arith/dce: per-pass ($dres)"
-printf "  %-20s %-8s %-10s %-12s %-12s %s\n" "const_arith" "dce*" "dced=$dval" "$edcefull" "$edcenoopt" "$dres"
+[ "$dres" != "ok" ] && fail "dead_compare/dce: per-pass ($dres)"
+printf "  %-20s %-8s %-10s %-12s %-12s %s\n" "dead_compare" "dce*" "dced=$dval" "$edcefull" "$edcenoopt" "$dres"
 
 # ---------------------------------------------------------------------------
 echo

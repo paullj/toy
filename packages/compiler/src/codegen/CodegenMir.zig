@@ -19,6 +19,7 @@ const LinearScan = @import("mir/LinearScan.zig");
 const Target = @import("mir/aarch64/Target.zig");
 const Isel = @import("mir/aarch64/Isel.zig");
 const Emit = @import("mir/aarch64/Emit.zig");
+const Peephole = @import("mir/aarch64/Peephole.zig");
 
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
@@ -62,6 +63,7 @@ pub fn lowerMir(
         error.OutOfMemory => return error.OutOfMemory,
         error.Unsupported => return fail(gpa, func, diags, "internal compiler error: codegen met a value shape it does not cover"),
     };
+    try Peephole.run(gpa, &mf);
     if (std.debug.runtime_safety) {
         std.debug.assert(try mf.tempsStayLocal(gpa));
         std.debug.assert(!mf.namesAny(Target.reserved));
@@ -172,6 +174,7 @@ comptime {
     _ = Target.Inst;
     _ = Isel;
     _ = Emit;
+    _ = Peephole;
 }
 
 const testing = std.testing;

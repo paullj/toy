@@ -208,6 +208,35 @@ pub fn asrImm(rd: u32, rn: u32, shift: u6) u32 {
     return 0x93400000 | (@as(u32, shift) << 16) | (@as(u32, 63) << 10) | (rn << 5) | rd;
 }
 
+/// cmn rn, #imm12 — alias of ADDS XZR, Xn, #imm12: the flags of `rn + imm12`.
+/// cmn x3,#5 → 0xB100147F.
+pub fn cmnImm(rn: u32, imm12: u12) u32 {
+    return 0xB1000000 | (@as(u32, imm12) << 10) | (rn << 5) | XZR;
+}
+
+/// The shift a shifted-register operand or a shift-by-immediate applies.
+pub const Shift = enum(u2) { lsl = 0, lsr = 1, asr = 2 };
+
+/// add rd, rn, rm, <shift> #amt. add x1,x2,x3,lsr #63 → 0x8B43FC41.
+pub fn addShifted(rd: u32, rn: u32, rm: u32, shift: Shift, amt: u6) u32 {
+    return 0x8B000000 | (@as(u32, @intFromEnum(shift)) << 22) | (rm << 16) | (@as(u32, amt) << 10) | (rn << 5) | rd;
+}
+
+/// sub rd, rn, rm, <shift> #amt. sub x1,x2,x3,lsl #1 → 0xCB030441.
+pub fn subShifted(rd: u32, rn: u32, rm: u32, shift: Shift, amt: u6) u32 {
+    return 0xCB000000 | (@as(u32, @intFromEnum(shift)) << 22) | (rm << 16) | (@as(u32, amt) << 10) | (rn << 5) | rd;
+}
+
+/// lsl/lsr/asr rd, rn, #amt (UBFM/SBFM aliases). lsr x1,x2,#1 → 0xD341FC41; lsl x1,x2,#1
+/// → 0xD37FF841.
+pub fn shiftImm(shift: Shift, rd: u32, rn: u32, amt: u6) u32 {
+    return switch (shift) {
+        .lsr => 0xD340FC00 | (@as(u32, amt) << 16) | (rn << 5) | rd,
+        .asr => asrImm(rd, rn, amt),
+        .lsl => 0xD3400000 | (@as(u32, (64 - @as(u32, amt)) % 64) << 16) | (@as(u32, 63 - @as(u32, amt)) << 10) | (rn << 5) | rd,
+    };
+}
+
 /// csel rd, rn, rm, cond — rd = cond ? rn : rm; cond in bits[15:12].
 /// csel x0,xzr,x0,hs → 0x9A8023E0.
 pub fn csel(rd: u32, rn: u32, rm: u32, c: Cond) u32 {
@@ -855,6 +884,22 @@ test "bitwise, shift, and select encoders" {
     try testing.expectEqual(@as(u32, 0x937FFC02), asrImm(2, 0, 63)); // asr x2,x0,#63
     try testing.expectEqual(@as(u32, 0x9A8023E0), csel(0, XZR, 0, .hs)); // csel x0,xzr,x0,hs
     try testing.expectEqual(@as(u32, 0x9A8123E0), csel(0, XZR, 1, .hs)); // csel x0,xzr,x1,hs
+}
+
+test "flag-setting immediate, shifted-register and shift-immediate encoders (assembler-verified)" {
+    try testing.expectEqual(@as(u32, 0xB100147F), cmnImm(3, 5)); // cmn x3,#5
+    try testing.expectEqual(@as(u32, 0xB13FFC1F), cmnImm(0, 4095)); // cmn x0,#4095
+    try testing.expectEqual(@as(u32, 0x8B43FC41), addShifted(1, 2, 3, .lsr, 63)); // add x1,x2,x3,lsr #63
+    try testing.expectEqual(@as(u32, 0x8B031041), addShifted(1, 2, 3, .lsl, 4)); // add x1,x2,x3,lsl #4
+    try testing.expectEqual(@as(u32, 0x8B830841), addShifted(1, 2, 3, .asr, 2)); // add x1,x2,x3,asr #2
+    try testing.expectEqual(@as(u32, 0xCB030441), subShifted(1, 2, 3, .lsl, 1)); // sub x1,x2,x3,lsl #1
+    try testing.expectEqual(@as(u32, 0xD37FFC41), shiftImm(.lsr, 1, 2, 63)); // lsr x1,x2,#63
+    try testing.expectEqual(@as(u32, 0xD341FC41), shiftImm(.lsr, 1, 2, 1)); // lsr x1,x2,#1
+    try testing.expectEqual(@as(u32, 0xD37FF841), shiftImm(.lsl, 1, 2, 1)); // lsl x1,x2,#1
+    try testing.expectEqual(@as(u32, 0xD3410041), shiftImm(.lsl, 1, 2, 63)); // lsl x1,x2,#63
+    try testing.expectEqual(@as(u32, 0x9341FC41), shiftImm(.asr, 1, 2, 1)); // asr x1,x2,#1
+    try testing.expectEqual(@as(u32, 0xB4000005), cbz(5, 0)); // cbz x5,#0
+    try testing.expectEqual(@as(u32, 0x54000000), bCond(.eq, 0)); // b.eq #0
 }
 
 test "unsigned condition codes invert and cset" {

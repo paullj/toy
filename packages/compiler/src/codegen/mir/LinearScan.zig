@@ -19,7 +19,9 @@
 //! or in a new block that splits a critical edge.
 //!
 //! The values the selector's block-argument moves copy are ordinary intervals here, and
-//! a hint asks for the copy's source register, so most such moves vanish.
+//! a hint asks for the copy's source register, so most such moves vanish. A copy's source
+//! allocated after its destination (a loop's next value, copied into the loop param)
+//! asks for the destination's register instead.
 //!
 //! SAFEPOINTS. The collector reads roots only from stack slots, so a GC reference must be
 //! in its slot across every call that may collect: such a call clobbers every register
@@ -110,10 +112,12 @@ pub fn LinearScan(comptime Target: type) type {
             /// Per physical register, where instructions pin it.
             fixed: [64]Interval = @splat(.{ .vreg = Interval.fixed }),
             safepoints: std.ArrayList(u32) = .empty,
-            /// Per virtual register: a physical register a copy pairs it with, or the
-            /// register a copy reads it from and the copy's position.
+            /// Per virtual register: a physical register a copy pairs it with, the
+            /// register a copy reads it from and the copy's position, or the register a
+            /// copy writes it to and the position after the copy.
             hint_phys: []?Mir.Reg = &.{},
-            hint_vreg: []struct { v: u32, pos: u32 } = &.{},
+            hint_vreg: []CopyHint = &.{},
+            hint_dst: []CopyHint = &.{},
             /// Pieces not yet allocated, by start descending, so the next is last.
             unhandled: std.ArrayList(u32) = .empty,
             active: std.ArrayList(u32) = .empty,
@@ -131,6 +135,7 @@ pub fn LinearScan(comptime Target: type) type {
                 a.safepoints.deinit(gpa);
                 gpa.free(a.hint_phys);
                 gpa.free(a.hint_vreg);
+                gpa.free(a.hint_dst);
                 a.unhandled.deinit(gpa);
                 a.active.deinit(gpa);
                 a.inactive.deinit(gpa);
@@ -239,13 +244,16 @@ pub fn LinearScan(comptime Target: type) type {
                 const nv = a.func.vregs.items.len;
                 a.hint_phys = try a.gpa.alloc(?Mir.Reg, nv);
                 @memset(a.hint_phys, null);
-                a.hint_vreg = try a.gpa.alloc(@TypeOf(a.hint_vreg[0]), nv);
+                a.hint_vreg = try a.gpa.alloc(CopyHint, nv);
                 @memset(a.hint_vreg, .{ .v = none, .pos = 0 });
+                a.hint_dst = try a.gpa.alloc(CopyHint, nv);
+                @memset(a.hint_dst, .{ .v = none, .pos = 0 });
                 for (a.func.blocks, 0..) |*b, bi| for (b.insts.items, 0..) |inst, k| {
                     const c = inst.copyRegs() orelse continue;
                     if (a.func.classOf(c.dst) != a.func.classOf(c.src)) continue;
                     if (c.dst.isVirtual() and c.src.isVirtual()) {
                         a.hint_vreg[c.dst.index()] = .{ .v = c.src.index(), .pos = a.live.instPos(bi, k) };
+                        a.hint_dst[c.src.index()] = .{ .v = c.dst.index(), .pos = a.live.instPos(bi, k) + 1 };
                     } else if (c.dst.isVirtual() and tracked(c.src)) {
                         if (a.hint_phys[c.dst.index()] == null) a.hint_phys[c.dst.index()] = c.src;
                     } else if (c.src.isVirtual() and tracked(c.dst)) {
@@ -390,10 +398,12 @@ pub fn LinearScan(comptime Target: type) type {
 
             fn hintFor(a: *const A, it: *const Interval) ?Mir.Reg {
                 if (a.hint_phys[it.vreg]) |r| return r;
-                const h = a.hint_vreg[it.vreg];
-                if (h.v == none) return null;
-                const loc = a.locAt(h.v, h.pos) orelse return null;
-                return if (loc == .reg) loc.reg else null;
+                for ([_]CopyHint{ a.hint_vreg[it.vreg], a.hint_dst[it.vreg] }) |h| {
+                    if (h.v == none) continue;
+                    const loc = a.locAt(h.v, h.pos) orelse continue;
+                    if (loc == .reg) return loc.reg;
+                }
+                return null;
             }
 
             fn tryAllocateFree(a: *A, ci: u32) Error!bool {
@@ -834,6 +844,9 @@ pub fn LinearScan(comptime Target: type) type {
         };
     };
 }
+
+/// A copy's other register, and the position to look its location up at.
+const CopyHint = struct { v: u32, pos: u32 };
 
 /// A small target for unit tests: three allocatable registers, one of them callee-saved,
 /// so a handful of values already forces splits and spills.
@@ -1334,6 +1347,42 @@ test "linear scan: a call that never collects keeps a reference in a register" {
     try testing.expectEqual(@as(usize, 0), res.maps.len);
     try testing.expectEqual(@as(u32, 0), frame.spills);
     try testing.expectEqual(Mir.Reg.gp(19), f.blocks[0].insts.items[0].op.imm.rd);
+}
+
+test "linear scan: a loop's next value takes the register of the param it is copied into" {
+    const gpa = testing.allocator;
+    // b0: t = 7 ; p = 3 ; use t ; b 1      (t takes the first register, p the second)
+    // b1: cbnz p, 2 ; b 3
+    // b2: n = p - 1 ; p = n ; b 1          (n is free to take either; the copy wants p's)
+    // b3: use p ; ret
+    var f = try TF.init(gpa, 4);
+    defer f.deinit(gpa);
+    const t = try f.newVReg(gpa, .gpr, null);
+    const p = try f.newVReg(gpa, .gpr, null);
+    const n = try f.newVReg(gpa, .gpr, null);
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .imm = .{ .rd = t, .imm = 7 } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .imm = .{ .rd = p, .imm = 3 } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .use = t } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .{ .cbnz = .{ .rn = p, .target = 2 } } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .{ .b = 3 } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .dec = .{ .rd = n, .rn = p } } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .mov = .{ .rd = p, .rn = n } } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[3].insts.append(gpa, .{ .op = .{ .use = p } });
+    try f.blocks[3].insts.append(gpa, .{ .op = .ret });
+
+    var before = try cloneFunc(gpa, &f);
+    defer before.deinit(gpa);
+    var frame: Mir.Frame = .{ .layout = undefined };
+    var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
+    defer res.deinit(gpa);
+    for (f.blocks[2].insts.items) |i| try testing.expect(i.op != .mov);
+    const want = try Machine.run(gpa, &before, null);
+    defer gpa.free(want);
+    const got = try Machine.run(gpa, &f, res.maps);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u64, want, got);
 }
 
 test "linear scan: a value spilled inside a loop reloads at the loop entry, not in the body" {
