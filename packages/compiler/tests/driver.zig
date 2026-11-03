@@ -5316,6 +5316,35 @@ test "an unknown command or long flag suggests the near name, and every usage er
     }
 }
 
+test "mem2reg: a match arm ending in an if/else keeps the local it assigns at -O1" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    // The arm's join has a unit param its `br`s leave off; mem2reg's param comes after it.
+    try harness.expectStdoutAtBothLevels(gpa, io, ".toy-test-driver-mem2reg-unit-join",
+        \\import std/io
+        \\fn f(n: int) -> int {
+        \\    acc := n
+        \\    match n % 2 {
+        \\        0 -> {
+        \\            if acc > 0 { acc = 10 } else { acc = 20 }
+        \\        },
+        \\        _ -> { acc = 30 },
+        \\    }
+        \\    return acc
+        \\}
+        \\fn main() -> int {
+        \\    io.println(f(4))
+        \\    io.println(f(-4))
+        \\    io.println(f(3))
+        \\    return 0
+        \\}
+        \\
+    , "10\n20\n30\n");
+}
+
 test "every enum or range flag lists its valid values, on build, run and check (#70)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
@@ -5332,7 +5361,7 @@ test "every enum or range flag lists its valid values, on build, run and check (
 
     const bad_target = "error: invalid value 'bogus' for --target (one of: native|aarch64-macos)\n";
     const near_target = "error: invalid value 'aarch64-mac' for --target (one of: native|aarch64-macos)\ndid you mean 'aarch64-macos'?\n";
-    const passes = "(one of: fold|branch|forward|dce|inline)\n";
+    const passes = "(one of: fold|branch|forward|dce|inline|mem2reg)\n";
     const runs = [_]struct { argv: []const []const u8, line: []const u8 }{
         .{ .argv = &.{ "build", "--target", "bogus", path }, .line = bad_target },
         .{ .argv = &.{ "run", "--target", "bogus", path }, .line = bad_target },

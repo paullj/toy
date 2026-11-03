@@ -1,0 +1,179 @@
+# Differential: the shapes mem2reg must keep right. Loops with break, labeled continue and
+# early returns, a mut param (its local escapes), shadowing, reassigned params, float and
+# bool locals, a captured local in a frame env (escapes) and in a heap box held across
+# collections, swapped Vec locals (aggregates, never promoted), and locals swapped round a
+# loop, whose edge feeds each header param from the other. A match arm whose tail is an
+# if/else joins on a unit param that its `br`s leave off, ahead of mem2reg's own param.
+# expect: stdout "7\n2\n-1\n144233\n97\n1\n51\n20\n-2.5\n6\n10660780\n15151\n10\n-9\n10\n20\n30\n"
+# expect: exit 0
+import std/io
+import std/vec
+import std/gc
+
+fn step(mut n: int) { n += 3 }
+
+fn early(xs: Vec[int], want: int) -> int {
+    i := 0
+    while i < xs.len() {
+        if xs[i] == want { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn swap_loop(n: int) -> int {
+    a := 1
+    b := 2
+    k := 0
+    while k < n {
+        t := a
+        a = b
+        b = t + b
+        k = k + 1
+    }
+    return a * 1000 + b
+}
+
+fn skip_odd(n: int) -> int {
+    s := 0
+    i := 0
+    @outer while i < n {
+        i = i + 1
+        if i % 2 == 1 { continue }
+        j := 0
+        while true {
+            j = j + 1
+            if j > i { break }
+            if j == 7 { continue @outer }
+            s = s + j
+        }
+    }
+    return s
+}
+
+fn shadow(n: int) -> int {
+    x := n
+    if x > 2 {
+        x := x * 10
+        x = x + 1
+        return x
+    }
+    return x
+}
+
+fn param_reassign(n: int, m: int) -> int {
+    while n > 0 {
+        m = m + n
+        n = n - 1
+    }
+    return m
+}
+
+fn floats(n: int) -> float {
+    acc := 0.0
+    ok := true
+    for _ in 0..n {
+        acc = acc +. 0.5
+        ok = !ok
+    }
+    return if ok { acc } else { 0.0 -. acc }
+}
+
+fn boxed(n: int) -> int {
+    c := 0
+    bump := fn() { c = c + 1 }
+    for _ in 0..n { bump() }
+    return c
+}
+
+fn boxed_escape(n: int) -> int {
+    fs: Vec[fn() -> int] = []
+    c := 0
+    for i in 0..n {
+        fs.push(fn() {
+            c = c + i
+            c
+        })
+        junk: Vec[int] = []
+        junk.push(i)
+    }
+    gc.collect()
+    s := 0
+    for j in 0..fs.len() { s = s + fs[j]() }
+    return s * 1000 + c
+}
+
+fn keep_vec(n: int) -> int {
+    v: Vec[int] = []
+    w: Vec[int] = []
+    for i in 0..n {
+        junk: Vec[int] = []
+        junk.push(i)
+        v.push(i)
+        tmp := v
+        v = w
+        w = tmp
+    }
+    gc.collect()
+    return v.len() * 100 + w.len()
+}
+
+fn swap_pure(n: int) -> int {
+    a := 0
+    b := 1
+    c := 0
+    for _ in 0..n {
+        c = c * 2 + a
+        t := a
+        a = b
+        b = t
+    }
+    return c
+}
+
+fn swap_flags(n: int) -> int {
+    a := false
+    b := true
+    c := 0
+    for i in 0..n {
+        if a && b { c = c + i } else if a || b { c = c - 1 }
+        t := a
+        a = b
+        b = t
+    }
+    return c
+}
+
+fn arm_tail_if(n: int) -> int {
+    acc := n
+    match n % 2 {
+        0 -> {
+            if acc > 0 { acc = 10 } else { acc = 20 }
+        },
+        _ -> { acc = 30 },
+    }
+    return acc
+}
+
+fn main() -> int {
+    x := 4
+    step(x)
+    io.println(x)
+    io.println(early([5, 6, 7], 7))
+    io.println(early([5, 6, 7], 9))
+    io.println(swap_loop(10))
+    io.println(skip_odd(12))
+    io.println(shadow(1))
+    io.println(shadow(5))
+    io.println(param_reassign(4, 10))
+    io.println(floats(5))
+    io.println(boxed(6))
+    io.println(boxed_escape(40))
+    io.println(keep_vec(301))
+    io.println(swap_pure(5))
+    io.println(swap_flags(9))
+    io.println(arm_tail_if(4))
+    io.println(arm_tail_if(-4))
+    io.println(arm_tail_if(3))
+    return 0
+}

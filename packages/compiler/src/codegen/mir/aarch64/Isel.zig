@@ -713,7 +713,7 @@ const S = struct {
             .br => |br| {
                 const params = s.ir.blocks[br.dest].params;
                 std.debug.assert(br.args.len <= params.len);
-                for (br.args, 0..) |arg, i| try s.writeParam(params[i], arg);
+                try s.writeParams(params, br.args);
                 if (br.dest <= bid) try s.emit(.safepoint_poll);
                 try s.emit(.{ .b = br.dest + 1 });
             },
@@ -732,8 +732,32 @@ const S = struct {
         }
     }
 
-    /// An edge argument into block param `p`. Lower never feeds one param of an edge from
-    /// another, so writing them in order is safe.
+    /// An edge's arguments into its destination's params. mem2reg can feed one param of an
+    /// edge from another (a swap carried round a loop), so a scalar argument that is a
+    /// param of the destination is read into a temporary before any param is written.
+    fn writeParams(s: *S, params: []const Ir.ValueId, args: []const Ir.Operand) Error!void {
+        const held = try s.gpa.alloc(?Reg, args.len);
+        defer s.gpa.free(held);
+        for (args, held) |arg, *h| {
+            h.* = null;
+            const v = switch (arg) {
+                .value => |v| v,
+                .slot, .none => continue,
+            };
+            if (!isScalar(s.valueType(v)) or std.mem.indexOfScalar(Ir.ValueId, params, v) == null) continue;
+            const t = try s.temp(s.f.classOf(Reg.virt(v)));
+            try s.emit(.{ .mov = .{ .rd = t, .rn = Reg.virt(v) } });
+            h.* = t;
+        }
+        for (args, held, 0..) |arg, h, i| {
+            if (h) |t| {
+                try s.emit(.{ .mov = .{ .rd = try s.def(params[i]), .rn = t } });
+                try s.flush();
+            } else try s.writeParam(params[i], arg);
+        }
+    }
+
+    /// An edge argument into block param `p`.
     fn writeParam(s: *S, p: Ir.ValueId, arg: Ir.Operand) Error!void {
         const pty = s.valueType(p);
         if (pty.kind == .unit or arg == .none) return;

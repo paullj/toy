@@ -139,18 +139,23 @@ echo "  corpus: $corpus_pass ok, $corpus_fail fail"
 # ---------------------------------------------------------------------------
 # bench -> TARGET pass, and pass -> counter name. (bash 3.2: no assoc arrays,
 # so case-based lookups -- portable to /bin/bash on macOS.)
-benches=(const_arith const_cmp dead_branch_true dead_branch_false redundant_local forward_chain cascade)
+benches=(const_arith const_cmp dead_branch_true dead_branch_false redundant_local forward_chain cascade loop_local forward_field)
 # For (c) we attribute each bench to the single pass that, run ALONE, both posts
 # a nonzero counter AND is load-bearing for the emitted win (--no-opt regresses).
 # const_cmp's cascade is unlocked by FOLDING the const icmp (branch alone can't
 # fold a non-const cond), so its isolated load-bearing pass is `fold`.
+# redundant_local and forward_chain are straight-line locals that forward and mem2reg
+# each reach alone, so neither is load-bearing there; loop_local (state carried round a
+# loop) attributes mem2reg and forward_field (struct fields, never promoted) forward.
 target_pass() { case "$1" in
   const_arith|const_cmp|cascade) echo fold;;
   dead_branch_true|dead_branch_false) echo branch;;
-  redundant_local|forward_chain) echo forward;;
+  forward_field) echo forward;;
+  loop_local) echo mem2reg;;
   *) echo "";; esac; }
 pass_counter() { case "$1" in
   fold) echo folded;; branch) echo branches;; forward) echo forwarded;; dce) echo dced;;
+  mem2reg) echo promoted;;
   *) echo "";; esac; }
 
 echo
@@ -181,6 +186,7 @@ printf "  %-20s %-8s %-10s %-12s %-12s %s\n" "bench" "pass" "counter" "full-O1em
 for b in "${benches[@]}"; do
   src="$root/tests/corpora/opt/$b.toy"
   p="$(target_pass "$b")"
+  [ -z "$p" ] && continue
   cname="$(pass_counter "$p")"
   # only the target pass on
   sonly="$(limit 30 "$toyc" --no-cache --opt-stats "--opt=$p" -o "$work/$b.only" "$src" 2>&1)"

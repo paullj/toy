@@ -1,0 +1,15 @@
+# Bench: TARGET PASS = mem2reg (promote locals to SSA values).
+# expect: exit 45
+# `i` and `s` change on every trip round the loop. forward reasons inside one block, so
+# without mem2reg each trip loads both from their slots and stores them back; mem2reg
+# turns them into params of the loop header and the loop runs in registers.
+# Metric: slots_promoted=2, IR instrs + emitted aarch64 instrs both drop.
+fn main() -> int {
+    i := 0
+    s := 0
+    while i < 10 {
+        s = s + i
+        i = i + 1
+    }
+    return s
+}

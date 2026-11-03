@@ -158,6 +158,16 @@ A caller's cache entry covers the bodies it can inline. In a release build, an e
 small function compiles again each function that calls it, up to three calls away; a
 debug build at its default `-O0` compiles only the edited function.
 
+## Locals in registers
+
+The `mem2reg` pass keeps a local variable in a register instead of the frame, when nothing
+takes a reference to it and its value fits in one: an `int`, `bool`, float or pointer. A
+local that a closure captures, or that is passed to a `mut` parameter, stays in the frame.
+A statement that only gives such a local a new value then leaves no code of its own, so in
+a debug build at `-O1` it has no line in the line table and a breakpoint set on it never
+stops. `--no-opt mem2reg` keeps every local in the frame and gives each such statement its
+line back.
+
 ## The cache
 
 The profile is part of every codegen cache key. A debug build never reuses code that a

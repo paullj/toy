@@ -1,0 +1,12 @@
+# Bench: TARGET PASS = forward (store→load forwarding).
+# expect: exit 13
+# `p` is a struct, so it stays in a slot (mem2reg promotes scalars only). Building it
+# stores both fields; `p.x + p.y` loads them back in the same block, and forward hands
+# each load the stored value. fold then adds the constants and DCE drops the slot.
+# Metric: loads_forwarded=2, IR instrs + emitted aarch64 instrs both drop.
+struct P { x: int, y: int }
+
+fn main() -> int {
+    p := P { x: 10, y: 3 }
+    return p.x + p.y
+}

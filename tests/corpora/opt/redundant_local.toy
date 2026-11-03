@@ -1,4 +1,4 @@
-# Bench: TARGET PASS = forward (store→load forwarding) + DCE (headline win).
+# Bench: forward (store→load forwarding) or mem2reg, each alone, + DCE (headline win).
 # expect: exit 10
 # `x:=10; y:=x; return y` lowers to store s0,%1 then slot_addr s0 + load s0 (reads
 # back what we just stored), then store s1, slot_addr s1 + load s1. forward replaces

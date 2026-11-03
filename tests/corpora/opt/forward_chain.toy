@@ -1,4 +1,4 @@
-# Bench: TARGET PASS = forward (store→load forwarding).
+# Bench: forward (store→load forwarding) or mem2reg, each alone.
 # expect: exit 10
 # `a:=5; b:=a+a` lowers to store s0,%1 then TWO loads of s0 (one per use of `a`).
 # forward replaces both load results with the stored %1, so the add reads %1,%1

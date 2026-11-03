@@ -8,7 +8,8 @@
 //! entirely in codegen by the `Abi` module.
 //!
 //! VALUE MODEL: scalars (int/bool temporaries) and control-flow
-//! merge-values are SSA `Value`s — each defined exactly once. Named locals and
+//! merge-values are SSA `Value`s — each defined exactly once. Named locals (until
+//! mem2reg promotes the scalar ones to values) and
 //! ALL aggregates (struct/enum/str) live in memory `Slot`s, addressed via
 //! `slot_addr`/`field_addr` + `load`/`store`/`copy`. Merge values are carried as
 //! block params (`phi = memory`): each predecessor stores the arg into the param

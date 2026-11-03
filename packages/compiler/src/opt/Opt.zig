@@ -5,7 +5,8 @@
 //!
 //! PASSES (each its own file): fold, branch, dce, forward. They run behind this
 //! manager's bounded fixpoint so fold→branch→forward→DCE cascade. `inline` runs once
-//! before the fixpoint (`optimize`), since it needs callee IR the caller supplies.
+//! before the fixpoint (`optimize`), since it needs callee IR the caller supplies, then
+//! `mem2reg` once, so the fixpoint and the spliced bodies see locals as SSA values.
 //!
 //! MEMORY STRATEGY (no arena; in-place mutate + mark-then-compact-once)
 //! A block's owned slices are freed once by `Ir.Block.freeOwned` (the single
@@ -38,10 +39,11 @@ pub const branch = @import("branch.zig");
 pub const dce = @import("dce.zig");
 pub const forward = @import("forward.zig");
 pub const inliner = @import("inline.zig");
+pub const mem2reg = @import("mem2reg.zig");
 
 /// The passes `--opt`/`--no-opt` name. The fixpoint loop runs the first four each round
-/// in declaration order; `inline` runs once before it (`optimize`).
-pub const Pass = enum(u3) { fold, branch, forward, dce, @"inline" };
+/// in declaration order; `inline` and then `mem2reg` run once before it (`optimize`).
+pub const Pass = enum(u3) { fold, branch, forward, dce, @"inline", mem2reg };
 
 /// Which passes are enabled. A `packed struct` over a fixed `u8` so its `bits()`
 /// is a stable wire byte for the codegen fingerprint mix — toggling `-O` lands on
@@ -54,10 +56,11 @@ pub const Config = packed struct(u8) {
     forward: bool = false,
     dce: bool = false,
     @"inline": bool = false,
-    _pad: u3 = 0,
+    mem2reg: bool = false,
+    _pad: u2 = 0,
 
     pub const O0: Config = .{};
-    pub const O1: Config = .{ .fold = true, .branch = true, .forward = true, .dce = true, .@"inline" = true };
+    pub const O1: Config = .{ .fold = true, .branch = true, .forward = true, .dce = true, .@"inline" = true, .mem2reg = true };
 
     pub fn has(self: Config, p: Pass) bool {
         return switch (p) {
@@ -66,6 +69,7 @@ pub const Config = packed struct(u8) {
             .forward => self.forward,
             .dce => self.dce,
             .@"inline" => self.@"inline",
+            .mem2reg => self.mem2reg,
         };
     }
 
@@ -76,6 +80,7 @@ pub const Config = packed struct(u8) {
             .forward => self.forward = on,
             .dce => self.dce = on,
             .@"inline" => self.@"inline" = on,
+            .mem2reg => self.mem2reg = on,
         }
     }
 
@@ -86,7 +91,7 @@ pub const Config = packed struct(u8) {
     }
 
     pub fn any(self: Config) bool {
-        return self.fold or self.branch or self.forward or self.dce or self.@"inline";
+        return self.fold or self.branch or self.forward or self.dce or self.@"inline" or self.mem2reg;
     }
 
     comptime {
@@ -114,6 +119,7 @@ pub const Stats = struct {
     values_pruned: usize = 0,
     loads_forwarded: usize = 0,
     calls_inlined: usize = 0,
+    slots_promoted: usize = 0,
     rounds: usize = 0,
     ir_instrs_before: usize = 0,
     ir_instrs_after: usize = 0,
@@ -126,6 +132,7 @@ pub const Stats = struct {
         self.values_pruned += o.values_pruned;
         self.loads_forwarded += o.loads_forwarded;
         self.calls_inlined += o.calls_inlined;
+        self.slots_promoted += o.slots_promoted;
         self.rounds += o.rounds;
         self.ir_instrs_before += o.ir_instrs_before;
         self.ir_instrs_after += o.ir_instrs_after;
@@ -141,7 +148,7 @@ fn dispatch(p: Pass) PassFn {
         .branch => branch.run,
         .forward => forward.run,
         .dce => dce.run,
-        .@"inline" => unreachable,
+        .@"inline", .mem2reg => unreachable,
     };
 }
 
@@ -164,9 +171,11 @@ pub fn optimize(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, callees
     if (cfg.@"inline") if (callees) |l| {
         _ = try inliner.run(gpa, func, l, inliner.budget, stats);
     };
+    if (cfg.mem2reg) _ = try mem2reg.run(gpa, func, stats);
 
     var fix = cfg;
     fix.@"inline" = false;
+    fix.mem2reg = false;
     if (!fix.any()) return;
 
     // Count rounds actually executed (a round is one full pass over the enabled
@@ -195,6 +204,7 @@ test {
     _ = dce;
     _ = forward;
     _ = inliner;
+    _ = mem2reg;
 }
 
 test "Config.bits is a stable wire byte; O0 != O1" {
