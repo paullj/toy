@@ -49,6 +49,15 @@ pub fn scope(k: Kind) Scope {
     };
 }
 
+/// Whether a call of `k` may allocate on the GC heap or run the collector. `call_hash` and
+/// `call_eq` call a witness through a descriptor, a target no walk can see.
+pub fn allocates(k: Kind) bool {
+    return switch (k) {
+        .gc_alloc, .gc_collect, .ref_new, .call_hash, .call_eq => true,
+        .size_of, .align_of, .gc_span_count, .store, .load, .gc_array, .offset, .gc_stats, .text_base, .descriptor_of, .store_byte, .load_byte, .ref_get, .ref_set => false,
+    };
+}
+
 pub fn lookup(n: []const u8) ?Kind {
     inline for (@typeInfo(Kind).@"enum".fields) |f| {
         const k: Kind = @enumFromInt(f.value);

@@ -192,6 +192,7 @@ const core_replacements = std.StaticStringMap([]const u8).initComptime(.{
     .{ "core/os", "std/os, std/time or std/rand" },
     .{ "core/fs", "std/fs" },
     .{ "core/fmt", "std/float" },
+    .{ "core/rt/str", "std/str" },
 });
 
 /// The std module holding a builtin scalar's `impl` of a protocol, keyed `"<type> has
@@ -212,6 +213,13 @@ pub fn scalarImplModule(ty: []const u8, protocol: []const u8) ?[]const u8 {
 /// the heap intrinsics.
 pub fn isCoreModule(bundled: bool, path: []const u8) bool {
     return bundled and std.mem.startsWith(u8, path, "core/");
+}
+
+/// A `core/rt` module: the runtime lowered code calls. None of its fns may reach a GC
+/// allocation (T0082). Keyed by path alone, so a dev build's `--dev-core-imports` test can
+/// put such a module on disk.
+pub fn isRuntimeModule(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "core/rt/");
 }
 
 /// The self-check modules only force or count collections for their tests, which std/gc

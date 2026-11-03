@@ -59,6 +59,14 @@ declares its own externs as `ffi.md` describes.
 | `core/fmt` | the Darwin-private `__dtoa`/`__freedtoa` and the `strtod` externs: `shortest(f)` (the shortest round-trip digits, their decimal point and sign) and `parse(s)` |
 | `core/text` | raw `str` parts: `slice`, the `alloc`/`put`/`window`/`take` buffer that builds a str once, and `join` over it |
 | `core/mem_selftest`, `core/desc_selftest` | heap and descriptor self-checks |
+| `core/rt/str` | the runtime for `str` operators: `str_eq` |
+
+`core/rt/` is the runtime: the fns the compiler's lowered code calls. Every program
+carries these modules, and the linker keeps only the fns something calls. No fn in
+`core/rt/` may reach a GC allocation, directly or through calls (T0082): after type
+checking, the compiler walks the call graph from each one and reports the call path to
+any allocation. A call to a runtime fn therefore never lets the collector run. The fns
+have plain names; nothing marks them but their module.
 
 ## std
 
@@ -368,7 +376,8 @@ Every std and core module follows these rules.
   names the std module to import instead. Each core module has a row in
   `StdNames.core_replacements`, and a unit test walks the bundle so a new core module
   cannot ship without one. The self-check modules map to `std/gc`. The dev-only
-  `--dev-core-imports` flag lifts the rule.
+  `--dev-core-imports` flag lifts the rule, and lets a `core/` module the bundle lacks
+  come from disk, so a test can hold a `core/rt` module that breaks T0082.
 - **A std type's fields are private unless it is a plain record (T0078).** `Vec`, `Map`
   and `Set` keep their storage handle private and the iterators keep their cursor
   private, so a program reaches them only through their methods and cannot build one

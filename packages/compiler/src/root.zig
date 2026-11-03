@@ -33,6 +33,7 @@ pub const Closure = @import("symbols/Closure.zig");
 pub const Body = @import("symbols/Body.zig");
 pub const Spec = @import("symbols/Spec.zig");
 pub const Escape = @import("symbols/Escape.zig");
+pub const Alloc = @import("symbols/Alloc.zig");
 pub const Modes = @import("symbols/Modes.zig");
 pub const ResolveGraph = @import("resolve_graph.zig");
 pub const Typecheck = @import("types.zig");

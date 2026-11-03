@@ -40,18 +40,24 @@ pub fn callTarget(body: Body.BodyView, prog: Body.ProgramView, bodies: Body.List
     const slot = Callee.callSlot(tree, tree.nodes[call.int()]) orelse return null;
     if (!body.nodes.has(slot)) return null;
     return switch (body.nodes.callee(slot).view()) {
-        .method => |mi| {
-            if (mi >= prog.methods.len) return null;
-            const m = prog.methods[mi];
-            if (m.derive != null) return null;
-            const self_n: u32 = @intFromBool(!m.is_static);
-            if (m.instance) |ii| return .{ .unit = bodies.ofInstance(ii), .self_n = self_n };
-            return .{ .unit = bodies.ofFn(m.fn_id) orelse return null, .self_n = self_n };
+        .method => |mi| .{
+            .unit = methodUnit(prog, bodies, mi) orelse return null,
+            .self_n = @intFromBool(!prog.methods[mi].is_static),
         },
         .direct => |gid| .{ .unit = bodies.ofFn(gid) orelse return null, .self_n = 0 },
         .instance => |ii| .{ .unit = bodies.ofInstance(ii), .self_n = 0 },
         .none, .generic, .protocol, .builtin, .value, .fn_ref, .bound_method => null,
     };
+}
+
+/// The body method `mi` runs, or null for a derive (it has no source) or a method with no
+/// lowered body.
+pub fn methodUnit(prog: Body.ProgramView, bodies: Body.List, mi: u32) ?u32 {
+    if (mi >= prog.methods.len) return null;
+    const m = prog.methods[mi];
+    if (m.derive != null) return null;
+    if (m.instance) |ii| return bodies.ofInstance(ii);
+    return bodies.ofFn(m.fn_id);
 }
 
 /// A use that passes a value whole to `param` of body `unit`.

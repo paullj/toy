@@ -415,6 +415,9 @@ const Expect = struct {
     libdir: std.ArrayList([]const u8) = .empty,
     /// `# gc-stress: skip`: stress mode would change the output or take too long.
     gc_stress_skip: bool = false,
+    /// `# dev-core-imports`: build as a dev build's `--dev-core-imports` does, so the
+    /// fixture's own folder can hold a `core/` module.
+    dev_core_imports: bool = false,
 
     fn deinit(self: *Expect, gpa: std.mem.Allocator) void {
         if (self.stdout) |s| gpa.free(s);
@@ -495,7 +498,8 @@ fn parseArgs(gpa: std.mem.Allocator, body: []const u8, out: *std.ArrayList([]con
 /// `stdout "<bytes>"`, `stderr "<substr>"` and `compile-error "<substr>"`; the run
 /// inputs are `# stdin: "<bytes>"` (repeats concatenate), `# args: "a" "b c"` (repeats
 /// append), `# env: K=V` and `# include: "<dir>"` (repeats append); `# gc-stress: skip`
-/// keeps the fixture out of the GC stress mode. Caller `deinit`s.
+/// keeps the fixture out of the GC stress mode; `# dev-core-imports` builds as a dev build
+/// with that flag. Caller `deinit`s.
 fn parseExpect(gpa: std.mem.Allocator, source: []const u8) !Expect {
     var e: Expect = .{};
     errdefer e.deinit(gpa);
@@ -524,6 +528,10 @@ fn parseExpect(gpa: std.mem.Allocator, source: []const u8) !Expect {
             const owned = try gpa.dupe(u8, raw);
             errdefer gpa.free(owned);
             try e.libdir.append(gpa, owned);
+            continue;
+        }
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, line, " \t\r"), "# dev-core-imports")) {
+            e.dev_core_imports = true;
             continue;
         }
         if (std.mem.startsWith(u8, line, "# gc-stress:")) {
@@ -668,7 +676,7 @@ fn compileAndRun(
         errdefer gpa.free(joined);
         try include.append(gpa, joined);
     }
-    var graph = try Graph.discover(gpa, io, cache, Driver.default_target, entry, .{ .roots = .{ .include = include.items } });
+    var graph = try Graph.discover(gpa, io, cache, Driver.default_target, entry, .{ .roots = .{ .include = include.items }, .allow_core_imports = e.dev_core_imports });
     defer graph.deinit(gpa);
     if (graph.err) |err| {
         try checkGraphSpans(gpa, &graph, err.parse_diags);
@@ -1299,6 +1307,16 @@ test "expect harness: parseExpect reads gc-stress skip and rejects other values"
     defer plain.deinit(gpa);
     try testing.expect(!plain.gc_stress_skip);
     try testing.expectError(error.BadGcStressDirective, parseExpect(gpa, "# gc-stress: maybe\n"));
+}
+
+test "expect harness: parseExpect reads the dev-core-imports flag" {
+    const gpa = testing.allocator;
+    var e = try parseExpect(gpa, "# dev-core-imports\n# expect: exit 0\n");
+    defer e.deinit(gpa);
+    try testing.expect(e.dev_core_imports);
+    var plain = try parseExpect(gpa, "# expect: exit 0\n# Builds with --dev-core-imports.\n");
+    defer plain.deinit(gpa);
+    try testing.expect(!plain.dev_core_imports);
 }
 
 test "expect harness: judge matches stderr by substring" {

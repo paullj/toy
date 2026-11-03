@@ -192,6 +192,9 @@ pub const Graph = struct {
     /// Lets a user module import `core/*` (`--dev-core-imports`): the raw heap and
     /// descriptor self-checks have no std surface until the testing epic.
     allow_core_imports: bool = false,
+    /// The modules from this index on were added for the runtime alone (`core/rt` and
+    /// what it imports), not reached from the entry.
+    seeded_from: u32 = std.math.maxInt(u32),
 
     pub const Ownership = enum { owned, borrowed };
 
@@ -439,6 +442,7 @@ pub fn discover(
         .roots = search.items,
         .overlay = opts.overlay,
         .bundled_cache = opts.bundled_cache,
+        .allow_core_imports = opts.allow_core_imports,
     };
     defer d.deinit();
 
@@ -475,9 +479,17 @@ pub fn discover(
         error.Structural => {}, // recorded in d.err; fall through to build graph
         else => |err| return err,
     };
+    // Lowered code may call any `core/rt` fn, so every program carries the runtime
+    // modules; the linker drops the fns nothing calls.
+    const seeded_from: u32 = @intCast(d.slots.items.len);
+    if (d.err == null) d.seedRuntime() catch |e| switch (e) {
+        error.Structural => {},
+        else => |err| return err,
+    };
 
     var g = try d.toGraph(root_id);
     g.allow_core_imports = opts.allow_core_imports;
+    g.seeded_from = seeded_from;
     return g;
 }
 
@@ -607,6 +619,7 @@ const Discoverer = struct {
     realpath_cache: std.StringHashMapUnmanaged([]const u8) = .empty,
     overlay: ?Overlay = null,
     bundled_cache: ?*BundledCache = null,
+    allow_core_imports: bool = false,
     err: ?Error = null,
     /// The gray modules in DFS order. The gray set alone cannot name a cycle: a
     /// gray ancestor above the back-edge target is on the stack but not in the cycle.
@@ -678,6 +691,31 @@ const Discoverer = struct {
         errdefer d.gpa.free(ret);
         try d.realpath_cache.put(d.gpa, key, master);
         return ret;
+    }
+
+    /// Intern the bundled module at import path `path`, served from `src`.
+    fn internBundled(d: *Discoverer, path: []const u8, src: []const u8) !u32 {
+        const name = try d.gpa.dupe(u8, path);
+        const file = try std.fmt.allocPrint(d.gpa, "<bundled>/{s}{s}", .{ path, ext });
+        const canon = try std.fmt.allocPrint(d.gpa, "bundled:{s}", .{path});
+        const id = d.intern(name, file, canon) catch |e| {
+            d.gpa.free(name);
+            d.gpa.free(file);
+            d.gpa.free(canon);
+            return e;
+        };
+        d.slots.items[id].bundled = true;
+        d.slots.items[id].bundled_src = src;
+        return id;
+    }
+
+    /// Add every bundled `core/rt` module (and what it imports) the entry did not reach.
+    fn seedRuntime(d: *Discoverer) DiscoverError!void {
+        for (BundledStd.modules) |m| {
+            if (!StdNames.isRuntimeModule(m.path)) continue;
+            const id = try d.internBundled(m.path, m.source);
+            if (d.slots.items[id].color == .white) try d.visit(id);
+        }
     }
 
     /// Record a structural error (first one wins) and signal the DFS to unwind.
@@ -1040,17 +1078,7 @@ const Discoverer = struct {
             // dedups repeat bundled imports cleanly. Skip the disk resolve + case +
             // presence guards entirely.
             if (bundledLookup(path)) |src| {
-                const name = try d.gpa.dupe(u8, path);
-                const file = try std.fmt.allocPrint(d.gpa, "<bundled>/{s}{s}", .{ path, ext });
-                const canon = try std.fmt.allocPrint(d.gpa, "bundled:{s}", .{path});
-                const child = d.intern(name, file, canon) catch |e| {
-                    d.gpa.free(name);
-                    d.gpa.free(file);
-                    d.gpa.free(canon);
-                    return e;
-                };
-                d.slots.items[child].bundled = true;
-                d.slots.items[child].bundled_src = src;
+                const child = try d.internBundled(path, src);
                 var seen = false;
                 for (edges.items) |existing| {
                     if (existing == child) {
@@ -1063,8 +1091,10 @@ const Discoverer = struct {
             }
 
             // A user file must not stand in for a bundled module the bundle lacks, so
-            // these prefixes never reach the disk.
-            if (std.mem.startsWith(u8, path, "core/") or std.mem.startsWith(u8, path, "std/")) {
+            // these prefixes never reach the disk. A dev build developing `core` lets a
+            // `core/` module come from disk, so a test can hold a module the bundle must not.
+            const dev_core = d.allow_core_imports and std.mem.startsWith(u8, path, "core/");
+            if (!dev_core and (std.mem.startsWith(u8, path, "core/") or std.mem.startsWith(u8, path, "std/"))) {
                 return d.fail(.{
                     .kind = .missing,
                     .message = try std.fmt.allocPrint(d.gpa, "imported module '{s}' not found (the 'core/' and 'std/' import paths name only standard library modules)", .{path}),
@@ -1444,7 +1474,7 @@ test "discover: 3-module graph (entry -> two imports, one shared)" {
         fn run(_: std.mem.Allocator, g: *Graph) anyerror!void {
             try testing.expect(g.err == null);
             // entry + geometry/rect + util = 3 modules.
-            try testing.expectEqual(@as(usize, 3), g.modules.len);
+            try testing.expectEqual(@as(u32, 3), g.seeded_from);
             try testing.expectEqualStrings("main", g.entry().path);
             // Entry imports both, sorted: geometry/rect < util.
             try testing.expectEqual(@as(usize, 2), g.entry().imports.len);
@@ -1618,7 +1648,14 @@ test "discover: single entry with no imports" {
     const Check = struct {
         fn run(_: std.mem.Allocator, g: *Graph) anyerror!void {
             try testing.expect(g.err == null);
-            try testing.expectEqual(@as(usize, 1), g.modules.len);
+            try testing.expectEqual(@as(u32, 1), g.seeded_from);
+            // The runtime rides along, so lowered code can call it.
+            var runtime: usize = 0;
+            for (g.modules[g.seeded_from..]) |m| {
+                try testing.expect(m.bundled);
+                runtime += @intFromBool(StdNames.isRuntimeModule(m.path));
+            }
+            try testing.expect(runtime > 0);
             try testing.expectEqualStrings("solo", g.entry().path);
             try testing.expectEqual(@as(usize, 0), g.entry().imports.len);
         }
@@ -2138,7 +2175,7 @@ test "discover: an -I root resolves an import the entry's folder lacks" {
     const Check = struct {
         fn run(_: std.mem.Allocator, g: *Graph) anyerror!void {
             try testing.expect(g.err == null);
-            try testing.expectEqual(@as(usize, 2), g.modules.len);
+            try testing.expectEqual(@as(u32, 2), g.seeded_from);
             const m = g.modules[g.entry().imports[0]];
             try testing.expectEqualStrings("extra", m.path);
             try testing.expectEqualStrings(".toy-test-graph-incl/lib/extra.toy", m.displayName());
@@ -2189,7 +2226,7 @@ test "discover: one file reached through two roots is one module, not a clash" {
     const Check = struct {
         fn run(_: std.mem.Allocator, g: *Graph) anyerror!void {
             try testing.expect(g.err == null);
-            try testing.expectEqual(@as(usize, 2), g.modules.len);
+            try testing.expectEqual(@as(u32, 2), g.seeded_from);
         }
     };
     try withFixtureRoots(".toy-test-graph-sameroot", files, "src/main.toy", null, &.{"src"}, Check.run);
@@ -2266,7 +2303,7 @@ test "discover: import util loads util/mod.toy, named util, and it imports its c
     const Check = struct {
         fn run(_: std.mem.Allocator, g: *Graph) anyerror!void {
             try testing.expect(g.err == null);
-            try testing.expectEqual(@as(usize, 3), g.modules.len);
+            try testing.expectEqual(@as(u32, 3), g.seeded_from);
             const util = g.modules[g.entry().imports[0]];
             try testing.expectEqualStrings("util", util.path);
             try testing.expectEqualStrings(".toy-test-graph-folder/util/mod.toy", util.displayName());
