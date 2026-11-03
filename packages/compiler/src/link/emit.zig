@@ -300,16 +300,20 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
 }
 
 /// The pre-link byte length of the GC stack-map table `Link.buildStackMapTable` will
-/// produce for `fns` — computed from each `FnCode.root_bitmap` (present pre-link), so the
-/// symtab's reserved offset is known before layout. Two spellings of one size; the
-/// `std.debug.assert` at the link callsite guards them against drift. Layout mirrors
-/// `buildSideTable`: `[u64 count][{off,payload_off}×count][blob]`, count = fns+1 (sentinel),
-/// blob = Σ per-fn payload (`root_bitmap` or the 4-byte conservative marker) + the
-/// sentinel's 4-byte marker.
+/// produce for `fns` — computed from each `FnCode.root_bitmap` and `safepoint_maps`
+/// (present pre-link), so the symtab's reserved offset is known before layout. Two
+/// spellings of one size; the `std.debug.assert` at the link callsite guards them against
+/// drift. Layout mirrors `buildSideTable`: `[u64 count][{off,payload_off}×count][blob]`,
+/// count = `Link.stackMapRows`, blob = Σ per-fn payload (`root_bitmap` or the 4-byte
+/// conservative marker) + Σ safepoint row payloads + the sentinel's 4-byte marker.
 fn stackMapLen(fns: []const Link.FnCode) u32 {
     var blob: usize = 4; // sentinel's conservative marker
-    for (fns) |f| blob += if (f.root_bitmap.len == 0) 4 else f.root_bitmap.len;
-    return @intCast(8 + (fns.len + 1) * 16 + blob);
+    for (fns) |f| {
+        blob += if (f.root_bitmap.len == 0) 4 else f.root_bitmap.len;
+        var it: Link.SafepointRows = .{ .bytes = f.safepoint_maps };
+        while (it.next()) |r| blob += r.payload.len;
+    }
+    return @intCast(8 + Link.stackMapRows(fns) * 16 + blob);
 }
 
 /// Rewrite one fn's `.cstr` reloc targets from content hash → global `__cstring`

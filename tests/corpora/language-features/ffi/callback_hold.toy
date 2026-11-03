@@ -1,0 +1,33 @@
+# expect: exit 0
+# expect: stdout "17268\n"
+# libdir: "@harness"
+# A GC string passed to C stays alive while C calls back into toy and collects, though
+# only C's own registers hold it once the toy caller's argument register is dead.
+import std/io
+import std/ffi
+import std/gc
+import std/vec
+
+extern "toyffi" {
+    fn toyffi_hold_str(s: cstr, cb: fn(int) -> int) -> int
+}
+
+fn churn(i: int) -> int {
+    junk: Vec[str] = []
+    k := 0
+    while k < 300 {
+        junk.push("xxxxxxxxxxxxxxxx".concat(k.to_string()))
+        k += 1
+    }
+    gc.collect()
+    junk.len() + i * 4 + 11
+}
+
+fn mk(i: int) -> cstr {
+    "kkkkkkkkkkkkkkkk".concat(i.to_string()).to_cstr()
+}
+
+fn main() -> int {
+    io.println(unsafe { toyffi_hold_str(mk(12345), churn) })
+    return 0
+}

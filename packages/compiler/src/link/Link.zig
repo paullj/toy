@@ -101,6 +101,11 @@ pub const FnCode = struct {
     /// as "scan this frame conservatively". A pure function of the IR + layouts, so it rides
     /// the content-fp cache. Owned like the other regions ("always own").
     root_bitmap: []u8 = &.{},
+    /// More rows of the stack map, for a fn whose roots change from call to call (the MIR
+    /// backend's linear scan): `[u32 code_off][u32 n][{u32 sp_off, u32 tag} x n]` each, by
+    /// ascending code offset of the safepoint call the row starts at. `root_bitmap` is the
+    /// row at the fn's start. Owned like the other regions.
+    safepoint_maps: []u8 = &.{},
     /// A debug build's line table: each statement's first code byte, with its line relative
     /// to `src.line`. Relative, so an edit that only moves the function keeps its cached
     /// code; the codegen key folds every line delta inside it. Empty for a release build or
@@ -125,6 +130,7 @@ pub const FnCode = struct {
         for (fc.literals) |l| gpa.free(l.bytes);
         gpa.free(fc.literals);
         gpa.free(fc.root_bitmap);
+        gpa.free(fc.safepoint_maps);
         gpa.free(fc.lines);
         fc.* = undefined;
     }
@@ -361,8 +367,9 @@ pub const Linked = struct {
     desc_table: []u8 = &.{},
     /// The GC stack-map table (empty unless `link` was asked to emit it): a `buildSideTable`
     /// payload keyed by each fn's START text offset → its precise root bitmap (or the 4-byte
-    /// `0xFFFFFFFF` conservative marker for a row-less fn), rows ascending by off with a final
-    /// `{text_size, conservative}` sentinel. The collector scans it for the greatest row off ≤
+    /// `0xFFFFFFFF` conservative marker for a row-less fn), plus a row at each offset a fn's
+    /// `safepoint_maps` names, rows ascending by off with a final `{text_size, conservative}`
+    /// sentinel. The collector scans it for the greatest row off ≤
     /// an identifying frame offset. A pure function of the fn set (offsets are stable-sort-
     /// ranked; consumes only order-independent inputs), so it is `-jN` byte-identical. Owned
     /// by the caller.
@@ -590,13 +597,18 @@ const conservative_marker = [4]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
 /// conservative marker instead. `site_h[i]` is fn i's handle (→ `offsets`).
 fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32) ![]u8 {
     const SmEnt = struct { off: u64, payload: []const u8 };
-    const ents = try gpa.alloc(SmEnt, fns.len + 1);
+    const ents = try gpa.alloc(SmEnt, stackMapRows(fns));
     defer gpa.free(ents);
-    for (fns, 0..) |f, i| ents[i] = .{
-        .off = offsets[site_h[i]],
-        .payload = if (f.root_bitmap.len == 0) &conservative_marker else f.root_bitmap,
-    };
-    ents[fns.len] = .{ .off = text_size, .payload = &conservative_marker };
+    var n: usize = 0;
+    for (fns, 0..) |f, i| {
+        const base = offsets[site_h[i]];
+        ents[n] = .{ .off = base, .payload = if (f.root_bitmap.len == 0) &conservative_marker else f.root_bitmap };
+        n += 1;
+        var it: SafepointRows = .{ .bytes = f.safepoint_maps };
+        while (it.next()) |r| : (n += 1) ents[n] = .{ .off = base + r.code_off, .payload = r.payload };
+    }
+    ents[n] = .{ .off = text_size, .payload = &conservative_marker };
+    std.debug.assert(n + 1 == ents.len);
     std.mem.sortUnstable(SmEnt, ents, {}, struct {
         fn less(_: void, a: SmEnt, b: SmEnt) bool {
             return a.off < b.off;
@@ -617,6 +629,57 @@ fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []con
         cursor += e.payload.len;
     }
     return buildSideTable(gpa, rows, blob);
+}
+
+/// The rows of a `FnCode.safepoint_maps`: each row's code offset and its payload, the same
+/// `[u32 n][{u32 sp_off, u32 tag} x n]` shape a `root_bitmap` has.
+pub const SafepointRows = struct {
+    bytes: []const u8,
+
+    pub fn next(it: *SafepointRows) ?struct { code_off: u32, payload: []const u8 } {
+        if (it.bytes.len == 0) return null;
+        const off = std.mem.readInt(u32, it.bytes[0..4], .little);
+        const n = std.mem.readInt(u32, it.bytes[4..8], .little);
+        const len = 4 + 8 * @as(usize, n);
+        const payload = it.bytes[4 .. 4 + len];
+        it.bytes = it.bytes[4 + len ..];
+        return .{ .code_off = off, .payload = payload };
+    }
+
+    /// Whether `bytes` is whole rows, as `next` walks them without bounds checks.
+    pub fn wellFormed(bytes: []const u8) bool {
+        var rest = bytes;
+        while (rest.len != 0) {
+            if (rest.len < 8) return false;
+            const n = std.mem.readInt(u32, rest[4..8], .little);
+            const row_len = 8 + 8 * @as(usize, n);
+            if (rest.len < row_len) return false;
+            rest = rest[row_len..];
+        }
+        return true;
+    }
+};
+
+test "SafepointRows.wellFormed: whole rows pass, a row count past the end fails" {
+    const row = [_]u8{ 4, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expect(SafepointRows.wellFormed(&.{}));
+    try std.testing.expect(SafepointRows.wellFormed(&row));
+    try std.testing.expect(SafepointRows.wellFormed(&(row ++ row)));
+    var bad = row ++ row;
+    bad[20] = 2;
+    try std.testing.expect(!SafepointRows.wellFormed(&bad));
+    try std.testing.expect(!SafepointRows.wellFormed(row[0..6]));
+}
+
+/// The rows of the stack-map table for `fns`: one per fn, one per safepoint row, and the
+/// sentinel.
+pub fn stackMapRows(fns: []const FnCode) usize {
+    var n: usize = fns.len + 1;
+    for (fns) |f| {
+        var it: SafepointRows = .{ .bytes = f.safepoint_maps };
+        while (it.next()) |_| n += 1;
+    }
+    return n;
 }
 
 /// Build the per-type descriptor table (see `Linked.desc_table`): 48 bytes per entry in
@@ -939,7 +1002,7 @@ pub const fncode_magic: u32 = 0x544f4643;
 
 const FnHeader = extern struct {
     magic: u32,
-    version: u32 = 3,
+    version: u32 = 4,
     sym_kind: u8,
     _pad: [3]u8 = .{ 0, 0, 0 },
     sym_name_len: u32,
@@ -949,6 +1012,7 @@ const FnHeader = extern struct {
     names_len: u32,
     lits_len: u32,
     root_bitmap_len: u32,
+    safepoint_maps_len: u32,
     line_count: u32,
 };
 
@@ -989,7 +1053,7 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
 
     const total = @sizeOf(FnHeader) + fc.sym.name.len + fc.code.len +
         fc.relocs.len * @sizeOf(RelocRec) + names_len +
-        fc.literals.len * @sizeOf(LitRec) + lits_len + fc.root_bitmap.len +
+        fc.literals.len * @sizeOf(LitRec) + lits_len + fc.root_bitmap.len + fc.safepoint_maps.len +
         fc.lines.len * @sizeOf(LineRow);
     const buf = try gpa.alloc(u8, total);
     errdefer gpa.free(buf);
@@ -1004,6 +1068,7 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
         .names_len = @intCast(names_len),
         .lits_len = @intCast(lits_len),
         .root_bitmap_len = @intCast(fc.root_bitmap.len),
+        .safepoint_maps_len = @intCast(fc.safepoint_maps.len),
         .line_count = @intCast(fc.lines.len),
     };
     @memcpy(buf[0..@sizeOf(FnHeader)], std.mem.asBytes(&hdr));
@@ -1079,6 +1144,8 @@ pub fn pack(gpa: std.mem.Allocator, fc: FnCode) ![]u8 {
     // Root bitmap trails the lits pool (a raw byte blob, no records).
     @memcpy(buf[off .. off + fc.root_bitmap.len], fc.root_bitmap);
     off += fc.root_bitmap.len;
+    @memcpy(buf[off .. off + fc.safepoint_maps.len], fc.safepoint_maps);
+    off += fc.safepoint_maps.len;
     const line_bytes = std.mem.sliceAsBytes(fc.lines);
     @memcpy(buf[off .. off + line_bytes.len], line_bytes);
     off += line_bytes.len;
@@ -1095,14 +1162,16 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
     if (bytes.len < @sizeOf(FnHeader)) return null;
     var hdr: FnHeader = undefined;
     @memcpy(std.mem.asBytes(&hdr), bytes[0..@sizeOf(FnHeader)]);
-    if (hdr.magic != fncode_magic or hdr.version != 3) return null;
+    if (hdr.magic != fncode_magic or hdr.version != 4) return null;
     if (hdr.sym_kind > @intFromEnum(SymKind.import)) return null;
 
     const need = @sizeOf(FnHeader) + @as(usize, hdr.sym_name_len) + @as(usize, hdr.code_len) +
         @as(usize, hdr.reloc_count) * @sizeOf(RelocRec) + @as(usize, hdr.names_len) +
         @as(usize, hdr.lit_count) * @sizeOf(LitRec) + @as(usize, hdr.lits_len) +
-        @as(usize, hdr.root_bitmap_len) + @as(usize, hdr.line_count) * @sizeOf(LineRow);
+        @as(usize, hdr.root_bitmap_len) + @as(usize, hdr.safepoint_maps_len) + @as(usize, hdr.line_count) * @sizeOf(LineRow);
     if (bytes.len != need) return null;
+    const maps_end = need - @as(usize, hdr.line_count) * @sizeOf(LineRow);
+    if (!SafepointRows.wellFormed(bytes[maps_end - hdr.safepoint_maps_len .. maps_end])) return null;
 
     var off: usize = @sizeOf(FnHeader);
 
@@ -1179,6 +1248,9 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
     const root_bitmap = try gpa.dupe(u8, bytes[off .. off + hdr.root_bitmap_len]);
     errdefer gpa.free(root_bitmap);
     off += hdr.root_bitmap_len;
+    const safepoint_maps = try gpa.dupe(u8, bytes[off .. off + hdr.safepoint_maps_len]);
+    errdefer gpa.free(safepoint_maps);
+    off += hdr.safepoint_maps_len;
 
     const lines = try gpa.alloc(LineRow, hdr.line_count);
     errdefer gpa.free(lines);
@@ -1191,6 +1263,7 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8) !?FnCode {
         .relocs = relocs,
         .literals = literals,
         .root_bitmap = root_bitmap,
+        .safepoint_maps = safepoint_maps,
         .lines = lines,
     };
 }

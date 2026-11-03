@@ -27,6 +27,9 @@ pub const HandBuiltin = struct {
     /// program that carries this builtin also carries its callees. Each name must be a
     /// `hand_builtins` row.
     static_call_deps: []const []const u8 = &.{},
+    /// Callee-saved registers the body overwrites without restoring, which a caller that
+    /// keeps values in registers across the call must treat as clobbered.
+    callee_saved_clobbers: []const u32 = &.{},
 };
 
 /// The FIXED append order of the hand-emitted builtins. Load-bearing: it makes the
@@ -38,7 +41,9 @@ pub const hand_builtins = [_]HandBuiltin{
     .{ .name = "gc_span_count", .lower = plain(gc.lowerGcSpanCount) },
     .{ .name = "gc_collect", .lower = plain(gc.lowerGcCollect), .static_call_deps = &.{ "ga_trace", "mp_trace" } },
     .{ .name = "gc_stats", .lower = plain(gc.lowerGcStats) },
-    .{ .name = "gc_mark", .lower = plain(gc.lowerGcMark) },
+    // gc_mark sets the collector's push descriptor in x24 and does not restore it. Fixing
+    // the body would change every binary with a trace fn; the runtime moves to toy (#209).
+    .{ .name = "gc_mark", .lower = plain(gc.lowerGcMark), .callee_saved_clobbers = &.{24} },
     .{ .name = "gc_mark_leaf", .lower = plain(gc.lowerGcMarkLeaf) },
     .{ .name = "ga_trace", .lower = plain(trace.lowerGaTrace), .static_call_deps = &.{"gc_mark_leaf"} },
     .{ .name = "mp_trace", .lower = plain(trace.lowerMpTrace), .static_call_deps = &.{"gc_mark_leaf"} },
@@ -47,6 +52,27 @@ pub const hand_builtins = [_]HandBuiltin{
     .{ .name = "__str_concat", .lower = plain(str.lowerStrConcat), .static_call_deps = &.{"gc_alloc"} },
     .{ .name = "__uint_to_str", .lower = plain(str.lowerUintToStr), .static_call_deps = &.{"gc_alloc"} },
 };
+
+fn row(name: []const u8) ?*const HandBuiltin {
+    for (&hand_builtins) |*hb| if (std.mem.eql(u8, hb.name, name)) return hb;
+    return null;
+}
+
+/// Whether a call to the builtin `name` may run the collector: it is `gc_collect`, or one of
+/// its static calls may. A name with no row is assumed to.
+pub fn mayCollect(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "gc_collect")) return true;
+    const hb = row(name) orelse return true;
+    for (hb.static_call_deps) |dep| if (mayCollect(dep)) return true;
+    return false;
+}
+
+/// The callee-saved registers a call to the builtin `name` overwrites (see
+/// `HandBuiltin.callee_saved_clobbers`).
+pub fn calleeSavedClobbers(name: []const u8) []const u32 {
+    const hb = row(name) orelse return &.{};
+    return hb.callee_saved_clobbers;
+}
 
 /// A `HandBuiltin.lower` for a body that reads no `Config`.
 fn plain(comptime f: fn (std.mem.Allocator) error{OutOfMemory}!Link.FnCode) *const fn (std.mem.Allocator, Config) error{OutOfMemory}!Link.FnCode {
@@ -114,6 +140,69 @@ test "hand_builtins static_call_deps name real rows; gc_alloc pulls gc_collect" 
     const mpt = hand_builtins[comptime handBuiltinIndex("mp_trace")].static_call_deps;
     try std.testing.expectEqual(@as(usize, 1), mpt.len);
     try std.testing.expectEqualStrings("gc_mark_leaf", mpt[0]);
+}
+
+test "static_call_deps lists every builtin a body calls, so mayCollect sees each path to gc_collect" {
+    const gpa = std.testing.allocator;
+    for (hand_builtins) |hb| for ([_]Config{ .{}, .{ .gc_stress = true } }) |cfg| {
+        var fc = try hb.lower(gpa, cfg);
+        defer fc.deinit(gpa);
+        for (fc.relocs) |r| {
+            if (r.kind != .call26 or r.target != .func) continue;
+            for (hb.static_call_deps) |dep| {
+                if (std.mem.eql(u8, dep, r.target.func.name)) break;
+            } else {
+                std.debug.print("{s} calls {s}, missing from its static_call_deps\n", .{ hb.name, r.target.func.name });
+                return error.UnlistedCall;
+            }
+        }
+    };
+}
+
+test "mayCollect follows static calls to gc_collect; panic and the markers never collect" {
+    try std.testing.expect(mayCollect("gc_alloc"));
+    try std.testing.expect(mayCollect("__str_concat"));
+    try std.testing.expect(mayCollect("gc_collect"));
+    try std.testing.expect(mayCollect("no_such_builtin"));
+    try std.testing.expect(!mayCollect("panic"));
+    try std.testing.expect(!mayCollect("gc_mark"));
+    try std.testing.expect(!mayCollect("gc_mark_leaf"));
+    try std.testing.expect(!mayCollect("gc_span_count"));
+    try std.testing.expectEqualSlices(u32, &.{24}, calleeSavedClobbers("gc_mark"));
+    try std.testing.expectEqual(@as(usize, 0), calleeSavedClobbers("gc_alloc").len);
+}
+
+test "callee_saved_clobbers names every callee-saved register a returning builtin writes and does not save" {
+    const gpa = std.testing.allocator;
+    for (hand_builtins) |hb| {
+        // panic never returns; the collector's own helpers run only inside gc_collect,
+        // which saves x19-x28 for its caller.
+        if (std.mem.eql(u8, hb.name, "panic")) continue;
+        var fc = try hb.lower(gpa, .{});
+        defer fc.deinit(gpa);
+        const words = std.mem.bytesAsSlice(u32, fc.code);
+        var written: u32 = 0;
+        var saved: u32 = 0;
+        for (words) |w| {
+            const rt = w & 0x1F;
+            // str xN, [sp, #imm] (unsigned offset, base sp): a save of rt.
+            if (w & 0xFFC003E0 == 0xF90003E0) saved |= bitOf(rt);
+            // Any instruction class whose destination field is rt and that writes a GPR:
+            // data processing (immediate and register) and loads.
+            const op0 = (w >> 25) & 0xF;
+            const writes = op0 == 0b1000 or op0 == 0b1001 or op0 == 0b0101 or op0 == 0b1101 or
+                (op0 & 0b0101 == 0b0100 and (w >> 22) & 1 == 1);
+            if (writes) written |= bitOf(rt);
+        }
+        var listed: u32 = 0;
+        for (hb.callee_saved_clobbers) |r| listed |= bitOf(r);
+        const callee_saved: u32 = 0x1FF80000; // x19-x28
+        try std.testing.expectEqual(written & ~saved & callee_saved, listed);
+    }
+}
+
+fn bitOf(r: u32) u32 {
+    return @as(u32, 1) << @intCast(r);
 }
 
 test "libsystem_imports lists every symbol a hand builtin imports" {

@@ -1,7 +1,13 @@
 //! The MIR backend (`--backend=mir`): `Ir.Function` -> `Link.FnCode` through instruction
-//! selection, the spill-every-vreg allocator and the encoder (see `mir/Mir.zig` for the
-//! design). A fn the selector cannot handle yet comes back as a `Fallback`, and the caller
-//! lowers it with the spill backend (`CodegenIr`), so a build mixes both per fn.
+//! selection, a register allocator and the encoder (see `mir/Mir.zig` for the design). A
+//! fn the selector cannot handle yet comes back as a `Fallback`, and the caller lowers it
+//! with the spill backend (`CodegenIr`), so a build mixes both per fn.
+//!
+//! STACK MAPS. Under linear scan the fn's `root_bitmap` names only its memory roots (the
+//! reference words of its IR slots and aggregate values), and `safepoint_maps` adds one
+//! row per safepoint call whose roots differ from the row before it: the memory roots plus
+//! the spill slots that hold a reference live across that call. The collector looks a
+//! frame up by its return address, so it lands on the row of the call the frame is in.
 
 const std = @import("std");
 const Ir = @import("../ir/Ir.zig");
@@ -9,7 +15,7 @@ const FrameLayout = @import("frame/FrameLayout.zig");
 const Link = @import("../link/Link.zig");
 const types = @import("../types.zig");
 const Mir = @import("mir/Mir.zig");
-const SpillAll = @import("mir/SpillAll.zig").SpillAll;
+const LinearScan = @import("mir/LinearScan.zig");
 const Target = @import("mir/aarch64/Target.zig");
 const Isel = @import("mir/aarch64/Isel.zig");
 const Emit = @import("mir/aarch64/Emit.zig");
@@ -30,7 +36,7 @@ pub fn lowerMir(
     enum_layouts: []const types.EnumLayout,
     is_entry: bool,
 ) error{OutOfMemory}!Result {
-    var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, layouts, enum_layouts) catch |e| switch (e) {
+    var frame: Mir.Frame = .{ .layout = FrameLayout.computeCells(gpa, func, layouts, enum_layouts, .aggregates) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FrameTooLarge, error.ParamOffsetTooLarge => return .{ .fallback = .too_large },
     } };
@@ -65,7 +71,11 @@ pub fn lowerMir(
         std.debug.assert(mf.callRegsAgree(~Target.Inst.caller_saved));
     }
 
-    try SpillAll(Target).run(gpa, &mf, &frame);
+    var maps = LinearScan.LinearScan(Target).run(gpa, &mf, &frame) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Unallocatable => return .{ .fallback = .regalloc },
+    };
+    defer maps.deinit(gpa);
     std.debug.assert(mf.allPhysical());
     if (frame.size() > FrameLayout.MAX_FRAME) return .{ .fallback = .too_large };
 
@@ -78,6 +88,8 @@ pub fn lowerMir(
 
     const root_bitmap = try FrameLayout.encodeRoots(gpa, roots);
     errdefer gpa.free(root_bitmap);
+    const safepoint_maps = try encodeSafepoints(gpa, roots, maps.maps, out.safepoints.items, &frame);
+    errdefer gpa.free(safepoint_maps);
     const name = try gpa.dupe(u8, func.name.name);
     errdefer gpa.free(name);
     const code = try out.code.toOwnedSlice(gpa);
@@ -95,13 +107,51 @@ pub fn lowerMir(
         .relocs = try out.relocs.toOwnedSlice(gpa),
         .literals = owned_literals,
         .root_bitmap = root_bitmap,
+        .safepoint_maps = safepoint_maps,
         .lines = lines,
     } };
 }
 
+/// The `FnCode.safepoint_maps` rows: per safepoint call at `offs[i]`, the memory roots plus
+/// `maps[i]`'s slots, as `[u32 code_off][u32 n][{u32 sp_off, u32 tag} x n]`. A row equal to
+/// the one before it (the fn-start row of memory roots, first) is left out: the collector
+/// takes the last row at or before a frame's call, which then has the same roots.
+fn encodeSafepoints(
+    gpa: std.mem.Allocator,
+    roots: []const FrameLayout.Root,
+    maps: []const []const LinearScan.Root,
+    offs: []const u32,
+    frame: *const Mir.Frame,
+) error{OutOfMemory}![]u8 {
+    std.debug.assert(maps.len == 0 or maps.len == offs.len);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var row: std.ArrayList(FrameLayout.Root) = .empty;
+    defer row.deinit(gpa);
+    var prev: []const LinearScan.Root = &.{};
+    for (maps, offs) |m, off| {
+        if (std.mem.eql(u8, std.mem.sliceAsBytes(m), std.mem.sliceAsBytes(prev))) continue;
+        prev = m;
+        row.clearRetainingCapacity();
+        try row.appendSlice(gpa, roots);
+        for (m) |r| try row.append(gpa, .{ .off = frame.spOffset(.{ .spill = r.spill }), .tag = r.tag });
+        const payload = try FrameLayout.encodeRoots(gpa, row.items);
+        defer gpa.free(payload);
+        var w: [4]u8 = undefined;
+        std.mem.writeInt(u32, &w, off, .little);
+        try out.appendSlice(gpa, &w);
+        try out.appendSlice(gpa, payload);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 comptime {
     _ = Mir;
-    _ = @import("mir/SpillAll.zig");
+    _ = @import("mir/Liveness.zig");
+    _ = @import("mir/GcFacts.zig");
+    _ = @import("mir/Interval.zig");
+    _ = @import("mir/Moves.zig");
+    _ = @import("mir/LinearScan.zig");
     _ = Target.Inst;
     _ = Isel;
     _ = Emit;
@@ -154,7 +204,7 @@ test "mir: a fn lowers through MIR with the x29 frame, its params stored to thei
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
-    var fl = try FrameLayout.compute(gpa, &func, &.{}, &.{});
+    var fl = try FrameLayout.computeCells(gpa, &func, &.{}, &.{}, .aggregates);
     defer fl.deinit(gpa);
 
     var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
@@ -166,16 +216,89 @@ test "mir: a fn lowers through MIR with the x29 frame, its params stored to thei
     try testing.expectEqual(Aarch64.ret, wordsOf(fc)[wordsOf(fc).len - 1]);
     try testing.expect(hasWord(fc, Aarch64.strRegUoff(0, Aarch64.SP, fl.slot_off[0])));
     try testing.expect(hasWord(fc, Aarch64.strRegUoff(1, Aarch64.SP, fl.slot_off[1])));
-    // The add reads both values from their cells into scratch and stores the sum to its own.
-    try testing.expect(hasWord(fc, Aarch64.addReg(11, 9, 10)));
-    try testing.expect(hasWord(fc, Aarch64.strRegUoff(11, Aarch64.SP, fl.value_off[4])));
-    // The result reaches x0 before the epilogue.
-    try testing.expect(hasWord(fc, Aarch64.movReg(0, 9)));
-    try testing.expectEqual(@as(usize, 3), fc.lines.len);
     try testing.expectEqual(@as(u32, 0), fc.lines[0].line);
-    try testing.expectEqual(@as(u32, 2), fc.lines[2].line);
-    // The stack map is the spill backend's: no reference here, so an empty count.
+    try testing.expectEqual(@as(u32, 2), fc.lines[fc.lines.len - 1].line);
+}
+
+test "mir: linear scan keeps the values in registers: no value cells, the sum straight into x0" {
+    const gpa = testing.allocator;
+    var func = try addFn(gpa);
+    defer func.deinit(gpa);
+    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
+    try testing.expect(r == .code);
+    defer r.code.deinit(gpa);
+    const fc = r.code;
+    // Two param slots only: 16 bytes, where the spill backend also gives the five values a cell.
+    try testing.expect(hasWord(fc, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 16)));
+    try testing.expect(hasWord(fc, Aarch64.addReg(0, 10, 11)));
+    // prologue (3) + 2 param stores + 2 slot addresses and loads + add + epilogue (3)
+    try testing.expect(wordsOf(fc).len <= 13);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, fc.root_bitmap);
+    try testing.expectEqual(@as(usize, 0), fc.safepoint_maps.len);
+}
+
+/// `fn f(p: rawptr) -> rawptr { g(); ret p }` with `p` loaded into a value before the
+/// call: a reference live across a safepoint.
+fn refAcrossCallFn(gpa: std.mem.Allocator, callee: Ir.SymName) !Ir.Function {
+    const values = try gpa.alloc(Ir.ValueDef, 2);
+    values[0] = .{ .type = Type.int };
+    values[1] = .{ .type = Type.rawptr };
+    const slots = try gpa.alloc(Ir.Slot, 1);
+    slots[0] = .{ .type = Type.rawptr };
+    const instrs = try gpa.alloc(Ir.Instr, 3);
+    instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
+    instrs[1] = .{ .result = 1, .op = .{ .load = .{ .addr = 0, .ty = Type.rawptr } } };
+    instrs[2] = .{ .result = Ir.none_value, .op = .{ .call = .{
+        .callee = callee,
+        .args = try gpa.alloc(Ir.Operand, 0),
+        .ret_slot = Ir.none_slot,
+    } } };
+    const blocks = try gpa.alloc(Ir.Block, 1);
+    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = instrs, .term = .{ .ret = .{ .value = 1 } } };
+    const params = try gpa.alloc(Ir.SlotId, 1);
+    params[0] = 0;
+    return .{
+        .name = .{ .kind = .user_fn, .name = "f" },
+        .params = params,
+        .ret_type = Type.rawptr,
+        .slots = slots,
+        .values = values,
+        .blocks = blocks,
+        .entry = 0,
+        .exit = 0,
+    };
+}
+
+test "mir: a reference live across a safepoint gets a stack-map row naming its spill slot" {
+    const gpa = testing.allocator;
+    var func = try refAcrossCallFn(gpa, .{ .kind = .user_fn, .name = "g" });
+    defer func.deinit(gpa);
+    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
+    try testing.expect(r == .code);
+    defer r.code.deinit(gpa);
+    const fc = r.code;
+    // The fn-start row: the rawptr param slot at sp+0.
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, fc.root_bitmap);
+    var rows: Link.SafepointRows = .{ .bytes = fc.safepoint_maps };
+    const row = rows.next().?;
+    try testing.expect(rows.next() == null);
+    // The row sits on the bl, and names the param slot and the value's spill slot after it.
+    try testing.expectEqual(Aarch64.bl(0), wordsOf(fc)[row.code_off / 4]);
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, row.payload[0..4], .little));
+    try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, row.payload[12..16], .little));
+}
+
+test "mir: a call to a builtin that never collects is no safepoint and keeps the reference in a register" {
+    const gpa = testing.allocator;
+    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "gc_span_count" });
+    defer func.deinit(gpa);
+    var r = try lowerMir(gpa, &func, &.{}, &.{}, false);
+    try testing.expect(r == .code);
+    defer r.code.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), r.code.safepoint_maps.len);
+    // Only the param slot: no spill slot, but x19 saved below x29.
+    try testing.expect(hasWord(r.code, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 32)));
+    try testing.expect(hasWord(r.code, Aarch64.unscaledOff(.x, false, 19, Aarch64.FP, -8)));
 }
 
 test "mir: a shape the selector does not cover falls back with its reason" {
