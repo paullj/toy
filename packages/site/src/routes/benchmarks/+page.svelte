@@ -16,6 +16,7 @@
 		series,
 		summary,
 		trend,
+		withLatestToy,
 		type MetricKey
 	} from '$lib/bench';
 
@@ -50,7 +51,8 @@
 	let peerMetricKey = $state<MetricKey>('wall_median_s');
 	const peerMetric = $derived(PEER_METRICS.find((m) => m.key === peerMetricKey)!);
 	let peerLog = $state(false);
-	const peerRows = $derived(data.peers ? peerCharts(data.peers, peerMetricKey) : []);
+	const latest = $derived(data.peers ? withLatestToy(data.peers, data.records) : undefined);
+	const peerRows = $derived(latest ? peerCharts(latest.run, peerMetricKey) : []);
 
 	// Lower is better for every metric, so a rise is the regression colour.
 	const tone = (pct: number | undefined) => (pct === undefined || Math.abs(pct) < 0.05 ? '' : pct > 0 ? 'worse' : 'better');
@@ -184,13 +186,14 @@
 		</div>
 	{/if}
 
-	{#if data.peers}
+	{#if data.peers && latest}
 		{@const run = data.peers}
 		<section data-testid="peers">
 			<h2 class="section">Against other languages</h2>
 			<p class="caveat note" role="note">
 				Take these with a pinch of salt. They are a rough indication from one run of the suite on one machine, not a
-				ranking: each program is small and written by us.
+				ranking: each program is small and written by us. Toy's bars track the latest bench record on
+				<code class="code">main</code>, so they can come from a later session than the other languages.
 			</p>
 			<p class="note">
 				The same algorithm in each language, single-threaded, standard library only, each printing the same checksum. Toy
@@ -200,11 +203,18 @@
 			<dl class="peer-meta text-[0.75rem]" data-testid="peers-meta">
 				<dt>Machine</dt>
 				<dd>{describeMachine(run.machine)}, {run.machine.power}, load {run.machine.load_avg_1m}</dd>
-				<dt>Date</dt>
+				<dt>Peer run</dt>
 				<dd>{run.date.slice(0, 10)}, median of {run.runs} runs</dd>
-				<dt>Toy commit</dt>
-				<dd>
-					<a class="link font-mono" href="{REPO_URL}/commit/{run.toy_commit}">{run.toy_commit.slice(0, 7)}</a>{run.toy_dirty ? ' (dirty tree)' : ''}
+				<dt>Toy bars</dt>
+				<dd data-testid="peers-toy">
+					{#if latest.toy}
+						<a class="link font-mono" href="{REPO_URL}/commit/{latest.toy.sha}">{latest.toy.sha.slice(0, 7)}</a>, {latest.toy.date}, latest
+						<code class="code">main</code> record{#if latest.fallback.length}; {latest.fallback.join(', ')} from the peer run's
+							<a class="link font-mono" href="{REPO_URL}/commit/{run.toy_commit}">{run.toy_commit.slice(0, 7)}</a>{run.toy_dirty ? ' (dirty tree)' : ''}{/if}
+					{:else}
+						<a class="link font-mono" href="{REPO_URL}/commit/{run.toy_commit}">{run.toy_commit.slice(0, 7)}</a>{run.toy_dirty ? ' (dirty tree)' : ''},
+						{run.date.slice(0, 10)}, from the peer run (no bench record on this machine)
+					{/if}
 				</dd>
 				<dt>Toolchains</dt>
 				<dd>

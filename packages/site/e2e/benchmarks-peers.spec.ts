@@ -18,13 +18,27 @@ test('the peer view sits under the history with its caveat and run details', asy
 	const meta = page.getByTestId('peers-meta');
 	await expect(meta).toContainText('Apple M2 Pro');
 	await expect(meta).toContainText(run.date.slice(0, 10));
-	await expect(meta.getByRole('link', { name: run.toy_commit.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${run.toy_commit}`);
 	await expect(meta).toContainText(run.toolchains.go.version);
 	const below = await page.evaluate(() => {
 		const last = [...document.querySelectorAll('figure[data-bench]')].at(-1)!;
 		return !!(last.compareDocumentPosition(document.querySelector('[data-testid="peers"]')!) & Node.DOCUMENT_POSITION_FOLLOWING);
 	});
 	expect(below).toBe(true);
+});
+
+test('toy bars come from the newest main record on the peers machine, others from the peer run', async ({ page }) => {
+	const toy = page.getByTestId('peers-toy');
+	const newest = 'bcbe70013688a3c739bec83ef757c70871fe5032';
+	await expect(toy.getByRole('link', { name: newest.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${newest}`);
+	await expect(toy).toContainText('2026-11-03');
+	// The history fixture has no binary_trees, so that bar falls back to the peer run's toy row.
+	await expect(toy).toContainText('binary_trees');
+	await expect(toy.getByRole('link', { name: run.toy_commit.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${run.toy_commit}`);
+	const chart = page.locator('figure[data-peer="loops"]');
+	await chart.scrollIntoViewIfNeeded();
+	const box = (await chart.locator('svg .lc-bar').first().boundingBox())!;
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await expect(page.locator('.peer-tip')).toContainText('595.0 ms');
 });
 
 test('every benchmark gets one bar chart with a bar per language and source links', async ({ page }) => {
@@ -63,7 +77,7 @@ test('hovering a bar names its toolchain', async ({ page }) => {
 
 test('in the memory view, a peer that uses less reads as less memory, not faster', async ({ page }) => {
 	await page.getByRole('group', { name: 'Peer metric' }).getByRole('button', { name: 'Peak memory' }).click();
-	const chart = page.locator('figure[data-peer="loops"]');
+	const chart = page.locator('figure[data-peer="alloc"]');
 	await chart.scrollIntoViewIfNeeded();
 	const box = (await chart.locator('svg .lc-bar').nth(1).boundingBox())!;
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);

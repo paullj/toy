@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, type BenchRecord } from './bench';
+import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, withLatestToy, type BenchRecord } from './bench';
 
 const machine = (id: string) => ({
 	id,
@@ -210,6 +210,55 @@ describe('peerCharts', () => {
 
 	it('gives each bar its ratio to toy', () => {
 		expect(peerCharts(run, 'wall_median_s')[0].bars.map((b) => b.vsToy)).toEqual([1, 0.125, 5]);
+	});
+});
+
+describe('withLatestToy', () => {
+	const run = parsePeers(
+		peerRun([
+			{ name: 'loops', lang: 'toy', wall: 0.8 },
+			{ name: 'loops', lang: 'c', wall: 0.1 },
+			{ name: 'alloc', lang: 'toy', wall: 2 },
+			{ name: 'alloc', lang: 'c', wall: 0.2 }
+		])
+	);
+	const toyBars = (r: ReturnType<typeof withLatestToy>) =>
+		r.run.results.filter((x) => x.lang === 'toy').map((x) => [x.name, x.metrics.instructions]);
+
+	it('takes each toy row from the newest commit on the same machine, not the last line', () => {
+		const records = lines(
+			rec('new', 'loops', 30, { date: '2026-11-03T00:00:00Z' }),
+			rec('old', 'loops', 10, { date: '2026-11-01T00:00:00Z' }),
+			rec('new', 'alloc', 40, { date: '2026-11-03T00:00:00Z' })
+		);
+		const latest = withLatestToy(run, records);
+		expect(toyBars(latest)).toEqual([
+			['loops', 30],
+			['alloc', 40]
+		]);
+		expect(latest.toy).toEqual({ sha: 'new', date: '2026-11-01' });
+		expect(latest.fallback).toEqual([]);
+		expect(latest.run.results.filter((x) => x.lang === 'c').map((x) => x.metrics.wall_median_s)).toEqual([0.1, 0.2]);
+	});
+
+	it('ignores records from other machines', () => {
+		const latest = withLatestToy(run, lines(rec('a', 'loops', 30, { id: 'other' })));
+		expect(toyBars(latest)).toEqual([
+			['loops', 1],
+			['alloc', 1]
+		]);
+		expect(latest.toy).toBeUndefined();
+		expect(latest.fallback).toEqual(['loops', 'alloc']);
+	});
+
+	it('keeps the peers run toy row for a benchmark the history lacks', () => {
+		const latest = withLatestToy(run, lines(rec('a', 'loops', 30)));
+		expect(toyBars(latest)).toEqual([
+			['loops', 30],
+			['alloc', 1]
+		]);
+		expect(latest.run.results.find((x) => x.name === 'alloc' && x.lang === 'toy')!.metrics.wall_median_s).toBe(2);
+		expect(latest.fallback).toEqual(['alloc']);
 	});
 });
 

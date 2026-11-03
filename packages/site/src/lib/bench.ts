@@ -34,6 +34,8 @@ export type BenchRecord = {
 	kind: 'runtime' | 'compiler';
 	runs: number;
 	metrics: Metrics;
+	checksum?: string | null;
+	checksum_ok?: boolean;
 	machine: Machine;
 };
 
@@ -211,6 +213,40 @@ export function parsePeers(text: string): PeerRun {
 		}
 	});
 	return run;
+}
+
+export type LatestToy = {
+	run: PeerRun;
+	/** The newest commit among the history records that replaced toy rows. */
+	toy: { sha: string; date: string } | undefined;
+	/** Benchmarks whose toy bar still comes from the peers run. */
+	fallback: string[];
+};
+
+/**
+ * Swaps each toy row for the newest main record of the same benchmark on the peers run's
+ * machine, so every `mise run bench` refreshes the comparison without rerunning the peers.
+ */
+export function withLatestToy(run: PeerRun, records: BenchRecord[]): LatestToy {
+	const mine = records.filter((r) => r.machine.id === run.machine.id);
+	let toy: Point | undefined;
+	const fallback: string[] = [];
+	const results = run.results.map((r) => {
+		if (r.lang !== 'toy') return r;
+		const latest = series(mine, r.name, 'wall_median_s').at(-1);
+		if (!latest) {
+			fallback.push(r.name);
+			return r;
+		}
+		if (!toy || latest.index > toy.index) toy = latest;
+		const rec = latest.record;
+		return { ...r, metrics: rec.metrics, checksum: rec.checksum ?? r.checksum, checksum_ok: rec.checksum_ok ?? true };
+	});
+	return {
+		run: { ...run, results },
+		toy: toy && { sha: toy.sha, date: (toy.record.run_date ?? toy.record.commit_date).slice(0, 10) },
+		fallback
+	};
 }
 
 export type PeerBar = { lang: string; value: number; vsToy: number | undefined; result: PeerResult };
