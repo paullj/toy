@@ -92,7 +92,7 @@ fn mergeChains(gpa: std.mem.Allocator, func: *Ir.Function) error{OutOfMemory}!bo
     @memset(preds, 0);
     for (func.blocks) |b| {
         var succ: [2]Ir.BlockId = undefined;
-        for (succ[0..successors(b.term, &succ)]) |sb| if (sb < n) {
+        for (succ[0..walk.successors(b.term, &succ)]) |sb| if (sb < n) {
             preds[sb] += 1;
         };
     }
@@ -170,39 +170,9 @@ fn constBool(value_const: []const ?bool, v: Ir.ValueId) ?bool {
     return value_const[v];
 }
 
-/// The successor block-id slots of a terminator, yielded as `*Ir.BlockId` in fixed
-/// order. The single terminator switch that both the reachability read (`successors`)
-/// and the compaction remap write go through — the block-id analog of walk.zig's
-/// value-use spine (which deliberately excludes block ids), so a terminator's
-/// successor handling lives in one place, not two switches kept in lockstep.
-fn eachSuccessor(term: *Ir.Terminator, ctx: anytype, comptime each: anytype) void {
-    switch (term.*) {
-        .br => |*br| each(ctx, &br.dest),
-        .cond_br => |*c| {
-            each(ctx, &c.t);
-            each(ctx, &c.f);
-        },
-        .ret, .@"unreachable", .panic => {},
-    }
-}
-
-/// Successor block ids of a terminator, written into `out` (cap 2), returns count.
-fn successors(term: Ir.Terminator, out: *[2]Ir.BlockId) usize {
-    var t = term;
-    const Ctx = struct { out: *[2]Ir.BlockId, n: usize };
-    var ctx = Ctx{ .out = out, .n = 0 };
-    eachSuccessor(&t, &ctx, struct {
-        fn each(c: *Ctx, p: *Ir.BlockId) void {
-            c.out[c.n] = p.*;
-            c.n += 1;
-        }
-    }.each);
-    return ctx.n;
-}
-
 /// Drop blocks unreachable from `func.entry`. Returns true if any were dropped.
 /// Frees dropped blocks' owned slices once, compacts survivors, remaps refs.
-fn elimUnreachable(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{OutOfMemory}!bool {
+pub fn elimUnreachable(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{OutOfMemory}!bool {
     const n = func.blocks.len;
     if (n == 0) return false;
 
@@ -219,7 +189,7 @@ fn elimUnreachable(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats
         for (func.blocks, 0..) |b, i| {
             if (!reachable[i]) continue;
             var succ: [2]Ir.BlockId = undefined;
-            const cnt = successors(b.term, &succ);
+            const cnt = walk.successors(b.term, &succ);
             for (succ[0..cnt]) |s| {
                 if (s < n and !reachable[s]) {
                     reachable[s] = true;
@@ -273,9 +243,9 @@ fn elimUnreachable(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats
 
     // Rewrite surviving terminators' block refs and entry/exit through remap.
     for (func.blocks) |*b| {
-        eachSuccessor(&b.term, remap, struct {
-            fn each(m: []const Ir.BlockId, p: *Ir.BlockId) void {
-                p.* = m[p.*];
+        walk.remapBlockTargets(b, @as([]const Ir.BlockId, remap), struct {
+            fn each(m: []const Ir.BlockId, x: Ir.BlockId) Ir.BlockId {
+                return m[x];
             }
         }.each);
     }

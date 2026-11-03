@@ -242,8 +242,13 @@ test "a capturing lambda passed to Vec.each or to a generic fn that only calls i
     const io = threaded.io();
     try harness.skipUnlessBackend(io);
 
-    const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_each.toy", &.{"-O1"});
+    // Inlining off: a small std callee spliced in (the Vec literal's own allocation) would
+    // bring a `gc_alloc` that is no env or box. The default pipeline still keeps the env in
+    // the frame.
+    const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_each.toy", &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(o1);
+    const o1d = try harness.emitIr(gpa, io, cases_dir ++ "/escape_each.toy", &.{"-O1"});
+    defer gpa.free(o1d);
     const o0 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_each.toy", &.{"-O0"});
     defer gpa.free(o0);
     const Owner = struct { name: []const u8, callee: []const u8 };
@@ -256,8 +261,11 @@ test "a capturing lambda passed to Vec.each or to a generic fn that only calls i
         const body1 = harness.irBody(o1, owner) orelse return error.TestExpectedOwner;
         try std.testing.expect(std.mem.indexOf(u8, body1, "call @gc_alloc") == null);
         var buf: [64]u8 = undefined;
-        try std.testing.expect(std.mem.indexOf(u8, body1, try std.fmt.bufPrint(&buf, ":env${s}$l0", .{owner})) != null);
+        const env = try std.fmt.bufPrint(&buf, ":env${s}$l0", .{owner});
+        try std.testing.expect(std.mem.indexOf(u8, body1, env) != null);
         try std.testing.expect(std.mem.indexOf(u8, body1, o.callee) != null);
+        const body1d = harness.irBody(o1d, owner) orelse return error.TestExpectedOwner;
+        try std.testing.expect(std.mem.indexOf(u8, body1d, env) != null);
         // -O0 keeps the box and the env cell, so the check can fail.
         const body0 = harness.irBody(o0, owner) orelse return error.TestExpectedOwner;
         try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body0, "call @gc_alloc"));
@@ -271,8 +279,11 @@ test "every std method that takes a closure keeps its caller's env in the frame 
     const io = threaded.io();
     try harness.skipUnlessBackend(io);
 
-    const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_std_methods.toy", &.{"-O1"});
+    // Inlining off, as above: only an env or box allocation may count.
+    const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_std_methods.toy", &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(o1);
+    const o1d = try harness.emitIr(gpa, io, cases_dir ++ "/escape_std_methods.toy", &.{"-O1"});
+    defer gpa.free(o1d);
     const o0 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_std_methods.toy", &.{"-O0"});
     defer gpa.free(o0);
     const owners = [_][]const u8{
@@ -288,7 +299,10 @@ test "every std method that takes a closure keeps its caller's env in the frame 
             return error.TestUnexpectedAlloc;
         }
         var buf: [96]u8 = undefined;
-        try std.testing.expect(std.mem.indexOf(u8, body1, try std.fmt.bufPrint(&buf, ":env${s}$l0", .{owner})) != null);
+        const env = try std.fmt.bufPrint(&buf, ":env${s}$l0", .{owner});
+        try std.testing.expect(std.mem.indexOf(u8, body1, env) != null);
+        const body1d = harness.irBody(o1d, owner) orelse return error.TestExpectedOwner;
+        try std.testing.expect(std.mem.indexOf(u8, body1d, env) != null);
         const body0 = harness.irBody(o0, owner) orelse return error.TestExpectedOwner;
         try std.testing.expect(std.mem.count(u8, body0, "call @gc_alloc") >= 2);
     }

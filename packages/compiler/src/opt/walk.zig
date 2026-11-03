@@ -203,6 +203,22 @@ pub fn remapBlockTargets(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(c
     }
 }
 
+/// The distinct successors of a terminator, written into `out`; returns how many.
+pub fn successors(term: Ir.Terminator, out: *[2]Ir.BlockId) usize {
+    switch (term) {
+        .br => |br| {
+            out[0] = br.dest;
+            return 1;
+        },
+        .cond_br => |c| {
+            out[0] = c.t;
+            out[1] = c.f;
+            return if (c.t == c.f) 1 else 2;
+        },
+        .ret, .@"unreachable", .panic => return 0,
+    }
+}
+
 /// Rewrite every value-USE site (operands that READ a value) in-place through
 /// `map`, leaving DEFS (instr results, block params) untouched — the mutating
 /// counterpart of `forEachValueUse`. `none_value` is passed through `map` too

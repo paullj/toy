@@ -985,8 +985,8 @@ fn emitExecutable(
         try out.print("opt: rounds={d} ir_instrs={d}->{d} emitted_instrs={d}\n", .{
             s.rounds, s.ir_instrs_before, lp.ir_instrs, lp.emitted_instrs,
         });
-        try out.print("  inlined={d} folded={d} branches={d} blocks={d} dced={d} forwarded={d} values_pruned={d}\n", .{
-            s.calls_inlined, s.consts_folded, s.branches_folded, s.blocks_removed, s.instrs_dced, s.loads_forwarded, s.values_pruned,
+        try out.print("  inlined={d} promoted={d} folded={d} branches={d} blocks={d} dced={d} forwarded={d} values_pruned={d}\n", .{
+            s.calls_inlined, s.slots_promoted, s.consts_folded, s.branches_folded, s.blocks_removed, s.instrs_dced, s.loads_forwarded, s.values_pruned,
         });
         try out.flush();
     }

@@ -443,10 +443,11 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
 /// The profiles debug info is checked under: debug at its own -O0 and at -O1 (`-O` stays
 /// an override), and release, which carries none. Debug -O1
 /// leaves inlining out: an inlined callee's code takes its caller's lines, and the link
-/// drops the callee.
+/// drops the callee. It leaves mem2reg out too: a statement that only writes a local keeps
+/// no code once the local is a value, so its line has no row.
 const debug_cases = [_]struct { name: []const u8, flags: []const []const u8, debug: bool }{
     .{ .name = "debug", .flags = &.{ "--profile", "debug" }, .debug = true },
-    .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1", "--no-opt", "inline" }, .debug = true },
+    .{ .name = "debug-O1", .flags = &.{ "--profile", "debug", "-O", "1", "--no-opt", "inline", "--no-opt", "mem2reg" }, .debug = true },
     .{ .name = "release", .flags = &.{ "--profile", "release" }, .debug = false },
 };
 
