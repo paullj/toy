@@ -1,0 +1,15 @@
+# Bench: TARGET PASS = dce (drop values nothing reads).
+# expect: exit 3
+# `_less` is never read. dce drops the compare in the IR. The backend's peepholes drop
+# only its `cset`: the `cmp` sets flags, so without dce it stays in the binary. `pick`
+# calls itself so the inliner leaves it alone and fold cannot see constant arguments.
+# Metric: dced>0, and -O1 --no-opt=dce emits more aarch64 instrs than -O1.
+fn pick(a: int, b: int) -> int {
+    _less := a < b
+    if a > 100 { return pick(a - 1, b) }
+    return a
+}
+
+fn main() -> int {
+    return pick(3, 4)
+}

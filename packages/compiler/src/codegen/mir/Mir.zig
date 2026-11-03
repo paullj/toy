@@ -2,10 +2,11 @@
 //! only backend, in every profile: debug differs only in skipping the IR passes.
 //!
 //! PIPELINE (per fn): `Ir.Function` -> instruction selection (a target's `Isel`) -> MIR on
-//! virtual registers -> register allocator -> MIR on physical registers -> encoder (a
-//! target's `Emit`) -> `Link.FnCode`. Only the selector and the encoder know the target; the
-//! data model here and the allocators are written against the small interface below, so a
-//! second target (#60) adds a selector, an `Inst` type and an encoder, nothing else.
+//! virtual registers -> the target's peepholes (`Peephole`) -> register allocator -> MIR
+//! on physical registers -> encoder (a target's `Emit`) -> `Link.FnCode`. Only the
+//! selector, the peepholes and the encoder know the target; the data model here and the
+//! allocators are written against the small interface below, so a second target (#60)
+//! adds a selector, an `Inst` type and an encoder (peepholes are optional), nothing else.
 //!
 //! DATA MODEL. A `Function(Inst)` is a list of blocks, each a list of target instructions.
 //! Block 0 is the prologue block (stack-map clearing, the sret save, incoming params); IR

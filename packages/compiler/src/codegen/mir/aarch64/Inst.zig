@@ -17,8 +17,10 @@ op: Op,
 line: u32 = Ir.no_line,
 
 pub const Cond = Aarch64.Cond;
+pub const Shift = Aarch64.Shift;
 
 pub const AluOp = enum { add, adds, sub, mul, sdiv, udiv, @"and", orr, eor, lslv, lsrv, asrv, smulh, umulh };
+pub const ShiftedOp = enum { add, sub };
 pub const UnaryOp = enum { neg, mvn, sxtb, sxth, sxtw, uxtb, uxth, uxtw, asr63 };
 pub const FpAluOp = enum { fadd, fsub, fmul, fdiv };
 /// `scvtf`: int to float, `fcvtzs`: float to int, `fcvt`: between the float widths; the
@@ -50,9 +52,15 @@ pub const Op = union(enum) {
     /// rd = ra - rn * rm.
     msub: struct { rd: Reg, rn: Reg, rm: Reg, ra: Reg },
     add_imm: struct { rd: Reg, rn: Reg, imm: u32 },
+    sub_imm: struct { rd: Reg, rn: Reg, imm: u12 },
+    /// rd = rn op (rm shifted by `amt`).
+    alu_sh: struct { op: ShiftedOp, rd: Reg, rn: Reg, rm: Reg, shift: Shift, amt: u6 },
+    shift_imm: struct { op: Shift, rd: Reg, rn: Reg, amt: u6 },
     unary: struct { op: UnaryOp, rd: Reg, rn: Reg },
     cmp: struct { rn: Reg, rm: Reg },
     cmp_imm: struct { rn: Reg, imm: u12 },
+    /// The flags of `rn + imm`.
+    cmn_imm: struct { rn: Reg, imm: u12 },
     cset: struct { rd: Reg, cond: Cond },
     csel: struct { rd: Reg, rn: Reg, rm: Reg, cond: Cond },
     fp_alu: struct { op: FpAluOp, rd: Reg, rn: Reg, rm: Reg, single: bool },
@@ -84,6 +92,7 @@ pub const Op = union(enum) {
     safepoint_poll,
     b: u32,
     cbnz: struct { rn: Reg, target: u32 },
+    b_cond: struct { cond: Cond, target: u32 },
     /// The epilogue and `ret`.
     ret,
 };
@@ -111,6 +120,7 @@ pub fn branchTarget(inst: Inst) ?u32 {
     return switch (inst.op) {
         .b => |t| t,
         .cbnz => |c| c.target,
+        .b_cond => |c| c.target,
         else => null,
     };
 }
@@ -119,6 +129,7 @@ pub fn setBranchTarget(inst: *Inst, target: u32) void {
     switch (inst.op) {
         .b => |*t| t.* = target,
         .cbnz => |*c| c.target = target,
+        .b_cond => |*c| c.target = target,
         else => unreachable,
     }
 }
@@ -167,6 +178,19 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
             B.add(buf, &n, &o.rn, .use);
             B.add(buf, &n, &o.rd, .def);
         },
+        .sub_imm => |*o| {
+            B.add(buf, &n, &o.rn, .use);
+            B.add(buf, &n, &o.rd, .def);
+        },
+        .alu_sh => |*o| {
+            B.add(buf, &n, &o.rn, .use);
+            B.add(buf, &n, &o.rm, .use);
+            B.add(buf, &n, &o.rd, .def);
+        },
+        .shift_imm => |*o| {
+            B.add(buf, &n, &o.rn, .use);
+            B.add(buf, &n, &o.rd, .def);
+        },
         .unary => |*o| {
             B.add(buf, &n, &o.rn, .use);
             B.add(buf, &n, &o.rd, .def);
@@ -176,6 +200,7 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
             B.add(buf, &n, &o.rm, .use);
         },
         .cmp_imm => |*o| B.add(buf, &n, &o.rn, .use),
+        .cmn_imm => |*o| B.add(buf, &n, &o.rn, .use),
         .cset => |*o| B.add(buf, &n, &o.rd, .def),
         .csel => |*o| {
             B.add(buf, &n, &o.rn, .use);
@@ -218,7 +243,7 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
         },
         .cbnz => |*o| B.add(buf, &n, &o.rn, .use),
         .keep => |*r| B.add(buf, &n, r, .keep),
-        .brk, .safepoint_poll, .b, .ret => {},
+        .brk, .safepoint_poll, .b, .b_cond, .ret => {},
     }
     return buf[0..n];
 }
