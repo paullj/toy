@@ -22,32 +22,29 @@
 //! ALLOCATOR INTERFACE. An allocator is `run(gpa, *Function(Inst), *Frame)`: it rewrites
 //! every virtual register to a physical one, adding spill code, and takes the stack slots it
 //! needs from `Frame.newSpill`. Afterwards no virtual register remains (`allPhysical`). The
-//! target supplies the allocator with its scratch registers per class and with the load and
-//! store instructions for a spill slot (`SpillAll` names the exact declarations). The first
-//! allocator, `SpillAll`, keeps every virtual register in its home slot and loads it into a
-//! scratch register around each instruction: the reference oracle the next ones are checked
-//! against. #200 adds Wimmer-Franz linear scan behind the same `run`, using the liveness the
-//! operands and clobber sets give.
+//! target supplies its registers per class and the instructions that move a value between
+//! registers and slots (`LinearScan` names the exact declarations). The allocator is
+//! `LinearScan`: Wimmer-Franz linear scan with live-range splitting. The spill backend
+//! (`CodegenIr`, `--backend=spill`) is the oracle MIR is checked against (#38).
 //!
-//! SAFEPOINTS AND STACK MAPS. A call is a safepoint: the collector may run inside it and
-//! reads the caller's roots from the frame through the fn's stack map, a list of frame
-//! offsets. Today the map is `FrameLayout.collectRoots`, the same one the spill backend
-//! emits: every IR value's virtual register has that IR value's cell as its home, and
-//! SpillAll stores each def to its home at once, so a live reference is always in the cell
-//! the map names. Virtual registers the selector makes for its own temporaries have no
-//! home and must never be live across a call (`tempsStayLocal` checks it), so no reference
-//! hides in one at a safepoint. For #200, a reference live across a call must sit in a
-//! stack slot at the call (calls clobber every allocatable register for references), and
-//! the allocator reports those slots to build a map per safepoint instead of the per-fn one.
+//! SAFEPOINTS AND STACK MAPS. A call that may reach the collector is a safepoint
+//! (`CallRegs.safepoint`); a call to a runtime builtin that never does is not. The
+//! collector reads the caller's roots from the frame through a stack map, a list of frame
+//! offsets. Under linear scan a reference (`VReg.ref`) live across a safepoint is in its
+//! spill slot there, as if the call clobbered every register for references, and the
+//! allocator reports, per safepoint, the slots that hold one: with the reference words of
+//! the IR slots and aggregate values (memory the map always names) that is the precise
+//! map of that call. Virtual registers the selector makes for its own temporaries
+//! are never live across a call (`tempsStayLocal`), so none holds a reference there.
 //! A loop back edge carries a `safepoint_poll` placeholder where a concurrent collector's
 //! poll goes (#83). It encodes to nothing now.
 //!
 //! FRAME. The frame keeps the x29 chain in every profile (backtraces, the GC walk and
 //! profilers follow it), and `sp` stays fixed after the prologue, so a callee's `x29 + 16`
 //! is the caller's `sp`, which the collector's frame walk relies on. Its fixed part is the
-//! spill backend's `FrameLayout` (outgoing args, slots, IR value cells, sret save); spill
-//! slots follow it. Once #200 keeps values in registers, value cells become spill slots
-//! only for values that need one.
+//! spill backend's `FrameLayout` (outgoing args, slots, value cells, sret save); under
+//! linear scan only aggregate values get a cell. Spill slots follow it, and the
+//! callee-saved registers the allocator used sit at the top, just below the saved x29.
 
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");
@@ -101,10 +98,13 @@ pub fn regBit(r: Reg) RegSet {
 
 pub const VReg = struct {
     class: RegClass,
-    /// The frame cell the register lives in when spilled, fixed by the selector when the
-    /// stack map names it (an IR value's cell). A temporary has none; the allocator gives
-    /// it a spill slot if it needs one.
+    /// Set on an IR value's register, naming that value; a selector temporary has none
+    /// and stays within one block with no call in between (`tempsStayLocal`).
     home: ?FrameRef = null,
+    /// How the collector traces the register's value when it is a GC reference (null
+    /// otherwise). A reference live across a safepoint must be in a stack slot there, and
+    /// the slot joins that safepoint's stack map with this tag.
+    ref: ?FrameLayout.Root.Tag = null,
 };
 
 /// A frame object, resolved to an offset only by the encoder through `Frame`.
@@ -143,14 +143,19 @@ pub const Operand = struct {
     reg: *Reg,
     kind: Kind,
 
-    pub const Kind = enum { use, def };
+    /// `keep`: the value stays live through the instruction, in a register or in its
+    /// slot, but nothing reads it there. An instruction whose operands are all `keep`
+    /// encodes to nothing, and the allocator drops it.
+    pub const Kind = enum { use, def, keep };
 };
 
 pub const max_operands = 4;
 
 /// The fixed physical registers of a call, which its operands do not show: what it reads
 /// (arguments), what it writes (results) and what it may overwrite (a superset of `defs`).
-pub const CallRegs = struct { uses: RegSet, defs: RegSet, clobbers: RegSet };
+/// A safepoint is a call that may reach the collector: no register holds a reference
+/// across it.
+pub const CallRegs = struct { uses: RegSet, defs: RegSet, clobbers: RegSet, safepoint: bool };
 
 /// A fn in MIR form over a target's `Inst`, which provides `operands(*Inst, *[max_operands]
 /// Operand) []Operand` and `callRegs(Inst) ?CallRegs` (null for an instruction that is not
@@ -286,10 +291,14 @@ pub fn Function(comptime Inst: type) type {
     };
 }
 
-/// The frame: the fixed `FrameLayout` part, then the allocator's spill slots, 8 bytes each.
+/// The frame: the fixed `FrameLayout` part, then the allocator's spill slots, 8 bytes each,
+/// then, right below the saved x29/x30, the callee-saved registers the fn writes.
 pub const Frame = struct {
     layout: FrameLayout,
     spills: u32 = 0,
+    /// The callee-saved registers the allocator handed out, which the prologue saves and
+    /// every epilogue restores.
+    saved: RegSet = 0,
 
     pub fn deinit(f: *Frame, gpa: std.mem.Allocator) void {
         f.layout.deinit(gpa);
@@ -303,7 +312,12 @@ pub const Frame = struct {
 
     /// The bytes the prologue opens, 16-aligned.
     pub fn size(f: *const Frame) u64 {
-        return (@as(u64, f.layout.frame) + @as(u64, f.spills) * 8 + 15) / 16 * 16;
+        return (@as(u64, f.layout.frame) + @as(u64, f.spills) * 8 + 15) / 16 * 16 + f.savedBytes();
+    }
+
+    /// The callee-save area at the top of the frame, `[x29 - savedBytes, x29)`, 16-aligned.
+    pub fn savedBytes(f: *const Frame) u32 {
+        return (@as(u32, @popCount(f.saved)) * 8 + 15) / 16 * 16;
     }
 
     /// The sp-relative offset of a frame object. `incoming` is x29-relative instead: the
@@ -311,7 +325,10 @@ pub const Frame = struct {
     pub fn spOffset(f: *const Frame, ref: FrameRef) u32 {
         return switch (ref) {
             .slot => |s| f.layout.slot_off[s],
-            .value => |v| f.layout.value_off[v],
+            .value => |v| blk: {
+                std.debug.assert(f.layout.value_off[v] != FrameLayout.NO_CELL);
+                break :blk f.layout.value_off[v];
+            },
             .spill => |i| f.layout.frame + i * 8,
             .sret_save => f.layout.sret_save_off,
             .c_scratch => f.layout.c_scratch_off,
@@ -333,4 +350,11 @@ test "Reg: physical and virtual registers keep their file and number" {
     try testing.expect(Reg.virt(0).isVirtual());
     try testing.expectEqual(@as(u32, 7), Reg.virt(7).index());
     try testing.expect(regBit(Reg.gp(0)) != regBit(Reg.fp(0)));
+}
+
+test "Frame: the callee-save area holds every saved register, 16-aligned" {
+    var frame: Frame = .{ .layout = undefined };
+    for (19..29) |n| frame.saved |= regBit(Reg.gp(@intCast(n)));
+    for (8..16) |n| frame.saved |= regBit(Reg.fp(@intCast(n)));
+    try testing.expectEqual(@as(u32, 144), frame.savedBytes());
 }

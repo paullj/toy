@@ -193,6 +193,16 @@ long toyffi_each(long n, long (*cb)(long)) {
     return s;
 }
 
+// Reads `s` after callbacks that collect, while only this frame's registers hold it: the
+// toy caller must keep its own copy rooted across the call.
+long toyffi_hold_str(const char *s, long (*cb)(long)) {
+    long t = 0;
+    for (long i = 0; i < 4; i++) t += cb(i);
+    long n = 0;
+    while (s[n] == 'k') n++;
+    return t + n * 1000;
+}
+
 // Narrow ints, a bool and a float32 arrive as C passes them: only the low bits are defined.
 long toyffi_cb_narrow(int32_t (*cb)(int8_t, uint16_t, int32_t, bool, float)) {
     return cb(-3, 65535, -100000, true, 1.5f);

@@ -519,6 +519,34 @@ pub const ldpFpLrPost: u32 = 0xA8C17BFD;
 /// ret (returns to x30). → 0xD65F03C0.
 pub const ret: u32 = 0xD65F03C0;
 
+/// The register file a pair or unscaled access moves: X registers or the D view of the
+/// FP registers.
+pub const File = enum { x, d };
+
+/// stp/ldp rt, rt2, [rn, #off] (signed offset, no writeback): off a multiple of 8 in
+/// -512..504. stp x19, x20, [x29, #-16] → 0xA93F53B3.
+pub fn pairOff(file: File, load: bool, rt: u32, rt2: u32, rn: u32, off: i32) u32 {
+    std.debug.assert(@mod(off, 8) == 0 and off >= -512 and off <= 504);
+    const imm7: u32 = @as(u32, @bitCast(@divExact(off, 8))) & 0x7F;
+    const base: u32 = switch (file) {
+        .x => 0xA9000000,
+        .d => 0x6D000000,
+    };
+    return base | (@as(u32, @intFromBool(load)) << 22) | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt;
+}
+
+/// stur/ldur rt, [rn, #off] (unscaled signed offset): off in -256..255.
+/// stur x21, [x29, #-24] → 0xF81E83B5.
+pub fn unscaledOff(file: File, load: bool, rt: u32, rn: u32, off: i32) u32 {
+    std.debug.assert(off >= -256 and off <= 255);
+    const imm9: u32 = @as(u32, @bitCast(off)) & 0x1FF;
+    const base: u32 = switch (file) {
+        .x => 0xF8000000,
+        .d => 0xFC000000,
+    };
+    return base | (@as(u32, @intFromBool(load)) << 22) | (imm9 << 12) | (rn << 5) | rt;
+}
+
 /// brk #0 — a software breakpoint that aborts with SIGILL. The backstop after the
 /// `bl panic` that the `.panic` IR terminator emits, should `panic` ever
 /// return. → 0xD4200000.
@@ -757,6 +785,17 @@ test "fp encoders" {
     try testing.expectEqual(@as(u32, 0x1E204230), fmovSS(16, 17)); // fmov s16,s17
     try testing.expectEqual(@as(u32, 0x9E670130), fmovDX(16, 9)); // fmov d16,x9
     try testing.expectEqual(@as(u32, 0x9E660209), fmovXD(9, 16)); // fmov x9,d16
+}
+
+test "pair and unscaled callee-save encoders (assembler-verified)" {
+    try testing.expectEqual(@as(u32, 0xA93F53B3), pairOff(.x, false, 19, 20, FP, -16)); // stp x19,x20,[x29,#-16]
+    try testing.expectEqual(@as(u32, 0xA97F53B3), pairOff(.x, true, 19, 20, FP, -16)); // ldp x19,x20,[x29,#-16]
+    try testing.expectEqual(@as(u32, 0x6D3D27A8), pairOff(.d, false, 8, 9, FP, -48)); // stp d8,d9,[x29,#-48]
+    try testing.expectEqual(@as(u32, 0x6D7D27A8), pairOff(.d, true, 8, 9, FP, -48)); // ldp d8,d9,[x29,#-48]
+    try testing.expectEqual(@as(u32, 0xF81E83B5), unscaledOff(.x, false, 21, FP, -24)); // stur x21,[x29,#-24]
+    try testing.expectEqual(@as(u32, 0xF85E83B5), unscaledOff(.x, true, 21, FP, -24)); // ldur x21,[x29,#-24]
+    try testing.expectEqual(@as(u32, 0xFC1C83AA), unscaledOff(.d, false, 10, FP, -56)); // stur d10,[x29,#-56]
+    try testing.expectEqual(@as(u32, 0xFC5C83AA), unscaledOff(.d, true, 10, FP, -56)); // ldur d10,[x29,#-56]
 }
 
 test "move-wide immediates" {

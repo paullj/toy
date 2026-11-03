@@ -70,6 +70,14 @@ pub const MAX_FRAME: u32 = (4095 << 12) | 0xFF0;
 /// aggregate (no x8 buffer to save).
 pub const NO_SRET: u32 = std.math.maxInt(u32);
 
+/// `value_off[v] == NO_CELL`: value `v` has no cell, because a register allocator keeps
+/// it in a register and gives it a spill slot only if it needs one (`Cells.aggregates`).
+pub const NO_CELL: u32 = std.math.maxInt(u32);
+
+/// Which IR values get a frame cell: every one (the spill-everything backends), or only
+/// the aggregates, whose bytes live in memory (a backend that allocates registers).
+pub const Cells = enum { every_value, aggregates };
+
 pub const Error = error{ OutOfMemory, FrameTooLarge, ParamOffsetTooLarge };
 
 /// Total frame bytes the prologue opens with `sub sp, sp, #frame` (16-aligned,
@@ -152,6 +160,17 @@ pub fn compute(
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) Error!FrameLayout {
+    return computeCells(gpa, func, layouts, enum_layouts, .every_value);
+}
+
+/// `compute`, with the IR values that get a cell chosen by `cells`.
+pub fn computeCells(
+    gpa: std.mem.Allocator,
+    func: *const Ir.Function,
+    layouts: []const Layout,
+    enum_layouts: []const EnumLayout,
+    cells: Cells,
+) Error!FrameLayout {
     // (1) out_base: the widest outgoing stack-arg region over all call sites.
     // For each `call` instr, plan its outbound args (Abi.planCall) and take the
     // max NSAA bytes; round the running max to 16 so the slot region above it
@@ -215,6 +234,10 @@ pub fn compute(
     const value_off = try gpa.alloc(u32, func.values.len);
     errdefer gpa.free(value_off);
     for (func.values, 0..) |vdef, i| {
+        if (cells == .aggregates and !Abi.isAggregate(vdef.type)) {
+            value_off[i] = NO_CELL;
+            continue;
+        }
         value_off[i] = try place(&running, out_base, slotSize(vdef.type, layouts, enum_layouts));
     }
 
@@ -417,9 +440,25 @@ pub fn collectRoots(
         try projectCell(slot.type, fl.slot_off[i], layouts, enum_layouts, &roots, gpa);
     }
     for (func.values, 0..) |vdef, i| {
+        if (fl.value_off[i] == NO_CELL) continue;
         try projectCell(vdef.type, fl.value_off[i], layouts, enum_layouts, &roots, gpa);
     }
     return roots.toOwnedSlice(gpa);
+}
+
+/// How the collector traces a one-word value of type `ty` (a box handle, a raw pointer):
+/// the tag of the root `projectCell` gives at its offset 0, or null for no GC reference.
+pub fn wordRootTag(
+    gpa: std.mem.Allocator,
+    ty: Type,
+    layouts: []const Layout,
+    enum_layouts: []const EnumLayout,
+) error{OutOfMemory}!?Root.Tag {
+    var roots: std.ArrayList(Root) = .empty;
+    defer roots.deinit(gpa);
+    try projectCell(ty, 0, layouts, enum_layouts, &roots, gpa);
+    for (roots.items) |r| if (r.off == 0) return r.tag;
+    return null;
 }
 
 /// The ROOT MAP the runtime reads: `roots` as a count-prefixed packed list of
@@ -836,6 +875,27 @@ test "roots: a lone rawptr VALUE is projected at its value cell" {
     try testing.expectEqual(@as(usize, 12), bytes.len); // [u32 n][{off,tag}]
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, bytes[0..4], .little));
     try testing.expectEqual(fl.value_off[0], std.mem.readInt(u32, bytes[4..8], .little));
+}
+
+test "cells: aggregates-only gives scalar values no cell and no root; wordRootTag names the word's tag" {
+    const gpa = testing.allocator;
+    var func = try buildSimple(gpa, &.{Type.rawptr}, &.{ Type.rawptr, Type.int, Type.str }, 0, Type.int);
+    defer func.deinit(gpa);
+    var fl = try computeCells(gpa, &func, &.{}, &.{}, .aggregates);
+    defer fl.deinit(gpa);
+    try testing.expectEqual(NO_CELL, fl.value_off[0]);
+    try testing.expectEqual(NO_CELL, fl.value_off[1]);
+    try testing.expectEqual(@as(u32, 8), fl.value_off[2]);
+    try testing.expectEqual(@as(u32, 32), fl.frame);
+    const bm = try collectRoots(gpa, &func, &fl, &.{}, &.{});
+    defer gpa.free(bm);
+    // The rawptr slot and the str value's pointer half; the rawptr value lives in a register.
+    try testing.expectEqual(@as(usize, 2), bm.len);
+    try testing.expectEqual(@as(u32, 0), bm[0].off);
+    try testing.expectEqual(@as(u32, 8), bm[1].off);
+
+    try testing.expectEqual(@as(?Root.Tag, .word), try wordRootTag(gpa, Type.rawptr, &.{}, &.{}));
+    try testing.expectEqual(@as(?Root.Tag, null), try wordRootTag(gpa, Type.int, &.{}, &.{}));
 }
 
 test "roots: a str slot projects the ptr half only (base+0), not the len at +8" {

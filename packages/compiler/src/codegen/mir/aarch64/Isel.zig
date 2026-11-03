@@ -1,7 +1,7 @@
 //! AArch64 instruction selection: `Ir.Function` to MIR on virtual registers.
 //!
-//! Each scalar IR value becomes the virtual register of the same index, with the value's
-//! frame cell as its spill home (so the stack map stays `FrameLayout.collectRoots`).
+//! Each scalar IR value becomes the virtual register of the same index (linear scan gives
+//! it a slot only if it spills).
 //! Aggregate IR values (a merge of a str/struct/enum) stay memory: their bytes live in their
 //! cell and the selector copies them. A shape the selector does not cover yet fails with
 //! `error.Unsupported` and a `Fallback` reason, and the caller lowers that fn with the spill
@@ -10,6 +10,9 @@
 //! The calling convention comes from `Abi` exactly as the spill backend uses it. Argument
 //! and result registers appear as physical operands next to the virtual ones; the selector
 //! never names x9-x15 or v16-v18, which belong to the allocator's and encoder's scratch.
+//!
+//! GC facts for the allocator (which values are references, which calls are safepoints,
+//! what a call keeps rooted) come from `GcFacts`, shared by every target.
 
 const std = @import("std");
 const Ir = @import("../../../ir/Ir.zig");
@@ -19,6 +22,7 @@ const Link = @import("../../../link/Link.zig");
 const types = @import("../../../types.zig");
 const Aarch64 = @import("../../Aarch64.zig");
 const Mir = @import("../Mir.zig");
+const GcFacts = @import("../GcFacts.zig");
 const Inst = @import("Inst.zig");
 
 const Type = types.Type;
@@ -34,6 +38,8 @@ pub const Fallback = enum {
     /// The frame, with the allocator's spill slots, outgrows codegen's budget, or a
     /// branch outgrows its immediate.
     too_large,
+    /// An instruction needs more registers at once than the allocator has.
+    regalloc,
 };
 
 pub const Error = error{ OutOfMemory, Unsupported };
@@ -138,9 +144,12 @@ const S = struct {
         // Lower makes the entry block 0 and branch compaction keeps it lowest, and the
         // prologue block falls into MIR block 1.
         std.debug.assert(s.ir.entry == 0);
-        for (s.ir.values, 0..) |vd, i| {
+        const refs = try GcFacts.valueRefs(s.gpa, s.ir, s.in.layouts, s.in.enum_layouts);
+        defer s.gpa.free(refs);
+        for (s.ir.values, refs, 0..) |vd, ref, i| {
             const class: Mir.RegClass = if (vd.type.kind == .float) .fpr else .gpr;
-            _ = try s.f.newVReg(s.gpa, class, .{ .value = @intCast(i) });
+            const r = try s.f.newVReg(s.gpa, class, .{ .value = @intCast(i) });
+            s.f.vregs.items[r.index()].ref = ref;
         }
 
         s.line = s.ir.line;
@@ -519,7 +528,10 @@ const S = struct {
         }
         const callee: Inst.Callee = if (conv == .c) .{ .import = c.callee.name } else .{ .func = c.callee };
         const defs = if (c_ret) |rt| cRetDefs(rt, s.in.layouts) else s.retDefs(ret_ty);
-        try s.emit(.{ .call = .{ .callee = callee, .uses = uses, .defs = defs } });
+        const facts = GcFacts.callFacts(c.callee);
+        var extra: Mir.RegSet = 0;
+        for (facts.clobbered_gprs) |n| extra |= Mir.regBit(Reg.gp(n));
+        try s.emit(.{ .call = .{ .callee = callee, .uses = uses, .defs = defs, .safepoint = facts.safepoint, .extra_clobbers = extra } });
         // A C callee leaves the bits above its result's width unspecified, and toy keeps
         // every value canonical.
         if (conv == .c and res != Ir.none_value) {
@@ -543,6 +555,10 @@ const S = struct {
         // Each `mut` extern struct argument back into the variable it points at.
         for (srcs, 0..) |src, i| switch (src) {
             .image_addr => |off| try s.unpackC(c.params[i], Mem.frame(.c_scratch, off), Mem.reg(try s.val(c.args[i].value), 0)),
+            else => {},
+        };
+        if (facts.keep_ref_args and facts.safepoint) for (c.args) |arg| switch (arg) {
+            .value => |v| if (s.f.vregs.items[v].ref != null) try s.emit(.{ .keep = Reg.virt(v) }),
             else => {},
         };
     }
@@ -808,7 +824,7 @@ const S = struct {
         try s.emit(.{ .sym_addr = .{ .rd = Reg.gp(0), .target = .{ .cstr = h } } });
         try s.emit(.{ .mov_imm = .{ .rd = Reg.gp(1), .imm = @intCast(msg.len) } });
         const uses = Mir.regBit(Reg.gp(0)) | Mir.regBit(Reg.gp(1));
-        try s.emit(.{ .call = .{ .callee = .{ .func = .{ .kind = .builtin, .name = "panic" } }, .uses = uses } });
+        try s.emit(.{ .call = .{ .callee = .{ .func = .{ .kind = .builtin, .name = "panic" } }, .uses = uses, .safepoint = false } });
         try s.emit(.brk);
     }
 };

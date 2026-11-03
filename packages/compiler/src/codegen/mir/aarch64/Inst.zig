@@ -66,8 +66,19 @@ pub const Op = union(enum) {
     copy: struct { dst: Mem, src: Mem, size: u32 },
     sym_addr: struct { rd: Reg, target: SymTarget },
     /// Reads the physical registers in `uses`, writes those in `defs`, clobbers every
-    /// caller-saved register. A safepoint.
-    call: struct { callee: Callee, uses: Mir.RegSet = 0, defs: Mir.RegSet = 0 },
+    /// caller-saved register and `extra_clobbers`. A safepoint unless the callee is known
+    /// never to reach the collector.
+    call: struct {
+        callee: Callee,
+        uses: Mir.RegSet = 0,
+        defs: Mir.RegSet = 0,
+        safepoint: bool = true,
+        /// Callee-saved registers a hand-emitted runtime callee overwrites anyway.
+        extra_clobbers: Mir.RegSet = 0,
+    },
+    /// Holds a value live to here without reading it (`Operand.Kind.keep`). Encodes to
+    /// nothing; the allocator drops it.
+    keep: Reg,
     brk,
     /// Where a loop back edge polls for a pending safepoint (#83). Encodes to nothing.
     safepoint_poll,
@@ -90,7 +101,33 @@ pub const caller_saved: Mir.RegSet = blk: {
 
 pub fn callRegs(inst: Inst) ?Mir.CallRegs {
     return switch (inst.op) {
-        .call => |c| .{ .uses = c.uses, .defs = c.defs, .clobbers = caller_saved },
+        .call => |c| .{ .uses = c.uses, .defs = c.defs, .clobbers = caller_saved | c.extra_clobbers, .safepoint = c.safepoint },
+        else => null,
+    };
+}
+
+/// The block a branch jumps to, or null for any other instruction.
+pub fn branchTarget(inst: Inst) ?u32 {
+    return switch (inst.op) {
+        .b => |t| t,
+        .cbnz => |c| c.target,
+        else => null,
+    };
+}
+
+pub fn setBranchTarget(inst: *Inst, target: u32) void {
+    switch (inst.op) {
+        .b => |*t| t.* = target,
+        .cbnz => |*c| c.target = target,
+        else => unreachable,
+    }
+}
+
+/// The registers of a whole-register copy within one file, which an allocator may
+/// coalesce and drop once both sides share a register.
+pub fn copyRegs(inst: Inst) ?struct { dst: Reg, src: Reg } {
+    return switch (inst.op) {
+        .mov => |m| if (m.single) null else .{ .dst = m.rd, .src = m.rn },
         else => null,
     };
 }
@@ -180,6 +217,7 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
             .func, .import => {},
         },
         .cbnz => |*o| B.add(buf, &n, &o.rn, .use),
+        .keep => |*r| B.add(buf, &n, r, .keep),
         .brk, .safepoint_poll, .b, .ret => {},
     }
     return buf[0..n];

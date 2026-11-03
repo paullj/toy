@@ -4,7 +4,10 @@
 //!
 //! It owns the frame shape: the prologue saves x29/x30 and points x29 at them (the frame
 //! chain every profile keeps), then opens `Frame.size()` bytes that stay fixed until the
-//! epilogue. x12-x15 are its own scratch: x12/x13 hold an address base when an offset
+//! epilogue, and stores the callee-saved registers the allocator used just below x29
+//! (`Frame.saved`), which every epilogue reloads. It records the offset of each safepoint
+//! call's `bl`/`blr`, where the collector finds the call's stack map. x12-x15 are its own
+//! scratch: x12/x13 hold an address base when an offset
 //! leaves an instruction's immediate (and the two cursors of a long copy), x14 a whole
 //! offset past 16 MiB, x15 the word a copy moves. No other code may use them.
 
@@ -31,12 +34,15 @@ pub const Out = struct {
     code: std.ArrayList(u8) = .empty,
     relocs: std.ArrayList(Link.Reloc) = .empty,
     lines: std.ArrayList(Link.LineRow) = .empty,
+    /// The code offset of each safepoint call instruction, in code order.
+    safepoints: std.ArrayList(u32) = .empty,
 
     pub fn deinit(o: *Out, gpa: std.mem.Allocator) void {
         o.code.deinit(gpa);
         for (o.relocs.items) |r| if (r.target.name()) |nm| gpa.free(nm);
         o.relocs.deinit(gpa);
         o.lines.deinit(gpa);
+        o.safepoints.deinit(gpa);
     }
 };
 
@@ -132,7 +138,36 @@ const E = struct {
         if (frame & 0xFFF != 0) try e.word(Aarch64.subImm(Aarch64.SP, Aarch64.SP, @intCast(frame & 0xFFF)));
     }
 
+    /// Store (or, for the epilogue, load) the callee-saved registers in `Frame.saved` at
+    /// `[x29 - 8, x29 - 16, ...]`, in pairs within each file.
+    fn calleeSaves(e: *E, load: bool) error{OutOfMemory}!void {
+        var off: i32 = 0;
+        inline for (.{ Mir.RegClass.gpr, Mir.RegClass.fpr }) |class| {
+            const file: Aarch64.File = if (class == .gpr) .x else .d;
+            var regs: [16]u32 = undefined;
+            var n: usize = 0;
+            var set = e.frame.saved;
+            while (set != 0) : (set &= set - 1) {
+                const r: Reg = @enumFromInt(@ctz(set));
+                if (r.physClass() == class) {
+                    regs[n] = r.hw();
+                    n += 1;
+                }
+            }
+            var k: usize = 0;
+            while (k + 1 < n) : (k += 2) {
+                off -= 16;
+                try e.word(Aarch64.pairOff(file, load, regs[k], regs[k + 1], Aarch64.FP, off));
+            }
+            if (k < n) {
+                off -= 8;
+                try e.word(Aarch64.unscaledOff(file, load, regs[k], Aarch64.FP, off));
+            }
+        }
+    }
+
     fn epilogue(e: *E) error{OutOfMemory}!void {
+        try e.calleeSaves(true);
         if (e.frame_size > 0xFFF) {
             try e.word(Aarch64.addImm(Aarch64.SP, Aarch64.FP, 0));
         } else if (e.frame_size > 0) {
@@ -323,20 +358,29 @@ const E = struct {
                         e.gpa.free(t.func.name);
                         return err;
                     };
+                    try e.safepoint(o.safepoint);
                     try e.word(Aarch64.bl(0));
                 },
                 .import => |name| {
                     try rt_emit.emitImportPreamble(&e.out.code, &e.out.relocs, e.gpa, name, 16);
+                    try e.safepoint(o.safepoint);
                     try e.word(Aarch64.blr(16));
                 },
-                .reg => |r| try e.word(Aarch64.blr(r.hw())),
+                .reg => |r| {
+                    try e.safepoint(o.safepoint);
+                    try e.word(Aarch64.blr(r.hw()));
+                },
             },
             .brk => try e.word(Aarch64.brk0),
-            .safepoint_poll => {},
+            .safepoint_poll, .keep => {},
             .b => |target| if (target != block + 1) try e.branch(Aarch64.b(0), target, .imm26),
             .cbnz => |o| try e.branch(Aarch64.cbnz(o.rn.hw(), 0), o.target, .imm19),
             .ret => try e.epilogue(),
         }
+    }
+
+    fn safepoint(e: *E, is: bool) error{OutOfMemory}!void {
+        if (is) try e.out.safepoints.append(e.gpa, e.here());
     }
 
     fn resolve(e: *E, block_off: []const u32) void {
@@ -376,6 +420,7 @@ pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame
     try e.word(Aarch64.stpFpLrPre);
     try e.word(Aarch64.movFpSp);
     try e.openFrame();
+    try e.calleeSaves(false);
     for (func.blocks, 0..) |*blk, bi| {
         block_off[bi] = e.here();
         for (blk.insts.items) |i| {
@@ -446,4 +491,31 @@ test "encode: a backward cbnz resolves to its block, float32 moves use the singl
     try testing.expectEqual(Aarch64.cbnz(9, -1), wordAt(code, 3));
     try testing.expectEqual(Aarch64.ldpFpLrPost, wordAt(code, 4));
     try testing.expectEqual(@as(usize, 0), out.lines.items.len);
+}
+
+test "encode: callee-saved registers are paired below x29 and reloaded before the frame closes; safepoint calls are recorded" {
+    const gpa = testing.allocator;
+    var f = try Func.init(gpa, 1);
+    defer f.deinit(gpa);
+    const sym: Inst.Callee = .{ .func = .{ .kind = .user_fn, .name = "g" } };
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .call = .{ .callee = sym } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .call = .{ .callee = sym, .safepoint = false } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .ret });
+    var none = [_]u32{};
+    var frame: Mir.Frame = .{ .layout = .{ .frame = 16, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    frame.saved = Mir.regBit(Reg.gp(19)) | Mir.regBit(Reg.gp(20)) | Mir.regBit(Reg.gp(21)) | Mir.regBit(Reg.fp(8));
+    try testing.expectEqual(@as(u64, 16 + 32), frame.size());
+    var out: Out = .{};
+    defer out.deinit(gpa);
+    try encode(gpa, &f, &frame, Ir.no_line, &out);
+    const code = out.code.items;
+    try testing.expectEqual(Aarch64.subImm(Aarch64.SP, Aarch64.SP, 48), wordAt(code, 2));
+    try testing.expectEqual(Aarch64.pairOff(.x, false, 19, 20, Aarch64.FP, -16), wordAt(code, 3));
+    try testing.expectEqual(Aarch64.unscaledOff(.x, false, 21, Aarch64.FP, -24), wordAt(code, 4));
+    try testing.expectEqual(Aarch64.unscaledOff(.d, false, 8, Aarch64.FP, -32), wordAt(code, 5));
+    // Only the first call is a safepoint.
+    try testing.expectEqualSlices(u32, &.{6 * 4}, out.safepoints.items);
+    try testing.expectEqual(Aarch64.pairOff(.x, true, 19, 20, Aarch64.FP, -16), wordAt(code, 8));
+    try testing.expectEqual(Aarch64.unscaledOff(.d, true, 8, Aarch64.FP, -32), wordAt(code, 10));
+    try testing.expectEqual(Aarch64.addImm(Aarch64.SP, Aarch64.SP, 48), wordAt(code, 11));
 }

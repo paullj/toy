@@ -1,0 +1,43 @@
+# expect: exit 42
+# expect: stdout "8\n13\n2.5\n"
+# Feature: references the MIR backend keeps in registers stay roots across allocating
+# calls. `Ref.new(30)` and `Ref.new(12)` are argument temporaries with no slot: they are
+# made, then `churn` allocates enough to collect many times before `pair` reads them, so a
+# reference held only in a register at a safepoint would be swept. `show` keeps an int, a
+# float and a Vec handle live across the same calls (the int and float in callee-saved
+# registers).
+import std/io
+import std/ref
+import std/vec
+
+fn churn(n: int) -> int {
+    i := 0
+    s := 0
+    loop {
+        if i >= n { break }
+        junk: Vec[int] = []
+        junk.push(i)
+        r := Ref.new(i)
+        s = s +% junk.len() +% r.get()
+        i = i + 1
+    }
+    return s - s
+}
+
+fn pair(a: Ref[int], b: Ref[int], c: int) -> int {
+    return a.get() + b.get() + c
+}
+
+fn show(v: Vec[int], x: int, f: float) -> int {
+    c := churn(2000)
+    io.println(v.get(0).or(0) + c)
+    io.println(x + churn(2000))
+    io.println(f)
+    return c
+}
+
+fn main() -> int {
+    v: Vec[int] = []
+    v.push(8)
+    return pair(Ref.new(30), Ref.new(12), churn(3000) + show(v, 13, 2.5))
+}

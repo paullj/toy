@@ -39,10 +39,12 @@ const patchBTo = em.patchBTo;
 // the bytes allocated since the last one reach the live bytes it kept (Go's GOGC=100
 // pacing, floored at 256 KiB). A fixed budget makes a growing live set pay a whole-heap
 // trace every 256 KiB: O(live) collections of O(live) work each. The collector walks the
-// FP chain enumerating each frame's roots by PRECISE stack-map lookup (a per-fn table
-// names the managed cells; frames with no entry fall back to a conservative whole-frame
-// word scan — sound because the spill-everything frame puts every live reference in a
-// frame cell), traces marked objects to a fixpoint over a malloc-backed mark stack
+// FP chain enumerating each frame's roots by PRECISE stack-map lookup (a row per fn names
+// the managed cells, and a MIR fn adds a row per safepoint call whose roots differ;
+// hand-emitted builtin and foreign C frames have no row and fall back to a conservative
+// word scan of the frame's memory, which never sees a pointer held only in a register:
+// a toy caller keeps each reference it passes to C in a slot its own row names), traces
+// marked objects to a fixpoint over a malloc-backed mark stack
 // (resolving each candidate word's span through a hash table of span pages built per
 // collection), and linear-sweeps every span (dead cells → freelists, mark bits cleared).
 // All emitted bodies are PURE fixed AArch64 (only mmap+malloc flags / lengths are baked;
@@ -689,9 +691,10 @@ pub fn lowerGcMarkLeaf(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
 
 /// Build the `gc_collect()` builtin: a synchronous stop-the-world mark-sweep with a HYBRID
 /// root scan. Walks the x29 chain from its own frame outward; for each parent frame it
-/// identifies the enclosing fn by the child-saved return address and looks that fn's precise
-/// root map up in the address-keyed stack-map table (`text_off -> root bitmap`), enumerating
-/// only the managed cells the map names. A frame with no map entry (a hand-emitted builtin,
+/// identifies the enclosing fn by the child-saved return address and looks the precise root
+/// map of that return address up in the address-keyed stack-map table (`text_off -> root
+/// bitmap`, a row per fn and per MIR safepoint call), enumerating only the managed cells
+/// the map names. A frame with no map entry (a hand-emitted builtin,
 /// a failed lower, or a foreign C-runtime frame — all carrying the `0xFFFFFFFF` conservative
 /// marker) falls back to a whole-frame word scan. Precise roots are always a subset of that
 /// whole-frame set, and the marker validates each candidate before any dereference, so a
