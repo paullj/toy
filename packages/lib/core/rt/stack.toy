@@ -1,0 +1,85 @@
+# Stack overflow. The main thread's stack ends in a guard page, and every frame's prologue
+# touches each page it opens, so running off the end faults there rather than stepping over
+# it. `guard` (called first thing in `main`) catches that fault on a stack of its own and
+# panics with "stack overflow" and a backtrace, as Go and Rust do; the process would
+# otherwise die of SIGSEGV with nothing on stderr.
+#
+# Darwin arm64 layouts, by byte offset:
+#   struct sigaction  0 handler, 8 mask (u32), 12 flags (i32)
+#   stack_t           0 base, 8 size, 16 flags (i32)
+#   siginfo_t         24 the faulting address
+#   ucontext_t        48 the mcontext pointer
+#   mcontext          248 fp, 256 lr, 264 sp, 272 pc
+
+extern struct SigAction { handler: int, mask: int32, flags: int32 }
+extern struct AltStack { base: int, size: int, flags: int }
+
+extern fn signal(sig: int32, handler: fn(int32, int, int)) -> int
+extern fn sigaction(sig: int32, mut act: SigAction, mut old: SigAction) -> int32
+extern fn sigaltstack(mut ss: AltStack, mut old: AltStack) -> int32
+extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
+
+pub fn guard() {
+    # Every call of `main` calls this, so a `main` that recurses must not map a stack and
+    # install the handler again each time.
+    armed := control_block() + 232
+    if word(armed) != 0 { return }
+    set_word(armed, 1)
+
+    # Darwin's SIGSTKSZ: room for the signal frame the kernel pushes, `on_fault` and
+    # `panic` with its calls to write. It is mapped (read-write, private, anonymous)
+    # rather than in __bss, so a program that never overflows pays only for an untouched
+    # mapping.
+    size := 131072
+    base := unsafe { mmap(0, size, 3, 4098, -1, 0) }
+    if base == -1 { return }
+    old_ss := AltStack { base: 0, size: 0, flags: 0 }
+    ss := AltStack { base: base, size: size, flags: 0 }
+    unsafe { sigaltstack(ss, old_ss) }
+
+    # `signal` takes `on_fault` as a C function pointer, but cannot ask for its own stack
+    # or for the faulting address. Installing it twice hands back that pointer as an int,
+    # which `sigaction` then installs with both.
+    sigsegv: int32 = 11
+    sigbus: int32 = 10
+    unsafe { signal(sigsegv, on_fault) }
+    handler := unsafe { signal(sigsegv, on_fault) }
+    old := SigAction { handler: 0, mask: 0, flags: 0 }
+    # SA_ONSTACK | SA_SIGINFO.
+    act := SigAction { handler: handler, mask: 0, flags: 65 }
+    unsafe { sigaction(sigsegv, act, old) }
+    unsafe { sigaction(sigbus, act, old) }
+}
+
+fn on_fault(sig: int32, info: int, uc: int) {
+    mc := word(uc + 48)
+    # An overflow faults within a page of the stack pointer: a prologue touches each page
+    # it opens as it lowers sp. Any other address that near sp is live stack, which does
+    # not fault, so this needs no stack bounds (and no pthread imports to find them).
+    near := word(info + 24) - word(mc + 264)
+    if near < -65536 || near >= 65536 {
+        # Not an overflow: put the default action back, and returning re-runs the faulting
+        # instruction, which then kills the process as it would have without the handler.
+        old := SigAction { handler: 0, mask: 0, flags: 0 }
+        dfl := SigAction { handler: 0, mask: 0, flags: 0 }
+        unsafe { sigaction(sig, dfl, old) }
+        return
+    }
+    # `panic` walks the frame chain from its caller. Pointing this frame's record at the
+    # faulting frame makes the backtrace go on from the fn that overflowed rather than
+    # into the signal trampoline. The return address is one past the faulting pc, as if
+    # that instruction had been a call. The trace still opens with this fn, which panic's
+    # own record names.
+    record := frame_address()
+    set_word(record, word(mc + 248))
+    set_word(record + 8, word(mc + 272) + 4)
+    panic("stack overflow")
+}
+
+fn word(at: int) -> int {
+    return unsafe { load(at) }
+}
+
+fn set_word(at: int, v: int) {
+    unsafe { store(at, v) }
+}

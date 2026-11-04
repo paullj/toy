@@ -395,6 +395,7 @@ fn expectCollectorAbi(sigs: []const Sig) !void {
         .{ .f = .mark_leaf, .params = &.{.int}, .ret = .unit },
         .{ .f = .collections, .params = &.{}, .ret = .int },
         .{ .f = .span_count, .params = &.{}, .ret = .int },
+        .{ .f = .stack_guard, .params = &.{}, .ret = .unit },
     };
     for (want) |w| {
         const sig = for (sigs) |s| {

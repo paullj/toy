@@ -63,6 +63,7 @@ pub const RuntimeFn = enum {
     mark_leaf,
     collections,
     span_count,
+    stack_guard,
 
     pub fn name(f: RuntimeFn) []const u8 {
         return switch (f) {
@@ -73,6 +74,7 @@ pub const RuntimeFn = enum {
             .mark_leaf => "core/rt/gc.mark_leaf",
             .collections => "core/rt/gc.collections",
             .span_count => "core/rt/gc.span_count",
+            .stack_guard => "core/rt/stack.guard",
         };
     }
 
@@ -248,6 +250,7 @@ const core_replacements = std.StaticStringMap([]const u8).initComptime(.{
     .{ "core/fmt", "std/float" },
     .{ "core/rt/str", "std/str" },
     .{ "core/rt/gc", "std/gc" },
+    .{ "core/rt/stack", "std/os" },
 });
 
 /// The std module holding a builtin scalar's `impl` of a protocol, keyed `"<type> has

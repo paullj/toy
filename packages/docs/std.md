@@ -63,6 +63,7 @@ declares its own externs as `ffi.md` describes.
 | `core/mem_selftest`, `core/desc_selftest` | heap and descriptor self-checks |
 | `core/rt/str` | the runtime for `str` operators: `str_eq` |
 | `core/rt/gc` | the collector: `alloc`, `collect`, the `mark` and `mark_leaf` a trace unit calls, and the `collections` and `span_count` counters |
+| `core/rt/stack` | the stack overflow handler: `guard`, which `main` calls first, maps a signal stack for it and installs it |
 
 `core/rt/` is the runtime: the fns the compiler's lowered code calls. Every program
 carries these modules, and the linker keeps only the fns something calls. No fn in

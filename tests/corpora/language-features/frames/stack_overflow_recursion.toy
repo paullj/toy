@@ -1,0 +1,23 @@
+# Feature: recursion that runs off the end of the main stack panics with "stack overflow"
+# and a backtrace that goes on from the handler to the faulting fn, instead of dying
+# silently on SIGSEGV.
+# The walk is capped, so a backtrace this deep ends in "..." before it reaches main.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "stack overflow\n"
+# expect: stderr " stack_overflow_recursion.deep\n"
+# expect: stderr "...\n"
+import std/io
+
+struct S { a: int, b: int, s: str }
+
+fn deep(n: int, s: S) -> int {
+    if n == 0 { return s.a }
+    t := S { a: s.a + n % 7, b: s.b, s: s.s }
+    return deep(n - 1, t) + 0
+}
+
+fn main() -> int {
+    io.println(deep(10000000, S { a: 1, b: 2, s: "x" }))
+    return 0
+}

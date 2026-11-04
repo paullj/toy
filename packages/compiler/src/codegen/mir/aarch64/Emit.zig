@@ -18,6 +18,7 @@ const Aarch64 = @import("../../Aarch64.zig");
 const Link = @import("../../../link/Link.zig");
 const Ir = @import("../../../ir/Ir.zig");
 const rt_emit = @import("../../runtime/emit.zig");
+const StdNames = @import("../../../symbols/StdNames.zig");
 const Mir = @import("../Mir.zig");
 const Inst = @import("Inst.zig");
 
@@ -456,8 +457,9 @@ fn scaleOf(s: Inst.Size) u32 {
 pub const Error = error{ OutOfMemory, BranchOutOfRange };
 
 /// Encode `func`, whose registers are all physical, into `out`. `fn_line` is the line the
-/// prologue is charged to.
-pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame, fn_line: u32, out: *Out) Error!void {
+/// prologue is charged to. `guard_stack` marks a `main` that arms the stack overflow
+/// handler.
+pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame, fn_line: u32, guard_stack: bool, out: *Out) Error!void {
     var e: E = .{ .gpa = gpa, .frame = frame, .frame_size = @intCast(frame.size()), .out = out };
     defer e.fixups.deinit(gpa);
     const fwd = try forwards(gpa, func);
@@ -469,6 +471,18 @@ pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame
     try e.markLine(fn_line);
     try e.word(Aarch64.stpFpLrPre);
     try e.word(Aarch64.movFpSp);
+    // `main` arms the stack overflow handler before it opens its own frame, which may be
+    // the one that does not fit. LC_MAIN enters it straight from dyld, so nothing runs
+    // earlier; it takes no params and has saved nothing yet, so the call clobbers nothing
+    // live.
+    if (guard_stack) {
+        const t = try e.funcTarget(.{ .kind = .user_fn, .name = StdNames.RuntimeFn.stack_guard.name() });
+        e.reloc(t, .call26) catch |err| {
+            e.gpa.free(t.func.name);
+            return err;
+        };
+        try e.word(Aarch64.bl(0));
+    }
     try e.openFrame();
     try e.calleeSaves(false);
     for (func.blocks, 0..) |*blk, bi| {
@@ -513,7 +527,7 @@ test "encode: prologue, a frame load past the scaled immediate goes through x12,
     const frame: Mir.Frame = .{ .layout = .{ .frame = 40016, .out_base = 0, .sret_save_off = 0, .slot_off = &slot_off, .value_off = &value_off } };
     var out: Out = .{};
     defer out.deinit(gpa);
-    try encode(gpa, &f, &frame, 2, &out);
+    try encode(gpa, &f, &frame, 2, false, &out);
 
     const code = out.code.items;
     try testing.expectEqual(Aarch64.stpFpLrPre, wordAt(code, 0));
@@ -530,6 +544,34 @@ test "encode: prologue, a frame load past the scaled immediate goes through x12,
     try testing.expectEqual(@as(u32, (load_at) * 4), out.lines.items[1].off);
 }
 
+test "encode: main calls the stack guard before it opens its frame" {
+    const gpa = testing.allocator;
+    var f = try Func.init(gpa, 1);
+    defer f.deinit(gpa);
+    try f.blocks[0].insts.append(gpa, .{ .op = .ret });
+    var none = [_]u32{};
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 1 << 20, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    for ([_]bool{ false, true }) |guard_stack| {
+        var out: Out = .{};
+        defer out.deinit(gpa);
+        try encode(gpa, &f, &frame, Ir.no_line, guard_stack, &out);
+        const code = out.code.items;
+        try testing.expectEqual(Aarch64.movFpSp, wordAt(code, 1));
+        if (!guard_stack) {
+            try testing.expectEqual(@as(usize, 0), out.relocs.items.len);
+            try testing.expectEqual(Aarch64.movz(FA, 256, 0), wordAt(code, 2));
+            continue;
+        }
+        try testing.expectEqual(Aarch64.bl(0), wordAt(code, 2));
+        try testing.expectEqual(Aarch64.movz(FA, 256, 0), wordAt(code, 3));
+        try testing.expectEqual(@as(usize, 1), out.relocs.items.len);
+        const rl = out.relocs.items[0];
+        try testing.expectEqual(@as(u32, 8), rl.site);
+        try testing.expectEqual(Link.RelocKind.call26, rl.kind);
+        try testing.expectEqualStrings("core/rt/stack.guard", rl.target.func.name);
+    }
+}
+
 test "encode: a backward cbnz resolves to its block, float32 moves use the single forms" {
     const gpa = testing.allocator;
     var f = try Func.init(gpa, 3);
@@ -543,7 +585,7 @@ test "encode: a backward cbnz resolves to its block, float32 moves use the singl
     const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
-    try encode(gpa, &f, &frame, Ir.no_line, &out);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
     const code = out.code.items;
     try testing.expectEqual(Aarch64.fmovSS(16, 0), wordAt(code, 2));
     try testing.expectEqual(Aarch64.cbnz(9, -1), wordAt(code, 3));
@@ -565,7 +607,7 @@ test "encode: callee-saved registers are paired below x29 and reloaded before th
     try testing.expectEqual(@as(u64, 16 + 32), frame.size());
     var out: Out = .{};
     defer out.deinit(gpa);
-    try encode(gpa, &f, &frame, Ir.no_line, &out);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
     const code = out.code.items;
     try testing.expectEqual(Aarch64.subImm(Aarch64.SP, Aarch64.SP, 48), wordAt(code, 2));
     try testing.expectEqual(Aarch64.pairOff(.x, false, 19, 20, Aarch64.FP, -16), wordAt(code, 3));
@@ -593,7 +635,7 @@ test "encode: a branch to a block that only holds a b lands on that b's target" 
     const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
-    try encode(gpa, &f, &frame, Ir.no_line, &out);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
     const code = out.code.items;
     // b.lt reaches b1 through b2, the next block, so it inverts onto b3: b.ge at word 2.
     // b1's epilogue is words 3-4 and b2's b to b1 word 5. b3 falls into b4, whose b
@@ -619,7 +661,7 @@ test "encode: a conditional branch to the next block and a b become one inverted
     const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
-    try encode(gpa, &f, &frame, Ir.no_line, &out);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
     const code = out.code.items;
     // One word per block: b.ge -> b2, cbz x3 -> b3, cbz x4 -> b1 (back), then b3.
     try testing.expectEqual(Aarch64.bCond(.ge, 2), wordAt(code, 2));

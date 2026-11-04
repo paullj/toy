@@ -32,6 +32,10 @@ small enough for deep recursion.
 
 Index bounds, division and remainder by zero, and `expect` are checked in both profiles.
 
+A stack overflow, from deep recursion or a frame bigger than the 8 MiB main stack,
+panics with `stack overflow` and a backtrace in both profiles too. The backtrace opens
+with the runtime's handler, `core/rt/stack.on_fault`, then the function that overflowed.
+
 ## Integer overflow
 
 In a debug build, integer `+`, `-`, `*`, unary `-` and the compound forms `+=`, `-=` and

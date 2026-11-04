@@ -32,6 +32,7 @@ pub fn lowerMir(
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
     is_entry: bool,
+    guard_stack: bool,
     diags: *std.ArrayList(Diagnostic),
 ) error{OutOfMemory}!Link.FnCode {
     var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, layouts, enum_layouts) catch |e| switch (e) {
@@ -80,7 +81,7 @@ pub fn lowerMir(
 
     var out: Emit.Out = .{};
     defer out.deinit(gpa);
-    Emit.encode(gpa, &mf, &frame, func.line, &out) catch |e| switch (e) {
+    Emit.encode(gpa, &mf, &frame, func.line, guard_stack, &out) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BranchOutOfRange => return fail(gpa, func, diags, "function too large for codegen (a branch is out of range)"),
     };
@@ -194,7 +195,7 @@ fn hasWord(fc: Link.FnCode, w: u32) bool {
 fn lowerOk(gpa: std.mem.Allocator, func: *const Ir.Function) !Link.FnCode {
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, func, &.{}, &.{}, false, &diags);
+    var fc = try lowerMir(gpa, func, &.{}, &.{}, false, false, &diags);
     errdefer fc.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items.len);
     return fc;
@@ -340,7 +341,7 @@ test "mir: a shape the selector does not cover is an internal-error diagnostic a
     func.values[1].type = Type.unit;
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, &func, &.{}, &.{}, false, &diags);
+    var fc = try lowerMir(gpa, &func, &.{}, &.{}, false, false, &diags);
     defer fc.deinit(gpa);
     try testing.expectEqual(@as(usize, 1), diags.items.len);
     try testing.expect(std.mem.startsWith(u8, diags.items[0].message, "internal compiler error"));
@@ -379,7 +380,7 @@ test "mir: a frame that one value nearly fills says so, not too many locals" {
         defer func.deinit(gpa);
         var diags: std.ArrayList(Diagnostic) = .empty;
         defer diags.deinit(gpa);
-        var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, &diags);
+        var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, false, &diags);
         defer fc.deinit(gpa);
         try testing.expectEqual(@as(usize, 1), diags.items.len);
         try testing.expectEqualStrings(k.message, diags.items[0].message);
@@ -402,7 +403,7 @@ test "mir: the prologue zeroes a frame env's container word" {
 
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, &diags);
+    var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, false, &diags);
     defer fc.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items.len);
     const env = fl.slot_off[1];
