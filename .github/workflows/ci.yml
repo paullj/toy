@@ -224,7 +224,8 @@ jobs:
   pages:
     name: Deploy docs site
     # Skipped Zig jobs (a history-only push) must not block the deploy; failed ones must.
-    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    # A cancelled site job counts as neither, but leaves no Pages artifact to deploy.
+    if: ${{ !cancelled() && !failure() && needs.site.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: [changes, test, gates, gc-stress, fuzz, lint, site]
     runs-on: ubuntu-latest
     permissions:
