@@ -366,3 +366,70 @@ test "the bundled str_eq takes the (ptr, len, ptr, len) -> bool that lower passe
     defer freeAll(gpa, got);
     try testing.expectEqual(@as(usize, 0), got.len);
 }
+
+test "T0082: a runtime fn that calls the collector's entries reaches it" {
+    try expectErrors(".toy-test-rt-entry",
+        \\import core/rt/gc
+        \\pub fn grab() -> rawptr {
+        \\    return gc.alloc(16)
+        \\}
+        \\pub fn run() {
+        \\    gc.collect()
+        \\}
+        \\pub fn peek() -> int {
+        \\    return gc.collections() + gc.span_count()
+        \\}
+        \\
+    , &.{}, &.{
+        "core/rt fn 'grab' can reach a GC allocation: grab -> core/rt/gc.alloc",
+        "core/rt fn 'run' can reach a GC allocation: run -> core/rt/gc.collect",
+    });
+}
+
+fn expectCollectorAbi(sigs: []const Sig) !void {
+    const Want = struct { f: StdNames.RuntimeFn, params: []const Typecheck.Kind, ret: Typecheck.Kind };
+    const want = [_]Want{
+        .{ .f = .alloc, .params = &.{.int}, .ret = .rawptr },
+        .{ .f = .collect, .params = &.{}, .ret = .unit },
+        .{ .f = .mark, .params = &.{.int}, .ret = .unit },
+        .{ .f = .mark_leaf, .params = &.{.int}, .ret = .unit },
+        .{ .f = .collections, .params = &.{}, .ret = .int },
+        .{ .f = .span_count, .params = &.{}, .ret = .int },
+    };
+    for (want) |w| {
+        const sig = for (sigs) |s| {
+            if (s.kind == .user_fn and std.mem.eql(u8, s.name, w.f.name())) break s;
+        } else return error.TestUnexpectedResult;
+        try testing.expectEqual(w.params.len, sig.params.len);
+        for (w.params, sig.params) |k, p| try testing.expectEqual(k, p.kind);
+        try testing.expectEqual(w.ret, sig.ret.kind);
+    }
+}
+
+test "the bundled collector takes what lower and the trace units pass it" {
+    const gpa = testing.allocator;
+    const got = try runtimeErrors(gpa, ".toy-test-rt-gc-abi", "pub fn f() -> int {\n    return 1\n}\n", &.{}, false, &expectCollectorAbi);
+    defer freeAll(gpa, got);
+    try testing.expectEqual(@as(usize, 0), got.len);
+}
+
+test "the bundled collector's size classes are Abi.size_classes" {
+    const size_classes = @import("../codegen/abi/Abi.zig").size_classes;
+    const src = for (@import("bundled_std").modules) |m| {
+        if (std.mem.eql(u8, m.path, "core/rt/gc")) break m.source;
+    } else return error.TestUnexpectedResult;
+    // The ladder names every class but the last, which takes the rest up to 8 KiB.
+    var got: std.ArrayList(u16) = .empty;
+    defer got.deinit(testing.allocator);
+    var lines = std.mem.tokenizeScalar(u8, src, '\n');
+    while (lines.next()) |line| {
+        const rest = std.mem.trimStart(u8, line, " ");
+        const prefix = "if size <= ";
+        if (!std.mem.startsWith(u8, rest, prefix) or std.mem.indexOf(u8, rest, "{ return ") == null) continue;
+        const num = rest[prefix.len..][0..std.mem.indexOfScalar(u8, rest[prefix.len..], ' ').?];
+        try got.append(testing.allocator, try std.fmt.parseInt(u16, num, 10));
+    }
+    try testing.expectEqualSlices(u16, size_classes[0 .. size_classes.len - 1], got.items);
+    try testing.expectEqual(@as(u16, 8192), size_classes[size_classes.len - 1]);
+    try testing.expect(std.mem.indexOf(u8, src, "if size > 8192 {") != null);
+}

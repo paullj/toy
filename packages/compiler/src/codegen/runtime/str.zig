@@ -8,15 +8,14 @@ const testing = std.testing;
 const em = @import("emit.zig");
 const emitWord = em.emitWord;
 const emitFramePrologue = em.emitFramePrologue;
-const emitBuiltinCall = em.emitBuiltinCall;
+const emitRuntimeCall = em.emitRuntimeCall;
 const finishBuiltin = em.finishBuiltin;
 const deinitBuiltinRelocs = em.deinitBuiltinRelocs;
 
 // __int_to_str(n) builtin body — hand-written, AST/IR-independent. Renders the i64 in x0
 // into a fresh `gc_alloc`'d packed byte buffer and returns the str reg-pair
 // (x0 = ptr@buffer-base, x1 = len). Appended at link time (emit.zig) when any fn
-// references `__int_to_str`; it allocates, so its used-scan pulls in `gc_alloc` (and
-// `gc_collect` by closure).
+// references `__int_to_str`; it allocates, so its row keeps `core/rt` `alloc` in the image.
 //
 // Digit extraction avoids i64::MIN overflow by NEVER negating the running value: each step
 // computes q = n/10 (sdiv, truncates toward zero) and the single-digit remainder
@@ -91,7 +90,7 @@ fn lowerDigitsToStr(gpa: std.mem.Allocator, comptime signed: bool) error{OutOfMe
     try emit(&code, gpa, A.strSp(10, 0)); // [sp+0] = cursor
     try emit(&code, gpa, A.strSp(2, 8)); // [sp+8] = len
     try emit(&code, gpa, A.movReg(0, 2)); // x0 = len (gc_alloc arg)
-    try emitBuiltinCall(&code, &relocs, gpa, "gc_alloc"); // x0 = cell
+    try emitRuntimeCall(&code, &relocs, gpa, .alloc); // x0 = cell
     // Reload cursor + len; copy len bytes forward cell[0..len] <- stack[cursor..].
     try emit(&code, gpa, A.movReg(3, 0)); // x3 = cell (dst base)
     try emit(&code, gpa, A.ldrSp(10, 0)); // x10 = cursor (src base)
@@ -120,7 +119,7 @@ fn lowerDigitsToStr(gpa: std.mem.Allocator, comptime signed: bool) error{OutOfMe
 // str values into a fresh `gc_alloc`'d packed byte buffer and returns the str reg-pair
 // (x0 = ptr@buffer-base, x1 = len = ll+rl). Args arrive as (x0=ptr_a, x1=len_a,
 // x2=ptr_b, x3=len_b). Appended at link time (emit.zig) when any fn references
-// `__str_concat`; it allocates, so its used-scan pulls in `gc_alloc` (and `gc_collect`).
+// `__str_concat`; it allocates, so its row keeps `core/rt` `alloc` in the image.
 //
 // Out-of-lining the copy (vs inlining two IR byte-copy loops per call site) keeps each
 // concat's loops, values and register pressure out of the caller.
@@ -150,7 +149,7 @@ pub fn lowerStrConcat(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.strSp(2, 16)); // [sp+16] = ptr_b
     try emit(&code, gpa, A.strSp(3, 24)); // [sp+24] = len_b
     try emit(&code, gpa, A.addReg(0, 1, 3)); // x0 = len_a + len_b (gc_alloc arg)
-    try emitBuiltinCall(&code, &relocs, gpa, "gc_alloc"); // x0 = buf
+    try emitRuntimeCall(&code, &relocs, gpa, .alloc); // x0 = buf
     try emit(&code, gpa, A.strSp(0, 32)); // [sp+32] = buf
 
     // COPY loop 1: dst=buf, src=ptr_a, len=len_a.
@@ -222,10 +221,10 @@ test "ir-codegen: __int_to_str builtin byte shape (prologue, buffer, digit loop,
     }
     try testing.expect(saw_cbnz);
     try testing.expect(saw_strb);
-    // It allocates (unlike a bare fd write): a `.call26` reloc to the `gc_alloc` builtin.
+    // It allocates (unlike a bare fd write): a `.call26` reloc to `core/rt` `alloc`.
     var saw_gc_alloc = false;
     for (fc.relocs) |r| {
-        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "gc_alloc")) saw_gc_alloc = true;
+        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
     }
     try testing.expect(saw_gc_alloc);
 }
@@ -258,7 +257,7 @@ test "ir-codegen: __uint_to_str builtin shape (udiv digit loop, no sign, gc_allo
     try testing.expect(saw_cbnz);
     var saw_gc_alloc = false;
     for (fc.relocs) |r| {
-        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "gc_alloc")) saw_gc_alloc = true;
+        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
     }
     try testing.expect(saw_gc_alloc);
 }

@@ -101,10 +101,17 @@ pub fn inlinable(callee: *const Ir.Function, call: Ir.Call, result: Ir.ValueId, 
 /// itself, and returning.
 pub fn fits(callee: *const Ir.Function, max: usize) bool {
     if (callee.c_abi or Ir.instrCount(callee) > max or calls(callee, callee.name.name)) return false;
-    if (hasCycle(callee)) return false;
+    if (hasCycle(callee) or readsFrame(callee)) return false;
     // A callee that never returns had its exit block dropped as unreachable, leaving
     // `exit` naming no block or one that does not `ret`.
     return callee.exit < callee.blocks.len and callee.blocks[callee.exit].term == .ret;
+}
+
+/// Whether `func` reads its own frame record, which names the frame its caller sees only
+/// while the call stays a call.
+fn readsFrame(func: *const Ir.Function) bool {
+    for (func.blocks) |blk| for (blk.instrs) |ins| if (ins.op == .frame_addr) return true;
+    return false;
 }
 
 /// Whether `func` makes a direct call to `name`.
@@ -675,6 +682,20 @@ test "inline skips a callee with a loop" {
     callee.exit = 2;
     try testing.expect(!inlinable(&callee, c, 1, budget));
     callee.exit = 1;
+}
+
+test "inline skips a callee that reads its frame address" {
+    const gpa = testing.allocator;
+    var callee = try addK(gpa, "entry", 1, false);
+    defer callee.deinit(gpa);
+    var func = try caller(gpa, "entry");
+    defer func.deinit(gpa);
+    const c = func.blocks[0].instrs[1].op.call;
+    try testing.expect(inlinable(&callee, c, 1, budget));
+    const was = callee.blocks[0].instrs[1].op;
+    callee.blocks[0].instrs[1].op = .frame_addr;
+    try testing.expect(!inlinable(&callee, c, 1, budget));
+    callee.blocks[0].instrs[1].op = was;
 }
 
 test "inline copies an aggregate returned through the exit param into the call's ret slot" {

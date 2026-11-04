@@ -30,6 +30,15 @@ pub fn of(name: Name) Profile {
     };
 }
 
+/// The profile a `core/rt` unit builds with: release, whatever the program asks, keeping
+/// `gc_stress`. The runtime stands in for hand-written machine code, and a debug-built
+/// collector would make every debug build that allocates pay for it.
+pub fn forRuntime(p: Profile) Profile {
+    var r = release;
+    r.gc_stress = p.gc_stress;
+    return r;
+}
+
 /// Whether integer `+`, `-`, `*` and unary `-` panic on overflow; otherwise they wrap.
 pub fn trapsOverflow(p: Profile) bool {
     return p.name == .debug;
@@ -66,6 +75,12 @@ test "the key bytes tell the profiles apart even when their passes match" {
     const debug_o1: Profile = .{ .name = .debug, .opt = .O1 };
     try std.testing.expect(!std.mem.eql(u8, &Profile.release.keyBytes(), &debug_o1.keyBytes()));
     try std.testing.expect(!std.mem.eql(u8, &Profile.release.keyBytes(), &Profile.debug.keyBytes()));
+}
+
+test "a runtime unit builds as release and keeps gc stress" {
+    const stress: Profile = .{ .name = .debug, .opt = .O0, .gc_stress = true };
+    try std.testing.expectEqual(Profile{ .name = .release, .opt = Profile.release.opt, .gc_stress = true }, stress.forRuntime());
+    try std.testing.expectEqual(Profile.release, Profile.debug.forRuntime());
 }
 
 test "gc stress joins the key bytes" {

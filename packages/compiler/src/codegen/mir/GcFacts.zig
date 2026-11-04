@@ -42,8 +42,6 @@ fn inRegister(ty: types.Type) bool {
 pub const CallFacts = struct {
     /// The call may reach the collector: no register holds a reference across it.
     safepoint: bool = true,
-    /// Callee-saved GPRs (by number) a hand-emitted runtime callee overwrites anyway.
-    clobbered_gprs: []const u32 = &.{},
     /// Each reference argument stays live, in its slot, across the call. A C callee may
     /// call back into toy and collect while only its own registers hold the argument, and
     /// no scan reads registers. A toy callee roots its params in its own frame.
@@ -52,11 +50,9 @@ pub const CallFacts = struct {
 
 pub fn callFacts(callee: Ir.SymName) CallFacts {
     return switch (callee.kind) {
-        .builtin => .{ .safepoint = runtime.mayCollect(callee.name), .clobbered_gprs = runtime.calleeSavedClobbers(callee.name) },
+        .builtin => .{ .safepoint = runtime.mayCollect(callee.name) },
         .import => .{ .keep_ref_args = true },
-        // T0082 proves every source fn of a `core/rt` module never reaches the collector.
-        // A minted unit (`$`) is left out: the rule does not walk adapters or spec units.
-        .user_fn => .{ .safepoint = !(StdNames.isRuntimeModule(callee.name) and std.mem.indexOfScalar(u8, callee.name, '$') == null) },
+        .user_fn => .{ .safepoint = StdNames.userCallMayCollect(callee.name) },
     };
 }
 
@@ -65,8 +61,7 @@ const Type = types.Type;
 
 test "callFacts: builtins that never collect are no safepoint; a C call keeps its reference args" {
     try testing.expect(!callFacts(.{ .kind = .builtin, .name = "panic" }).safepoint);
-    try testing.expect(callFacts(.{ .kind = .builtin, .name = "gc_alloc" }).safepoint);
-    try testing.expectEqualSlices(u32, &.{24}, callFacts(.{ .kind = .builtin, .name = "gc_mark" }).clobbered_gprs);
+    try testing.expect(callFacts(.{ .kind = .builtin, .name = "__str_concat" }).safepoint);
     const c = callFacts(.{ .kind = .import, .name = "strlen" });
     try testing.expect(c.safepoint and c.keep_ref_args);
     const t = callFacts(.{ .kind = .user_fn, .name = "f" });
@@ -77,6 +72,8 @@ test "callFacts: a core/rt fn is no safepoint; a minted unit in a core/rt module
     try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/str.str_eq" }).safepoint);
     try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/str.f$int" }).safepoint);
     try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/mem.ga_push$int" }).safepoint);
+    try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/gc.alloc" }).safepoint);
+    try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/gc.mark" }).safepoint);
 }
 
 test "valueRefs: a rawptr value and a field address are references; an int is not" {

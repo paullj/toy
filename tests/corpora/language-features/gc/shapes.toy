@@ -1,0 +1,110 @@
+# expect: exit 0
+# Feature: object graphs of every shape survive collections, under any trigger. A linked
+# list deep enough that marking it must not recurse, a two-node cycle that only a root
+# keeps, an object over 8 KiB (a mapping of its own), Maps and Sets of references,
+# closures holding references, strings built by concat, and cells freed and handed out
+# again. Each check returns its own code when it fails.
+import std/gc
+import std/map
+import std/ref
+import std/set
+import std/vec
+
+struct Node { v: int, next: Option[Ref[Node]] }
+
+fn churn(n: int) {
+    for i in 0..n {
+        junk := [i, i, i]
+        junk.push(i)
+    }
+}
+
+fn list(n: int) -> Option[Ref[Node]] {
+    head: Option[Ref[Node]] = Option.none
+    for i in 0..n {
+        head = Option.some(Ref.new(Node { v: i, next: head }))
+    }
+    return head
+}
+
+fn sum(l: Option[Ref[Node]]) -> int {
+    total := 0
+    cur := l
+    loop {
+        match cur {
+            Option.some(r) -> {
+                total = total + r.get().v
+                cur = r.get().next
+            },
+            Option.none -> { break },
+        }
+    }
+    return total
+}
+
+fn big(n: int) -> Vec[Ref[int]] {
+    xs := Vec[Ref[int]].new()
+    for i in 0..n { xs.push(Ref.new(i)) }
+    return xs
+}
+
+fn adder(r: Ref[int], s: str) -> fn(int) -> int {
+    fn(x: int) -> int { x + r.get() + s.len() }
+}
+
+fn label(i: int) -> str {
+    return "k".concat(i.to_string())
+}
+
+fn main() -> int {
+    l := list(3000)
+    churn(2000)
+    gc.collect()
+    if sum(l) != 4498500 { return 1 }
+
+    a := Ref.new(Node { v: 1, next: Option.none })
+    b := Ref.new(Node { v: 2, next: Option.some(a) })
+    a.set(Node { v: 1, next: Option.some(b) })
+    churn(2000)
+    match a.get().next {
+        Option.some(n) -> { if n.get().v != 2 { return 2 } },
+        Option.none -> { return 3 },
+    }
+
+    xs := big(1500)
+    churn(2000)
+    gc.collect()
+    t := 0
+    for r in xs { t = t + r.get() }
+    if t != 1124250 { return 4 }
+
+    m := Map[str, Vec[Ref[int]]].new()
+    seen := Set[str].new()
+    for i in 0..200 {
+        m.set(label(i), big(3))
+        seen.add(label(i * 2))
+    }
+    churn(2000)
+    gc.collect()
+    if m.get(label(199)).or(big(0)).len() != 3 { return 5 }
+    if !seen.contains(label(398)) { return 6 }
+    if m.get(label(7)).or(big(0))[2].get() != 2 { return 7 }
+
+    fs: Vec[fn(int) -> int] = []
+    for i in 0..100 { fs.push(adder(Ref.new(i), label(i))) }
+    churn(2000)
+    gc.collect()
+    if fs[42](1) != 46 { return 8 }
+
+    s := ""
+    for i in 0..300 { s = s.concat(label(i % 10)) }
+    churn(2000)
+    if s.len() != 600 { return 9 }
+
+    for _round in 0..20 {
+        keep := big(100)
+        churn(500)
+        if keep[99].get() != 99 { return 10 }
+    }
+    return 0
+}

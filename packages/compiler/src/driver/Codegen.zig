@@ -34,6 +34,7 @@ const MachO = @import("../link/MachO.zig");
 const Abi = @import("../codegen/abi/Abi.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
+const StdNames = @import("../symbols/StdNames.zig");
 
 /// The mangled name of the erased `(ty, kind)` witness in `tc.erased_units` — a linear
 /// scan matching `(Type.eql, kind)`. Borrowed (the plan holds it by reference); `null`
@@ -154,7 +155,6 @@ fn relink(
     ir_instrs: usize,
     desc_plan: []const Link.DescEntry,
     debug: ?Link.DebugInput,
-    profile: Profile,
 ) !LowerProgramResult {
     // Gather the lowered fns into a contiguous slice in source order. `linkAndTail`
     // CONSUMES the elements (frees each FnCode on every path), so we only free the
@@ -166,7 +166,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug, profile) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -187,8 +187,8 @@ fn relink(
 /// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
 /// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput, profile: Profile) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug, .{ .gc_stress = profile.gc_stress });
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug);
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -423,6 +423,7 @@ const Plan = struct {
             .derive, .erased, .lambda, .adapter => null,
         };
         const src = p.modules[mod];
+        const profile = if (StdNames.isBundledRuntimeSym(sym.name)) p.o.profile.forRuntime() else p.o.profile;
         return .{
             .in = .{
                 .tree = src.tree,
@@ -444,12 +445,13 @@ const Plan = struct {
                     .spec => |k| p.specs.units[k].targets,
                     else => &.{},
                 }) else .none,
-                .trap_overflow = p.o.profile.trapsOverflow(),
+                .trap_overflow = profile.trapsOverflow(),
+                .gc_stress = profile.gc_stress,
                 .lines = p.linesFor(u),
             },
             .body = body,
             .sym = sym,
-            .profile = p.o.profile,
+            .profile = profile,
             .type_args = if (inst) |x| x.args else &.{},
             .conformances = if (inst) |x| x.conformances else &.{},
             .closure_facts = if (u == .body and i < p.closure_facts.len) p.closure_facts[i] else &.{},
@@ -668,7 +670,7 @@ pub fn lowerGraphProgram(
     const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "", .fixed_files = graph.seeded_from } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug, profile);
+    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -795,6 +797,28 @@ const Checked = struct {
             gpa.free(self.tree.extra);
         }
         self.g = try Graph.single(gpa, "main", "", src, self.tokens, self.tree.nodes, self.tree.extra, self.tree.pub_bits);
+        errdefer self.g.deinit(gpa);
+        self.res = try ResolveGraph.resolveGraph(gpa, &self.g);
+        errdefer self.res.deinit(gpa);
+        self.tc = try @import("../types_graph.zig").checkGraph(gpa, &self.g, &self.res, null, 0);
+        return self;
+    }
+
+    /// `src` as a program's entry, discovered with the runtime every program carries, so
+    /// a build of it links.
+    fn createProgram(gpa: std.mem.Allocator, io: std.Io, src: []const u8) !*Checked {
+        const self = try gpa.create(Checked);
+        errdefer gpa.destroy(self);
+        self.tokens = &.{};
+        self.tree = .{ .nodes = &.{}, .extra = &.{} };
+        const Lookup = struct {
+            fn get(ctx: *const anyopaque, path: []const u8) ?[]const u8 {
+                const s: *const []const u8 = @ptrCast(@alignCast(ctx));
+                return if (std.mem.eql(u8, path, "/ws/main.toy")) s.* else null;
+            }
+        };
+        const overlay: Graph.Overlay = .{ .ctx = @ptrCast(&src), .getFn = Lookup.get, .disk = false };
+        self.g = try Graph.discover(gpa, io, Cache.disabled, "aarch64-macos", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay });
         errdefer self.g.deinit(gpa);
         self.res = try ResolveGraph.resolveGraph(gpa, &self.g);
         errdefer self.res.deinit(gpa);
@@ -938,13 +962,15 @@ test "the build lowers and links every unit of the plan" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
-    const ck = try Checked.create(gpa, every_class_src);
+    const ck = try Checked.createProgram(gpa, threaded.io(), every_class_src);
     defer ck.destroy(gpa);
     for ([_]Profile{ .debug, .release }) |profile| {
+        var plan = try ck.plan(gpa, profile);
+        defer plan.deinit(gpa);
         var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, "aarch64-macos", &ck.g, &ck.res, &ck.tc, .verify, profile, true, null, null, 1);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .ok);
-        try testing.expectEqual(@as(usize, 8), out.ok.codegen_compiled);
+        try testing.expectEqual(plan.units.len, out.ok.codegen_compiled);
     }
 }
 
@@ -1059,7 +1085,8 @@ test "--verify names a reloc target the unit's key does not fold" {
         .{ .target = .{ .kind = .user_fn, .name = "main.add$fnval" }, .uncovered = false },
         .{ .target = .{ .kind = .user_fn, .name = "main$l0" }, .uncovered = false },
         .{ .target = .{ .kind = .user_fn, .name = "main" }, .uncovered = false },
-        .{ .target = .{ .kind = .builtin, .name = "gc_alloc" }, .uncovered = false },
+        .{ .target = .{ .kind = .builtin, .name = "panic" }, .uncovered = false },
+        .{ .target = .{ .kind = .user_fn, .name = "core/rt/gc.alloc" }, .uncovered = false },
         .{ .target = .{ .kind = .user_fn, .name = "main.keep$bool" }, .uncovered = true },
         .{ .target = .{ .kind = .user_fn, .name = "other.add$fnval" }, .uncovered = true },
         .{ .target = .{ .kind = .user_fn, .name = "mainly" }, .uncovered = true },

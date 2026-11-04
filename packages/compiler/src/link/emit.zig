@@ -52,8 +52,6 @@ pub const Options = struct {
     /// Emit debug info (LC_SYMTAB and DWARF) for these sources. Null leaves the image
     /// byte-identical to a build without it.
     debug: ?Link.DebugInput = null,
-    /// The choices the appended runtime bodies read.
-    runtime: runtime.Config = .{},
 };
 
 /// The linked-program tail: the joined __text blob, the entry offset, and the
@@ -79,8 +77,21 @@ pub const Linked = struct {
 /// `Link.link`. CONSUMES `fns` (frees each FnCode, dropped or kept, and any appended
 /// builtin body). `entry` is the entry function's stable symbol identity. Returns the
 /// linked tail; the caller owns its `text`/`cstrings`/`data_relocs` (free `.import`
-/// data-reloc names individually). `rt` shapes the appended builtin bodies.
-pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput, rt: runtime.Config) !Linked {
+/// data-reloc names individually).
+/// Each hand-emitted builtin's calls into `core/rt`, as `Link.reachable` follows them.
+const builtin_calls = blk: {
+    var n: usize = 0;
+    for (runtime.hand_builtins) |hb| n += hb.runtime_calls.len;
+    var out: [n]Link.BuiltinCall = undefined;
+    var i: usize = 0;
+    for (runtime.hand_builtins) |hb| for (hb.runtime_calls) |f| {
+        out[i] = .{ .builtin = hb.name, .callee = .{ .kind = .user_fn, .name = f.name() } };
+        i += 1;
+    };
+    break :blk out;
+};
+
+pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
     // We OWN `fns`' elements now (the caller relinquished them); on any failure free
     // the ones not yet moved into `all` (or dropped) plus everything in `all`.
     var all: std.ArrayList(Link.FnCode) = .empty;
@@ -100,7 +111,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
     var kept_descs: std.ArrayList(Link.DescEntry) = .empty;
     defer kept_descs.deinit(gpa);
     {
-        const r = try Link.reachable(gpa, fns, entry, planned);
+        const r = try Link.reachable(gpa, fns, entry, planned, &builtin_calls);
         defer r.deinit(gpa);
         for (planned, r.descs) |d, k| {
             if (k) try kept_descs.append(gpa, d);
@@ -117,6 +128,10 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
     //    relocs (e.g. `panic` -> `write`), so the dyld import set is DERIVED from
     //    `data_relocs` like any other import.
     var used = [_]bool{false} ** runtime.hand_builtins.len;
+    // The collector reads the GC stack map, so a kept fn naming the map's base means the
+    // collector runs: reserve and emit the map. A heap-free program has none and stays
+    // byte-identical.
+    var uses_gc = false;
     for (all.items) |f| {
         for (f.relocs) |rl| switch (rl.target) {
             .func => |s| if (s.kind == .builtin) {
@@ -124,38 +139,19 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
                     if (std.mem.eql(u8, s.name, hb.name)) used[i] = true;
                 }
             },
+            .cstr => |h| if (h == Link.gc_stackmap_base_hash) {
+                uses_gc = true;
+            },
             else => {},
         };
-    }
-    // A builtin body can statically call other builtins from within its APPENDED code
-    // (e.g. `gc_alloc` triggers `gc_collect`), an edge invisible to the fn-only used-scan
-    // above. Close the used set over each row's declared `static_call_deps` to a fixpoint,
-    // so any program that carries a builtin also carries its transitive callees.
-    var closure_changed = true;
-    while (closure_changed) {
-        closure_changed = false;
-        inline for (runtime.hand_builtins, 0..) |hb, i| {
-            if (used[i]) inline for (hb.static_call_deps) |dep| {
-                const j = comptime runtime.handBuiltinIndex(dep);
-                if (!used[j]) {
-                    used[j] = true;
-                    closure_changed = true;
-                }
-            };
-        }
     }
     // `panic` alone is consumed past the append: it drags in the `write` import and
     // reserves the backtrace symbol table's slot.
     const uses_panic = used[comptime runtime.handBuiltinIndex("panic")];
-    // `gc_collect` present ⇒ the collector runs ⇒ reserve + emit the GC stack map. The
-    // static-call closure above already pulls `gc_collect` in via `gc_alloc`, so this is
-    // true for any allocating program and false for a heap-free one (keeping it
-    // byte-identical). Local to `linkProgram`: no new param threads through `Codegen`.
-    const uses_gc = used[comptime runtime.handBuiltinIndex("gc_collect")];
     // The referenced hand-emitted builtin bodies follow the kept fns, in `hand_builtins`
     // order, so the linked image never depends on thread order.
     for (runtime.hand_builtins, 0..) |hb, i| {
-        if (used[i]) try all.append(gpa, try hb.lower(gpa, rt));
+        if (used[i]) try all.append(gpa, try hb.lower(gpa));
     }
 
     // 2) Intern strings program-wide via `internCstrings` (stable collect +
@@ -500,7 +496,7 @@ pub fn assembleAndSign(
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
 /// symbol identity (e.g. `{.user_fn, "main"}`). Caller owns the returned bytes.
 pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
-    const lk = try linkProgram(io, gpa, fns, entry, opts.descriptors, opts.debug, opts.runtime);
+    const lk = try linkProgram(io, gpa, fns, entry, opts.descriptors, opts.debug);
     defer {
         lk.debug.deinit(gpa);
         gpa.free(lk.text);
@@ -651,7 +647,7 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
 
     var t = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t.deinit();
-    var lk = try linkProgram(t.io(), gpa, fns, entry, &.{}, null, .{});
+    var lk = try linkProgram(t.io(), gpa, fns, entry, &.{}, null);
     defer freeLinked(gpa, &lk);
 
     // Only `main` survives: no `aaa`, no `bbb`, so no `panic` body either.
@@ -692,24 +688,30 @@ test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and 
     try testing.expectEqual(@as(u64, 0x8000000000000001), std.mem.readInt(u64, img_serial[got_off + 8 ..][0..8], .little));
 }
 
-/// One owned `FnCode` `main` whose body is `bl gc_alloc ; ret` — a `.call26` to the
-/// hand-emitted `gc_alloc` builtin, which drags in its body plus the `mmap`
-/// imports. Fresh each call so both determinism-test runs get their own to consume.
+/// One owned `FnCode` `main` that reads the collector's control block and the GC stack
+/// map, as the collector does: `adrp/add` of each, then `ret`. Fresh each call so both
+/// determinism-test runs get their own to consume.
 fn gcFns(gpa: std.mem.Allocator) ![]Link.FnCode {
     const fns = try gpa.alloc(Link.FnCode, 1);
-    const code = try gpa.alloc(u8, 8);
-    std.mem.writeInt(u32, code[0..4], w_bl0, .little); // bl gc_alloc (patched at link)
-    std.mem.writeInt(u32, code[4..8], w_ret, .little);
-    var relocs: std.ArrayList(Link.Reloc) = .empty;
-    try relocs.append(gpa, .{ .site = 0, .target = .{ .func = .{ .kind = .builtin, .name = try gpa.dupe(u8, "gc_alloc") } }, .kind = .call26 });
-    fns[0] = .{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") }, .code = code, .relocs = try relocs.toOwnedSlice(gpa), .literals = &.{} };
+    const code = try gpa.alloc(u8, 20);
+    for (0..2) |k| {
+        std.mem.writeInt(u32, code[k * 8 ..][0..4], w_adrp0, .little);
+        std.mem.writeInt(u32, code[k * 8 + 4 ..][0..4], w_add0, .little);
+    }
+    std.mem.writeInt(u32, code[16..20], w_ret, .little);
+    const relocs = try gpa.dupe(Link.Reloc, &.{
+        .{ .site = 0, .target = .{ .data = 0 }, .kind = .adrp_page },
+        .{ .site = 4, .target = .{ .data = 0 }, .kind = .add_lo12 },
+        .{ .site = 8, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = .adrp_page },
+        .{ .site = 12, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = .add_lo12 },
+    });
+    fns[0] = .{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") }, .code = code, .relocs = relocs, .literals = &.{} };
     return fns;
 }
 
-test "backend determinism: a gc_alloc-using image is byte-identical at -j1 and -jN" {
-    // The appended allocator body + its derived `mmap` GOT import must be a
-    // pure function of the fn set (the body is fixed AArch64; the imports are dedup+
-    // sorted by name), so the whole image is identical regardless of thread count.
+test "backend determinism: a collector-using image is byte-identical at -j1 and -jN" {
+    // The control block's zero-fill segment and the stack map must be a pure function of
+    // the fn set, so the whole image is identical regardless of thread count.
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const gpa = testing.allocator;
     const entry = Link.SymName{ .kind = .user_fn, .name = "main" };
@@ -735,7 +737,7 @@ test "backend determinism: a gc_alloc-using image is byte-identical at -j1 and -
 }
 
 test "backend determinism: the gc stack-map table (riding __cstring) is byte-identical at -j1 and -jN" {
-    // A gc_alloc-using program reserves + appends the GC stack map into the signed,
+    // A collector-using program reserves + appends the GC stack map into the signed,
     // read-only __cstring blob. It is built from the layout (stable-sort-ranked offsets +
     // each fn's root bitmap), a pure function of the fn set, so the whole __cstring blob —
     // stack map included — is byte-identical regardless of thread count. Assert the blob is
@@ -747,14 +749,14 @@ test "backend determinism: the gc stack-map table (riding __cstring) is byte-ide
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null, .{});
+    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try gcFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null, .{});
+    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);
@@ -796,14 +798,14 @@ test "backend determinism: linkProgram is byte-identical at -j1 and -jN across e
     defer gpa.free(fns_serial); // linkProgram consumes the elements, not the slice
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null, .{});
+    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try detFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null, .{});
+    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);

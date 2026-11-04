@@ -57,13 +57,55 @@ pub const ElemPrim = enum {
 /// its bundled signature declares, which a test in `types/runtime.zig` pins.
 pub const RuntimeFn = enum {
     str_eq,
+    alloc,
+    collect,
+    mark,
+    mark_leaf,
+    collections,
+    span_count,
 
     pub fn name(f: RuntimeFn) []const u8 {
         return switch (f) {
             .str_eq => "core/rt/str.str_eq",
+            .alloc => "core/rt/gc.alloc",
+            .collect => "core/rt/gc.collect",
+            .mark => "core/rt/gc.mark",
+            .mark_leaf => "core/rt/gc.mark_leaf",
+            .collections => "core/rt/gc.collections",
+            .span_count => "core/rt/gc.span_count",
         };
     }
+
+    /// The collector's entries: a call to one may run a collection. They are the only
+    /// `core/rt` fns that reach the collector, so T0082 counts a call to one as an
+    /// allocation, and every call to one is a safepoint.
+    pub fn collects(f: RuntimeFn) bool {
+        return f == .alloc or f == .collect;
+    }
+
+    pub fn lookup(sym: []const u8) ?RuntimeFn {
+        for (std.enums.values(RuntimeFn)) |f| if (std.mem.eql(u8, f.name(), sym)) return f;
+        return null;
+    }
 };
+
+/// Whether a call to the toy fn `sym` may run the collector. T0082 proves no source fn of
+/// a `core/rt` module reaches it but the collector's entries. A minted unit (`$`) is left
+/// out: the rule does not walk adapters or spec units.
+pub fn userCallMayCollect(sym: []const u8) bool {
+    if (!isRuntimeModule(sym) or std.mem.indexOfScalar(u8, sym, '$') != null) return true;
+    const f = RuntimeFn.lookup(sym) orelse return false;
+    return f.collects();
+}
+
+test "userCallMayCollect: only the collector's entries among core/rt source fns" {
+    try std.testing.expect(userCallMayCollect("main"));
+    try std.testing.expect(userCallMayCollect("core/rt/gc.alloc"));
+    try std.testing.expect(userCallMayCollect("core/rt/gc.collect"));
+    try std.testing.expect(userCallMayCollect("core/rt/str.f$int"));
+    try std.testing.expect(!userCallMayCollect("core/rt/gc.mark"));
+    try std.testing.expect(!userCallMayCollect("core/rt/str.str_eq"));
+}
 
 /// Where a receiver-method desugar reads the receiver type it selects the method on.
 pub const RecvSource = enum {
@@ -205,6 +247,7 @@ const core_replacements = std.StaticStringMap([]const u8).initComptime(.{
     .{ "core/fs", "std/fs" },
     .{ "core/fmt", "std/float" },
     .{ "core/rt/str", "std/str" },
+    .{ "core/rt/gc", "std/gc" },
 });
 
 /// The std module holding a builtin scalar's `impl` of a protocol, keyed `"<type> has

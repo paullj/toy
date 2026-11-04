@@ -347,10 +347,11 @@ const E = struct {
             .sym_addr => |o| {
                 const rd = o.rd.hw();
                 switch (o.target) {
-                    .cstr => |h| {
-                        try e.reloc(.{ .cstr = h }, .adrp_page);
+                    inline .cstr, .data => |v, tag| {
+                        const t = @unionInit(Link.SymbolId, @tagName(tag), v);
+                        try e.reloc(t, .adrp_page);
                         try e.word(Aarch64.adrp(rd, 0));
-                        try e.reloc(.{ .cstr = h }, .add_lo12);
+                        try e.reloc(t, .add_lo12);
                         try e.word(Aarch64.addImm(rd, rd, 0));
                     },
                     .func => |s| {

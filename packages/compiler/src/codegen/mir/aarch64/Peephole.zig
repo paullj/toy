@@ -8,7 +8,8 @@
 //! - a small constant operand of `cmp`, `add`, `sub` and the `adds` overflow check
 //!   becomes the instruction's immediate;
 //! - signed and unsigned division by a power of two becomes shifts, and the `msub` of a
-//!   remainder by one becomes a shifted `sub`;
+//!   remainder by one becomes a shifted `sub`; a multiply by a power of two becomes a left
+//!   shift;
 //! - `cset` feeding the block's `cbnz` becomes a `b.cond` on the flags;
 //! - then every pure instruction whose result nothing reads is dropped.
 //!
@@ -71,9 +72,22 @@ const P = struct {
             }
         };
         for (p.f.blocks) |*b| for (b.insts.items) |inst| {
-            const d = rawDef(p.f, inst) orelse continue;
+            const d = rawDef(p.f, inst) orelse p.addConstDef(inst) orelse continue;
             if (p.single(d.reg)) p.known[d.reg.index()] = d.def;
         };
+    }
+
+    /// An `add` of a register and a known constant, which `rewrite` turns into an
+    /// `add_imm`: known now, so an access through its result folds the constant too.
+    fn addConstDef(p: *const P, inst: Inst) ?RegDef {
+        const o = switch (inst.op) {
+            .alu => |o| o,
+            else => return null,
+        };
+        if (o.op != .add) return null;
+        const base, const k = if (p.imm(o.rm)) |k| .{ o.rn, k } else if (p.imm(o.rn)) |k| .{ o.rm, k } else return null;
+        if (k < 0 or k >= max_off) return null;
+        return .{ .reg = o.rd, .def = memDef(Mem.reg(base, 0), @intCast(k)) };
     }
 
     fn single(p: *const P, r: Reg) bool {
@@ -178,6 +192,10 @@ const P = struct {
                 .sdiv => if (log2Of(p.imm(o.rm))) |k| return p.sdivPow2(out, orig, o.rd, o.rn, k),
                 .udiv => if (log2Of(p.imm(o.rm))) |k| {
                     inst.op = if (k == 0) .{ .mov = .{ .rd = o.rd, .rn = o.rn } } else .{ .shift_imm = .{ .op = .lsr, .rd = o.rd, .rn = o.rn, .amt = k } };
+                },
+                .mul => {
+                    const rn, const k = if (log2Of(p.imm(o.rm))) |k| .{ o.rn, k } else if (log2Of(p.imm(o.rn))) |k| .{ o.rm, k } else return out.append(p.gpa, inst);
+                    inst.op = if (k == 0) .{ .mov = .{ .rd = o.rd, .rn = rn } } else .{ .shift_imm = .{ .op = .lsl, .rd = o.rd, .rn = rn, .amt = k } };
                 },
                 else => {},
             },
@@ -297,7 +315,9 @@ fn setsFlags(inst: Inst) bool {
 }
 
 /// The register an instruction defines and what it computes, for the kinds `Def` names.
-fn rawDef(f: *Func, inst: Inst) ?struct { reg: Reg, def: Def } {
+const RegDef = struct { reg: Reg, def: Def };
+
+fn rawDef(f: *Func, inst: Inst) ?RegDef {
     return switch (inst.op) {
         .mov_imm => |o| .{ .reg = o.rd, .def = .{ .imm = o.imm } },
         .addr => |o| .{ .reg = o.rd, .def = memDef(o.mem, 0) },
@@ -431,6 +451,23 @@ test "peephole: a frame address, or a register plus a constant, folds into the a
     try testing.expectEqualDeep(Mem.reg(v(6), 0), got[6].op.store.mem);
 }
 
+test "peephole: an add of a constant folds into the access through its result" {
+    const gpa = testing.allocator;
+    var f = try testFunc(gpa, 2, 4);
+    defer f.deinit(gpa);
+    const v = Reg.virt;
+    try add(gpa, &f, 1, .{ .load = .{ .rt = v(0), .mem = Mem.frame(.{ .slot = 0 }, 0) } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(1), .imm = 216 } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .add, .rd = v(2), .rn = v(0), .rm = v(1) } });
+    try add(gpa, &f, 1, .{ .load = .{ .rt = v(3), .mem = Mem.reg(v(2), 0) } });
+    try add(gpa, &f, 1, .{ .store = .{ .rt = v(3), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
+    try run(gpa, &f);
+
+    const got = f.blocks[1].insts.items;
+    try testing.expectEqual(@as(usize, 3), got.len);
+    try testing.expectEqualDeep(Mem.reg(v(0), 216), got[1].op.load.mem);
+}
+
 test "peephole: small constant operands become immediates" {
     const gpa = testing.allocator;
     var f = try testFunc(gpa, 2, 10);
@@ -488,6 +525,27 @@ test "peephole: division and remainder by a power of two become shifts that roun
         try testing.expectEqual(@rem(x, d), @as(i64, @bitCast(regs[@intFromEnum(at(3))])));
         try testing.expectEqual(@as(u64, @bitCast(x)) >> k, regs[@intFromEnum(at(4))]);
     };
+}
+
+test "peephole: a multiply by a power of two becomes a left shift" {
+    const gpa = testing.allocator;
+    var f = try testFunc(gpa, 2, 6);
+    defer f.deinit(gpa);
+    const v = Reg.virt;
+    try add(gpa, &f, 1, .{ .load = .{ .rt = v(0), .mem = Mem.frame(.{ .slot = 0 }, 0) } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(1), .imm = 16 } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(2), .imm = 48 } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(3), .rn = v(0), .rm = v(1) } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(4), .rn = v(1), .rm = v(0) } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(5), .rn = v(0), .rm = v(2) } });
+    for (3..6) |i| try add(gpa, &f, 1, .{ .store = .{ .rt = v(@intCast(i)), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
+    try run(gpa, &f);
+
+    const got = f.blocks[1].insts.items;
+    try testing.expectEqualDeep(Inst.Op{ .shift_imm = .{ .op = .lsl, .rd = v(3), .rn = v(0), .amt = 4 } }, got[2].op);
+    try testing.expectEqualDeep(Inst.Op{ .shift_imm = .{ .op = .lsl, .rd = v(4), .rn = v(0), .amt = 4 } }, got[3].op);
+    try testing.expect(got[4].op == .alu);
+    for (got) |i| try testing.expect(!(i.op == .mov_imm and i.op.mov_imm.rd == v(1)));
 }
 
 test "peephole: a cset the block's cbnz reads becomes a b.cond on the flags" {

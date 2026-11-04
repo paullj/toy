@@ -467,7 +467,7 @@ test "gc: at -O1 a lambda whose Vec, str, Ref and closure captures sit in a fram
     const body0 = harness.irBody(o0, "main") orelse return error.TestExpectedMain;
     try std.testing.expect(std.mem.indexOf(u8, body1, ":env$main$l0") != null);
     // The env cell and `total`'s box are gone.
-    try std.testing.expectEqual(std.mem.count(u8, body0, "call @gc_alloc"), std.mem.count(u8, body1, "call @gc_alloc") + 2);
+    try std.testing.expectEqual(std.mem.count(u8, body0, "call @core/rt/gc.alloc"), std.mem.count(u8, body1, "call @core/rt/gc.alloc") + 2);
 }
 
 test "gc: a capturing lambda passed to a generic fn survives a collection in it" {

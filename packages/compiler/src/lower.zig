@@ -113,6 +113,9 @@ pub const Inputs = struct {
     /// A source `+`, `-`, `*` or unary `-` on integers panics when it overflows (a debug
     /// build); otherwise it wraps, as the `+%` family always does.
     trap_overflow: bool = false,
+    /// The value of the `gc_stress()` intrinsic: the allocator collects on every call
+    /// (`--gc-stress`).
+    gc_stress: bool = false,
     /// A debug build tags each instruction with its statement's line; empty `starts`
     /// tags none.
     lines: Lines = .{},
@@ -1622,7 +1625,7 @@ pub fn strCmpAtPtrs(b: *Builder, lbase: Ir.ValueId, rbase: Ir.ValueId) error{Out
 /// The `core/rt` fn every `str ==` calls. Out of line, one comparison is one call
 /// instead of a loop of about 37 IR values in the caller's frame, and it is no safepoint
 /// (T0082 holds every `core/rt` fn to never allocating).
-const str_eq_sym: Link.SymName = .{ .kind = .user_fn, .name = StdNames.RuntimeFn.str_eq.name() };
+const str_eq_sym: Link.SymName = runtimeSym(.str_eq);
 
 fn lowerStrEq(b: *Builder, lhs_node: Ast.Index, rhs_node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
     const lhs_op = try lowerExpr(b, lhs_node);
@@ -1943,11 +1946,11 @@ fn copyStrSlot(b: *Builder, dst: Ir.SlotId, src: Ir.SlotId) error{OutOfMemory}!v
     _ = try b.emit(.{ .copy = .{ .dst = dbase, .src = sbase, .ty = Typecheck.Type.str } }, null);
 }
 
-/// The `gc_alloc` builtin's stable symbol identity — returns a fresh zeroed cell pointer.
+/// The collector's allocator, `core/rt` `alloc`: returns a fresh zeroed cell pointer.
 /// A `Ref.new(x)` box (the `ref_new` intrinsic) or a captured-and-assigned local MINTS this
 /// call directly in lower; user source never names it, so this bypasses the core-only
 /// allowlist by construction.
-const gc_alloc_sym: Link.SymName = .{ .kind = .builtin, .name = "gc_alloc" };
+const gc_alloc_sym: Link.SymName = runtimeSym(.alloc);
 
 /// A fresh zeroed `gc_alloc(size)` cell pointer, typed as a managed box so the precise
 /// root map sees it.
@@ -1969,14 +1972,14 @@ pub fn emitGcAlloc(b: *Builder, size: u32) error{OutOfMemory}!Ir.ValueId {
 /// Box STORES keep their `.int` store-width (never read by the projector).
 pub const box_repr_ty: Typecheck.Type = Typecheck.Type.rawptr;
 
-/// The `gc_mark` builtin's stable symbol identity — marks one managed cell. A derived
+/// `core/rt` `mark`: marks one managed cell for scanning. A derived
 /// `trace(obj)` unit `bl`s this per managed field; user source never names it.
-pub const gc_mark_sym: Link.SymName = .{ .kind = .builtin, .name = "gc_mark" };
+pub const gc_mark_sym: Link.SymName = runtimeSym(.mark);
 
-/// The `gc_mark_leaf` builtin's stable symbol identity — sets one cell's mark bit without
+/// `core/rt` `mark_leaf`: sets one cell's mark bit without
 /// pushing it (the cell survives but is never scanned). An erased `str` trace unit `bl`s it
 /// on the heap buffer; container traces `bl` it on their leaf-marked backings.
-pub const gc_mark_leaf_sym: Link.SymName = .{ .kind = .builtin, .name = "gc_mark_leaf" };
+pub const gc_mark_leaf_sym: Link.SymName = runtimeSym(.mark_leaf);
 
 /// Whether `t` is a managed box (`Ref[T]`/`gc_array[T]`): a struct carrying the reified
 /// reference-family marker. A box is an 8-byte cell pointer — lowered as a scalar `int`,
@@ -2239,8 +2242,11 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
             // indirect-dispatch helpers and the `ref_*` cell ops) have no symbol of their own,
             // so intercept them BEFORE the plain-name resolution below looks for one.
             const nm = b.in.names[gid];
-            if (nm.kind == .builtin) if (Intrinsic.lookup(nm.name)) |ik| if (try lowerIntrinsicCall(b, node_idx, n, ik)) |op| return op;
             callee = nm;
+            if (nm.kind == .builtin) if (Intrinsic.lookup(nm.name)) |ik| {
+                if (try lowerIntrinsicCall(b, node_idx, n, ik)) |op| return op;
+                if (collectorFn(ik)) |f| callee = runtimeSym(f);
+            };
             callee_gid = gid;
         },
         // A miss (arity/conflict/unbound/unminted) is an internal invariant break — Pass C
@@ -2352,8 +2358,23 @@ fn lowerTypeIntrinsicCall(b: *Builder, n: Ast.Node) error{OutOfMemory}!Ir.Operan
     return .none;
 }
 
-/// A call of intrinsic `ik` lowered in place, or null for one that is called by its own
-/// symbol (`panic`).
+/// The `core/rt` collector fn a call of intrinsic `ik` calls, or null.
+fn collectorFn(ik: Intrinsic.Kind) ?StdNames.RuntimeFn {
+    return switch (ik) {
+        .gc_alloc => .alloc,
+        .gc_collect => .collect,
+        .gc_stats => .collections,
+        .gc_span_count => .span_count,
+        else => null,
+    };
+}
+
+pub fn runtimeSym(f: StdNames.RuntimeFn) Link.SymName {
+    return .{ .kind = .user_fn, .name = f.name() };
+}
+
+/// A call of intrinsic `ik` lowered in place, or null for one that is called by a symbol
+/// (`panic`, `text_base`, or a `core/rt` collector fn).
 fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrinsic.Kind) error{OutOfMemory}!?Ir.Operand {
     switch (ik) {
         .store => {
@@ -2430,6 +2451,19 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
             const largs = Ast.rangeSlice(b.in.tree, (n.rhs).int());
             const addr = operandValue(try lowerExpr(b, largs[0]));
             return .{ .value = try b.emit(.{ .load_byte = addr }, Typecheck.Type.int) };
+        },
+        .control_block => return .{ .value = try b.emit(.{ .data_addr = 0 }, Typecheck.Type.int) },
+        .frame_address => return .{ .value = try b.emit(.frame_addr, Typecheck.Type.int) },
+        .stack_map => return .{ .value = try b.emit(.{ .cstr_ptr = Link.gc_stackmap_base_hash }, Typecheck.Type.int) },
+        .gc_stress => return .{ .value = try b.emit(.{ .bconst = b.in.gc_stress }, Typecheck.Type.bool) },
+        .call_trace => {
+            const a = Ast.rangeSlice(b.in.tree, (n.rhs).int());
+            const fp = operandValue(try lowerExpr(b, a[0]));
+            const p = operandValue(try lowerExpr(b, a[1]));
+            const args = try b.gpa.alloc(Ir.Operand, 1);
+            args[0] = .{ .value = p };
+            _ = try b.emit(.{ .call_indirect = .{ .target = fp, .args = args, .ret_slot = Ir.none_slot } }, null);
+            return .none;
         },
         .ref_new => return try lowerRefNew(b, Ast.rangeSlice(b.in.tree, (n.rhs).int())[0], n.main_token),
         .ref_get => {
@@ -5017,7 +5051,7 @@ test "a '_' capture lowers like the lambda it means; a hole pipe is a direct cal
         defer gpa.free(ir);
         try testing.expect(std.mem.indexOf(u8, ir, "fn_addr @main.f$l0") != null);
         try testing.expect(std.mem.indexOf(u8, ir, "iconst 0\n  store %") != null);
-        try testing.expect(std.mem.indexOf(u8, ir, "call @gc_alloc(") == null);
+        try testing.expect(std.mem.indexOf(u8, ir, "call @core/rt/gc.alloc(") == null);
         try testing.expect(std.mem.indexOf(u8, ir, "call @main.add(") == null);
     }
     {
@@ -5032,11 +5066,11 @@ test "a '_' capture lowers like the lambda it means; a hole pipe is a direct cal
         , "f", .{});
         defer gpa.free(ir);
         try testing.expect(std.mem.indexOf(u8, ir, "fn_addr @main.f$l0") != null);
-        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @gc_alloc("));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
         // An 8-byte env holding `a`, by value.
         try testing.expect(std.mem.indexOf(u8, ir,
             \\  %4 = iconst 8
-            \\  %5 = call @gc_alloc(%4)
+            \\  %5 = call @core/rt/gc.alloc(%4)
             \\  %6 = field_addr %5, 0 : int
             \\  %7 = slot_addr s0
             \\  %8 = load %7 : int
@@ -5131,7 +5165,7 @@ test "a capturing lambda allocates its env once and stores each capture at its o
     // then the cell is the pair's env word.
     try testing.expect(std.mem.indexOf(u8, ir,
         \\  %8 = iconst 24
-        \\  %9 = call @gc_alloc(%8)
+        \\  %9 = call @core/rt/gc.alloc(%8)
         \\  %10 = field_addr %9, 0 : int
         \\  %11 = slot_addr s0
         \\  %12 = load %11 : int
@@ -5146,7 +5180,7 @@ test "a capturing lambda allocates its env once and stores each capture at its o
         \\  store %17, %9 : rawptr
         \\
     ) != null);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @gc_alloc("));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
 }
 
 test "a debug build tests +, -, * and unary - for overflow before each; +% and release wrap" {
@@ -5284,7 +5318,7 @@ test "a boxed local's reads and writes go through its cell" {
         \\  slots: s0:rawptr s1:fn$unit s2:fn$unit
         \\b0:
         \\  %1 = iconst 8
-        \\  %2 = call @gc_alloc(%1)
+        \\  %2 = call @core/rt/gc.alloc(%1)
         \\  %3 = slot_addr s0
         \\  store %3, %2 : rawptr
         \\  %4 = iconst 1
@@ -5293,7 +5327,7 @@ test "a boxed local's reads and writes go through its cell" {
         \\  store %6, %4 : int
         \\  %7 = slot_addr s1
         \\  %8 = iconst 8
-        \\  %9 = call @gc_alloc(%8)
+        \\  %9 = call @core/rt/gc.alloc(%8)
         \\  %10 = field_addr %9, 0 : rawptr
         \\  %11 = slot_addr s0
         \\  %12 = load %11 : rawptr
@@ -5389,7 +5423,7 @@ test "a boxed for variable gets a fresh box per iteration and copies back before
         \\  cond_br %8, b5, b3
         \\b3:
         \\  %9 = iconst 8
-        \\  %10 = call @gc_alloc(%9)
+        \\  %10 = call @core/rt/gc.alloc(%9)
         \\  %11 = slot_addr s2
         \\  store %11, %10 : rawptr
         \\  %12 = slot_addr s2
@@ -5415,7 +5449,7 @@ test "a boxed for variable gets a fresh box per iteration and copies back before
         \\
     ) != null);
     // One cell per iteration plus one env per iteration, both in the body.
-    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "call @gc_alloc("));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
 }
 
 test "a read-only capture is not boxed" {
@@ -5430,7 +5464,7 @@ test "a read-only capture is not boxed" {
     , "f", .{});
     defer gpa.free(ir);
     // One allocation, the env; `n` is a plain int slot whose value is copied in.
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @gc_alloc("));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
     try testing.expect(std.mem.indexOf(u8, ir, "slots: s0:int ") != null);
     try testing.expect(std.mem.indexOf(u8, ir,
         \\  %6 = field_addr %5, 0 : int
@@ -5466,7 +5500,7 @@ test "mut self receiver lowering is unchanged" {
         \\  slots: s0:int s1:int s2:rawptr s3:fn$unit s4:fn$unit s5:P
         \\b0:
         \\  %1 = iconst 8
-        \\  %2 = call @gc_alloc(%1)
+        \\  %2 = call @core/rt/gc.alloc(%1)
         \\  %3 = slot_addr s2
         \\  store %3, %2 : rawptr
         \\  %4 = slot_addr s1
@@ -5476,7 +5510,7 @@ test "mut self receiver lowering is unchanged" {
         \\  store %7, %5 : int
         \\  %8 = slot_addr s3
         \\  %9 = iconst 8
-        \\  %10 = call @gc_alloc(%9)
+        \\  %10 = call @core/rt/gc.alloc(%9)
         \\  %11 = field_addr %10, 0 : rawptr
         \\  %12 = slot_addr s2
         \\  %13 = load %12 : rawptr
@@ -5563,7 +5597,7 @@ test "every binding form boxes" {
         defer gpa.free(src);
         const ir = if (case.lambda) try renderUnit(gpa, src, case.unit, .{}) else try renderUnit(gpa, src, case.unit, .{});
         defer gpa.free(ir);
-        try testing.expectEqual(case.cells, std.mem.count(u8, ir, "call @gc_alloc("));
+        try testing.expectEqual(case.cells, std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
         try testing.expect(std.mem.indexOf(u8, ir, ":rawptr") != null);
     }
 }
@@ -7113,7 +7147,7 @@ test "a bound method creates {adapter, env} and the adapter calls the witness" {
         \\  store %2, %3 : int
         \\  %4 = slot_addr s1
         \\  %5 = iconst 8
-        \\  %6 = call @gc_alloc(%5)
+        \\  %6 = call @core/rt/gc.alloc(%5)
         \\  %7 = slot_addr s0
         \\  copy %6 <- %7 : Acc
         \\  %8 = slot_addr s2
@@ -7159,7 +7193,7 @@ test "a bound mut self method passes the box pointer" {
         \\  slots: s0:rawptr s1:fn$unit s2:fn$unit
         \\b0:
         \\  %1 = iconst 8
-        \\  %2 = call @gc_alloc(%1)
+        \\  %2 = call @core/rt/gc.alloc(%1)
         \\  %3 = slot_addr s0
         \\  store %3, %2 : rawptr
         \\  %4 = slot_addr s0
@@ -7171,7 +7205,7 @@ test "a bound mut self method passes the box pointer" {
         \\  %9 = slot_addr s0
         \\  %10 = load %9 : rawptr
         \\  %11 = iconst 8
-        \\  %12 = call @gc_alloc(%11)
+        \\  %12 = call @core/rt/gc.alloc(%11)
         \\  store %12, %10 : rawptr
         \\  %13 = slot_addr s2
         \\  %14 = fn_addr @main.C.bump$boundbox
@@ -7283,10 +7317,10 @@ test "with frame storage a non-escaping env is a frame slot and its mutated capt
     ;
     const heap = try renderUnit(gpa, src, "main", .{ .frame = false });
     defer gpa.free(heap);
-    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, heap, "call @gc_alloc"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, heap, "call @core/rt/gc.alloc"));
     const frame = try renderUnit(gpa, src, "main", .{ .frame = true });
     defer gpa.free(frame);
-    try testing.expect(std.mem.indexOf(u8, frame, "call @gc_alloc") == null);
+    try testing.expect(std.mem.indexOf(u8, frame, "call @core/rt/gc.alloc") == null);
     try testing.expect(std.mem.indexOf(u8, frame, "s0:int s1:env$main$l0 s2:fn$unit") != null);
     // The env word is t's address, stored as an int so it is never a root.
     try testing.expect(std.mem.indexOf(u8, frame, "%3 = slot_addr s1\n  %4 = field_addr %3, 0 : int\n  %5 = slot_addr s0\n  store %4, %5 : int") != null);
@@ -7309,7 +7343,7 @@ test "with frame storage a by-value read of an unboxed aggregate copies it first
     ;
     const frame = try renderUnit(gpa, src, "main", .{ .frame = true });
     defer gpa.free(frame);
-    try testing.expect(std.mem.indexOf(u8, frame, "call @gc_alloc") == null);
+    try testing.expect(std.mem.indexOf(u8, frame, "call @core/rt/gc.alloc") == null);
     try testing.expect(std.mem.indexOf(u8, frame, "copy ") != null);
 }
 
@@ -7406,7 +7440,7 @@ test "a bound value on a mut param stores the place address in an 8-byte heap en
     defer gpa.free(ir);
     try testing.expect(std.mem.indexOf(u8, ir,
         \\  %2 = iconst 8
-        \\  %3 = call @gc_alloc(%2)
+        \\  %3 = call @core/rt/gc.alloc(%2)
         \\  %4 = slot_addr s0
         \\  %5 = load %4 : int
         \\  store %3, %5 : int

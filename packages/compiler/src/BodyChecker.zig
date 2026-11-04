@@ -4256,10 +4256,30 @@ pub const BodyChecker = struct {
                         bc.node_types[(node_idx).int()] = Type.int;
                         return Type.int;
                     },
-                    .text_base => {
+                    // Addresses the runtime computes with, as ints: none is a heap
+                    // reference, so no stack map names them.
+                    .text_base, .control_block, .frame_address, .stack_map => {
                         _ = try bc.checkArity(node_idx, args, 0);
-                        bc.node_types[(node_idx).int()] = Type.rawptr;
-                        return Type.rawptr;
+                        bc.node_types[(node_idx).int()] = Type.int;
+                        return Type.int;
+                    },
+                    .gc_stress => {
+                        _ = try bc.checkArity(node_idx, args, 0);
+                        bc.node_types[(node_idx).int()] = Type.bool;
+                        return Type.bool;
+                    },
+                    .call_trace => {
+                        if (try bc.checkArity(node_idx, args, 2)) {
+                            if (!bc.in_unsafe)
+                                try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'call_trace' requires an 'unsafe' block", .{});
+                            for (args) |a| {
+                                const t = try bc.typeOf(a);
+                                if (t.kind != .int and t.kind != .invalid)
+                                    try bc.report(.{ .span = bc.spanOf(a), .code = .T0040 }, "'call_trace' expects an 'int' address, got '{f}'", .{bc.fmtType(t)});
+                            }
+                        }
+                        bc.node_types[(node_idx).int()] = Type.unit;
+                        return Type.unit;
                     },
                     .call_hash => {
                         if (try bc.checkArity(node_idx, args, 2)) {
@@ -4298,8 +4318,8 @@ pub const BodyChecker = struct {
                             _ = try bc.typeOf(args[1]);
                             if (!bc.in_unsafe)
                                 try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'store' requires an 'unsafe' block", .{});
-                            if (pt.kind != .rawptr and pt.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'store' expects a 'rawptr', got '{f}'", .{bc.fmtType(pt)});
+                            if (pt.kind != .rawptr and pt.kind != .int and pt.kind != .invalid)
+                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'store' expects a 'rawptr' or an 'int' address, got '{f}'", .{bc.fmtType(pt)});
                         }
                         bc.node_types[(node_idx).int()] = Type.unit;
                         return Type.unit;
@@ -4309,8 +4329,8 @@ pub const BodyChecker = struct {
                             const pt = try bc.typeOf(args[0]);
                             if (!bc.in_unsafe)
                                 try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'load' requires an 'unsafe' block", .{});
-                            if (pt.kind != .rawptr and pt.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'load' expects a 'rawptr', got '{f}'", .{bc.fmtType(pt)});
+                            if (pt.kind != .rawptr and pt.kind != .int and pt.kind != .invalid)
+                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'load' expects a 'rawptr' or an 'int' address, got '{f}'", .{bc.fmtType(pt)});
                         }
                         // A `load` used where a scalar value type is expected (a generic
                         // `ga_get[T]` returning `load(..)`) yields that element type, so a
@@ -4386,8 +4406,8 @@ pub const BodyChecker = struct {
                             _ = try bc.typeOf(args[1]);
                             if (!bc.in_unsafe)
                                 try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'store_byte' requires an 'unsafe' block", .{});
-                            if (pt.kind != .rawptr and pt.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'store_byte' expects a 'rawptr', got '{f}'", .{bc.fmtType(pt)});
+                            if (pt.kind != .rawptr and pt.kind != .int and pt.kind != .invalid)
+                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'store_byte' expects a 'rawptr' or an 'int' address, got '{f}'", .{bc.fmtType(pt)});
                         }
                         bc.node_types[(node_idx).int()] = Type.unit;
                         return Type.unit;
@@ -4397,8 +4417,8 @@ pub const BodyChecker = struct {
                             const pt = try bc.typeOf(args[0]);
                             if (!bc.in_unsafe)
                                 try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'load_byte' requires an 'unsafe' block", .{});
-                            if (pt.kind != .rawptr and pt.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'load_byte' expects a 'rawptr', got '{f}'", .{bc.fmtType(pt)});
+                            if (pt.kind != .rawptr and pt.kind != .int and pt.kind != .invalid)
+                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'load_byte' expects a 'rawptr' or an 'int' address, got '{f}'", .{bc.fmtType(pt)});
                         }
                         bc.node_types[(node_idx).int()] = Type.int;
                         return Type.int;
