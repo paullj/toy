@@ -1,0 +1,36 @@
+# Feature: a frame bigger than the whole 8 MiB main stack panics with "stack overflow".
+# The prologue touches each page it opens, so it faults on the guard page instead of
+# stepping over it, and the backtrace names the fn whose frame did not fit.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "stack overflow\n"
+# expect: stderr " main\n"
+import std/io
+
+struct A { a: int, b: int, c: int, d: int }
+struct B { a: A, b: A, c: A, d: A }
+struct C { a: B, b: B, c: B, d: B }
+struct D { a: C, b: C, c: C, d: C }
+struct E { a: D, b: D, c: D, d: D }
+struct F { a: E, b: E, c: E, d: E }
+struct G { a: F, b: F, c: F, d: F }
+struct H { a: G, b: G, c: G, d: G }
+# 2 MiB.
+struct I { a: H, b: H, c: H, d: H }
+
+fn ma() -> A { return A { a: 1, b: 2, c: 3, d: 4 } }
+fn mb() -> B { return B { a: ma(), b: ma(), c: ma(), d: ma() } }
+fn mc() -> C { return C { a: mb(), b: mb(), c: mb(), d: mb() } }
+fn md() -> D { return D { a: mc(), b: mc(), c: mc(), d: mc() } }
+fn me() -> E { return E { a: md(), b: md(), c: md(), d: md() } }
+fn mf() -> F { return F { a: me(), b: me(), c: me(), d: me() } }
+fn mg() -> G { return G { a: mf(), b: mf(), c: mf(), d: mf() } }
+fn mh() -> H { return H { a: mg(), b: mg(), c: mg(), d: mg() } }
+fn mi() -> I { return I { a: mh(), b: mh(), c: mh(), d: mh() } }
+
+fn main() -> int {
+    x := mi()
+    y := mi()
+    io.println(x.a.a.a.a.a.a.a.a.a + y.d.d.d.d.d.d.d.d.d)
+    return 0
+}

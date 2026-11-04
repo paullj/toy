@@ -452,10 +452,12 @@ pub const Body = union(enum) {
     /// An erased hash/eq/trace unit. Uncached: it is pure over `(ty, kind, layout)` and
     /// enumerated in canonical order, so it is `-jN`-deterministic without a key.
     erased: *const Typecheck.ErasedUnit,
-    /// A fn-value thunk: source-less and uncached, like an erased unit.
+    /// A fn-value thunk: source-less, and uncached like an erased unit unless it wraps a
+    /// bundled runtime fn (`adapterKey`).
     adapter: *const Closure.Adapter,
 
-    pub const Source = struct { decl: Ast.Index, is_entry: bool = false, cached: bool = true };
+    /// `guard_stack`: the entry calls the runtime's stack overflow guard first thing.
+    pub const Source = struct { decl: Ast.Index, is_entry: bool = false, guard_stack: bool = false, cached: bool = true };
 };
 
 /// The read-only view one codegen job runs against; nothing in it is mutated during the
@@ -583,11 +585,11 @@ fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, opt_out: ?*OptOut) !Link
     if (diags.items.len > 0) return failLowering(diags.items, opt_out);
     if (opt_out) |o| o.* = .{ .stats = opt_st, .ir_instrs = Ir.instrCount(&irf) };
 
-    const is_entry = switch (fr.body) {
-        .source => |s| s.is_entry,
-        else => false,
+    const src: Body.Source = switch (fr.body) {
+        .source => |s| s,
+        else => .{ .decl = Ast.none },
     };
-    var fc = try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, is_entry, &diags);
+    var fc = try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, src.is_entry, src.guard_stack, &diags);
     errdefer fc.deinit(gpa);
     // A codegen diagnostic means an unsupported construct slipped past the front-end; the
     // build fails cleanly rather than emitting a half-lowered function.
@@ -614,9 +616,10 @@ pub fn codegen(
     slot: *Slot,
 ) !void {
     const key: ?Cache.Key = switch (fr.body) {
-        .source => |s| if (s.cached) try sourceKey(gpa, target, fr, s.decl) else null,
+        .source => |s| if (s.cached) try sourceKey(gpa, target, fr, s.decl, s.guard_stack) else null,
         .derive => |d| try deriveKey(gpa, target, fr, d),
-        .lambda, .erased, .adapter => null,
+        .adapter => |a| adapterKey(target, fr, a),
+        .lambda, .erased => null,
     };
     if (key) |k| return self.serve(gpa, io, k, tmp_tag, slot, fr);
     var out: OptOut = .{};
@@ -627,11 +630,26 @@ pub fn codegen(
     slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs };
 }
 
+/// The key of an adapter around a bundled `core/rt` fn, or null for any other. Every
+/// program carries the runtime's adapters, so without a key each warm build would lower
+/// them again. The compiler build fixes the wrapped fn, its signature and anything the
+/// adapter can inline (the runtime calls only the runtime), and the cache is per build, so
+/// the kind and the names are the whole key. A user fn's adapter would also have to fold
+/// the bodies the inliner may splice in, so it stays uncached.
+fn adapterKey(target: []const u8, fr: *const Frozen, a: *const Closure.Adapter) ?Cache.Key {
+    if (!StdNames.isBundledRuntimeSym(a.target.name)) return null;
+    var h = std.hash.Wyhash.init(0x41_44_41_50); // "ADAP"
+    h.update(&[_]u8{@intFromEnum(a.kind)});
+    h.update(a.target.name);
+    return Key.codegen(target, h.final(), fr.profile, fr.sym);
+}
+
 /// The key of a body from source: its own content (`sourceFp`) and that of every callee
 /// the inliner can splice into it (`InlineUnits.Reach`), xor'd with the opt level and the
 /// unit's OWN emitted symbol (`Key.codegen` is the one place that fold lives).
-fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl: Ast.Index) !Cache.Key {
+fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl: Ast.Index, guard_stack: bool) !Cache.Key {
     var fp = try sourceFp(gpa, fr, decl);
+    if (guard_stack) fp = std.hash.Wyhash.hash(fp, "guard_stack");
     var reach = try InlineUnits.Reach.init(gpa, fr, decl);
     defer reach.deinit();
     if (reach.names.items.len != 0) {

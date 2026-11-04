@@ -165,14 +165,19 @@ test "profiles: debug and release never reuse each other's cache entries or outp
     try testing.expect(cold[0] > 0);
     try testing.expectEqual(@as(usize, 0), cold[1]);
     const n = cold[0];
+    const main_units = (try codegenStats(gpa, io, cwd_main, &.{}))[0];
+    // The runtime builds as release under either profile, and its C callback adapters
+    // carry no lines, so a release build reuses a debug build's copies of those alone.
+    const shared = (try codegenStats(gpa, io, cwd_main, &.{"--release"}))[1];
+    try testing.expect(shared > 0 and shared < main_units);
 
-    try testing.expectEqual([2]usize{ n, 0 }, try codegenStats(gpa, io, cwd, &.{"--release"}));
+    try testing.expectEqual([2]usize{ n - shared, shared }, try codegenStats(gpa, io, cwd, &.{"--release"}));
     try testing.expectEqual([2]usize{ 0, n }, try codegenStats(gpa, io, cwd, &.{}));
     try testing.expectEqual([2]usize{ 0, n }, try codegenStats(gpa, io, cwd, &.{ "--profile", "release" }));
     // A debug build with release's passes still differs in what the profile decides beyond
     // the passes, so it must not reuse release's code. The runtime's units build as release
     // with debug's line tables under either, so the debug build's copies serve it.
-    const runtime_units = (try codegenStats(gpa, io, cwd_main, &.{}))[0] - 1;
+    const runtime_units = main_units - 1;
     try testing.expectEqual([2]usize{ n - runtime_units, runtime_units }, try codegenStats(gpa, io, cwd, &.{"-O1"}));
 
     // The default output sits in a folder per profile, as `.toy/<stamp>/<profile>/main`.
@@ -484,11 +489,12 @@ const dwarf_prog =
 
 /// The address and line of every row of `exe`'s DWARF line table, from `dwarfdump`, or
 /// null when it is not installed.
-fn lineRows(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]const [2]u64 {
+/// Each line-table row's address, line and file index.
+fn lineRows(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]const [3]u64 {
     const dd = (try harness.runTool(gpa, io, null, &.{ "dwarfdump", "--debug-line", exe })) orelse return null;
     defer freeOut(gpa, dd);
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, dd.term);
-    var rows: std.ArrayList([2]u64) = .empty;
+    var rows: std.ArrayList([3]u64) = .empty;
     errdefer rows.deinit(gpa);
     var it = std.mem.splitScalar(u8, dd.out, '\n');
     while (it.next()) |l| {
@@ -496,7 +502,9 @@ fn lineRows(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]const [2]u64 {
         var f = std.mem.tokenizeScalar(u8, l, ' ');
         const addr = try std.fmt.parseInt(u64, f.next().?[2..], 16);
         const line = try std.fmt.parseInt(u64, f.next().?, 10);
-        try rows.append(gpa, .{ addr, line });
+        _ = f.next(); // column
+        const file = try std.fmt.parseInt(u64, f.next().?, 10);
+        try rows.append(gpa, .{ addr, line, file });
     }
     return try rows.toOwnedSlice(gpa);
 }
@@ -675,12 +683,15 @@ const lines_prog =
     \\
 ;
 
+/// The lines of the rows in `main.toy`, file 1: the runtime's rows follow in files of
+/// their own.
 fn rowLines(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]u64 {
     const rows = (try lineRows(gpa, io, exe)) orelse return null;
     defer gpa.free(rows);
-    const lines = try gpa.alloc(u64, rows.len);
-    for (rows, lines) |r, *l| l.* = r[1];
-    return lines;
+    var lines: std.ArrayList(u64) = .empty;
+    errdefer lines.deinit(gpa);
+    for (rows) |r| if (r[2] == 1) try lines.append(gpa, r[1]);
+    return try lines.toOwnedSlice(gpa);
 }
 
 test "profiles: a warm debug build follows lines an edit moved, reusing the code it can (#157)" {

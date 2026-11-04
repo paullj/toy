@@ -242,6 +242,9 @@ const Plan = struct {
     closure_facts: []const []const u8,
     /// The unit of the entry `main`: the bare `main` with a body in the entry module.
     entry: ?u32,
+    /// Whether `main` arms the stack overflow handler: the program carries the runtime fn
+    /// that installs it. A one-module graph built for a test carries no runtime.
+    guard_stack: bool,
     o: Options,
     /// Each module's line starts, by module id, when the profile wants debug info; else
     /// empty. Owned.
@@ -299,6 +302,9 @@ const Plan = struct {
             .specs = specs,
             .closure_facts = &.{},
             .entry = entry,
+            .guard_stack = for (names) |n| {
+                if (std.mem.eql(u8, n.name, StdNames.RuntimeFn.stack_guard.name())) break true;
+            } else false,
             .o = o,
         };
         errdefer gpa.free(p.units);
@@ -406,7 +412,10 @@ const Plan = struct {
         const sym = p.symOf(u);
         const inst: ?*const Mono.Instance = if (u == .body and ob.?.of == .instance) &tc.instances[ob.?.of.instance] else null;
         const body: Engine.Body = switch (u) {
-            .body => .{ .source = .{ .decl = ob.?.decl, .is_entry = p.entry == @as(?u32, @intCast(i)) } },
+            .body => blk: {
+                const is_entry = p.entry == @as(?u32, @intCast(i));
+                break :blk .{ .source = .{ .decl = ob.?.decl, .is_entry = is_entry, .guard_stack = is_entry and p.guard_stack } };
+            },
             .spec => .{ .source = .{ .decl = ob.?.decl, .cached = false } },
             .lambda => |k| .{ .lambda = k },
             .derive => |k| .{ .derive = &tc.derives[k] },

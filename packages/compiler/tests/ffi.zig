@@ -212,6 +212,35 @@ test "user dylibs: capture-free toy fns as C callbacks run at -O0 and -O1" {
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-callbacks", callbacks_src, &.{ "-L", test_lib_dir }, "ok\n");
 }
 
+test "a wild pointer in C still dies of SIGSEGV, not as a stack overflow, at -O0 and -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const dir = ".toy-test-ffi-wild-pointer";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\import std/ffi
+        \\extern fn strlen(s: int) -> int
+        \\fn main() -> int { return unsafe { strlen(16) } }
+        \\
+    ;
+    for ([_][]const u8{ "-O0", "-O1" }) |level| {
+        const sub = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, level[1..] });
+        defer gpa.free(sub);
+        const prog = try harness.compile(gpa, io, sub, src, &.{ "--no-cache", level });
+        defer gpa.free(prog);
+        const run = try harness.runStderr(gpa, io, prog);
+        defer gpa.free(run.err);
+        std.testing.expect(run.term == .signal and run.term.signal == .SEGV and run.err.len == 0) catch |e| {
+            std.debug.print("{s}: {any}, stderr: {s}\n", .{ level, run.term, run.err });
+            return e;
+        };
+    }
+}
+
 const varargs_src =
     \\import std/io
     \\import std/ffi

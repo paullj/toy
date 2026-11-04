@@ -547,7 +547,8 @@ fn sweep_large(cb: int) -> int {
     return live
 }
 
-# Control block fields. Release inlines each, so a name costs no call.
+# Control block fields. Release inlines each, so a name costs no call. Byte 232 is
+# core/rt/stack's: 1 once it has armed the stack overflow handler.
 fn spans_mapped(cb: int) -> int { return cb }
 fn collections_run(cb: int) -> int { return cb + 8 }
 # Bytes allocated since the last collection.
