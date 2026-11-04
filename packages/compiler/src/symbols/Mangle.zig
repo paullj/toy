@@ -87,8 +87,7 @@ pub fn derive(gpa: std.mem.Allocator, protocol_name: []const u8, kind: Derive.Ki
     return buf.toOwnedSlice(gpa);
 }
 
-/// An erased key-witness unit: `descriptor$hash$<tag>` / `descriptor$eq$<tag>` /
-/// `descriptor$trace$<tag>`, where `<tag>` is `s<id>`/`e<id>` for a struct/enum, or the
+/// An erased key-witness unit: `descriptor$hash$<tag>` / `descriptor$eq$<tag>`, where `<tag>` is `s<id>`/`e<id>` for a struct/enum, or the
 /// kind spelling for a scalar (a `Map[int, V]` key is an `int`, which `derive` cannot name).
 pub fn erased(gpa: std.mem.Allocator, kind: Derive.ErasedKind, ty: Type) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
@@ -97,7 +96,6 @@ pub fn erased(gpa: std.mem.Allocator, kind: Derive.ErasedKind, ty: Type) ![]u8 {
     try buf.appendSlice(gpa, switch (kind) {
         .hash => "hash",
         .eq => "eq",
-        .trace => "trace",
     });
     try buf.append(gpa, '$');
     switch (ty.kind) {
@@ -171,14 +169,12 @@ test "each family spells its names" {
         .{ .got = derive(gpa, "TryInto", .conv_char_byte, Type.structT(3)), .want = "TryInto$char_to_byte$s3" },
         // The float->int witness anchors on `Type.float` (no char struct): `s0`.
         .{ .got = derive(gpa, "TryInto", .conv_float_int, Type.float), .want = "TryInto$float_to_int$s0" },
-        .{ .got = derive(gpa, "Trace", .trace, Type.enumT(1)), .want = "Trace$trace$e1" },
         .{ .got = erased(gpa, .hash, Type.structT(0)), .want = "descriptor$hash$s0" },
         .{ .got = erased(gpa, .eq, Type.structT(0)), .want = "descriptor$eq$s0" },
         .{ .got = erased(gpa, .hash, Type.int), .want = "descriptor$hash$int" },
         .{ .got = erased(gpa, .hash, Type.int8), .want = "descriptor$hash$int8" },
         .{ .got = erased(gpa, .hash, Type.uint8), .want = "descriptor$hash$uint8" },
         .{ .got = erased(gpa, .hash, Type.str), .want = "descriptor$hash$str" },
-        .{ .got = erased(gpa, .trace, Type.str), .want = "descriptor$trace$str" },
     };
     var got: Names = .{};
     defer got.deinit();
@@ -220,11 +216,11 @@ test "minted names never collide, within a family or across families" {
         .{ .p = "Eq", .k = .eq },                 .{ .p = "Ord", .k = .ord },
         .{ .p = "Hash", .k = .hash },             .{ .p = "Display", .k = .display },
         .{ .p = "TryInto", .k = .conv_int_char }, .{ .p = "TryInto", .k = .conv_char_byte },
-        .{ .p = "Trace", .k = .trace },           .{ .p = "f", .k = .eq },
+        .{ .p = "f", .k = .eq },
     };
     for (derives) |d| for ([_]Type{ Type.structT(0), Type.structT(3), Type.enumT(0) }) |t| try names.add(derive(gpa, d.p, d.k, t));
     try names.add(derive(gpa, "TryInto", .conv_float_int, Type.float));
-    for ([_]Derive.ErasedKind{ .hash, .eq, .trace }) |k| for (args) |t| try names.add(erased(gpa, k, t));
+    for ([_]Derive.ErasedKind{ .hash, .eq }) |k| for (args) |t| try names.add(erased(gpa, k, t));
 
     const all = names.items.items;
     for (all, 0..) |a, i| for (all[i + 1 ..]) |b| {

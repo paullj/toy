@@ -4067,9 +4067,9 @@ pub const BodyChecker = struct {
         if (callee.tag == .type_app and bc.tree.nodes[(callee.lhs).int()].tag == .field_access and
             bc.resolutions[(callee.lhs).int()] != .func)
             return bc.typeOfExplicitMethodCall(node_idx, n, callee);
-        // The `size_of[T]()` / `align_of[T]()` intrinsics: a `type_app` whose base
-        // identifier resolves to a core-only `.builtin`. They take one type-arg and no
-        // value args and type as `int` (the constant is materialized in lower). Intercept
+        // The `size_of[T]()` / `align_of[T]()` / `layout_of[T]()` intrinsics: a `type_app`
+        // whose base identifier resolves to a core-only `.builtin`. They take one type-arg
+        // and no value args and type as `int` (the constant is materialized in lower). Intercept
         // BEFORE the generic-function `type_app` path (which would reject the builtin as
         // non-generic).
         if (callee.tag == .type_app and bc.tree.nodes[(callee.lhs).int()].tag == .identifier) {
@@ -4077,7 +4077,7 @@ pub const BodyChecker = struct {
             if (bres == .func and bc.model.fns[bres.func].kind == .builtin) {
                 const bn = bc.nameText(bc.tree.nodes[(callee.lhs).int()].main_token);
                 const bik = Intrinsic.lookup(bn);
-                if (bik == .size_of or bik == .align_of) {
+                if (bik == .size_of or bik == .align_of or bik == .layout_of) {
                     const targ_nodes = Ast.rangeSlice(bc.tree, (callee.rhs).int());
                     for (targ_nodes) |tn| bc.node_types[(tn).int()] = bc.typeFromNode(tn);
                     const val_args = Ast.rangeSlice(bc.tree, (n.rhs).int());
@@ -4232,11 +4232,15 @@ pub const BodyChecker = struct {
             if (callee.tag == .identifier) {
                 const bn = bc.nameText(callee.main_token);
                 if (Intrinsic.lookup(bn)) |ik| switch (ik) {
+                    // `gc_alloc(size, layout)`: `layout` is what the collector traces the
+                    // object by, a `layout_of[T]()` or 0 for an object with no reference.
                     .gc_alloc => {
-                        if (try bc.checkArity(node_idx, args, 1)) {
-                            const st = try bc.typeOf(args[0]);
-                            if (st.kind != .int and st.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'gc_alloc' size must be an 'int', got '{f}'", .{bc.fmtType(st)});
+                        if (try bc.checkArity(node_idx, args, 2)) {
+                            for (args, [_][]const u8{ "size", "layout" }) |a, what| {
+                                const st = try bc.typeOf(a);
+                                if (st.kind != .int and st.kind != .invalid)
+                                    try bc.report(.{ .span = bc.spanOf(a), .code = .T0040 }, "'gc_alloc' {s} must be an 'int', got '{f}'", .{ what, bc.fmtType(st) });
+                            }
                         }
                         bc.node_types[(node_idx).int()] = Type.rawptr;
                         return Type.rawptr;
@@ -4267,19 +4271,6 @@ pub const BodyChecker = struct {
                         _ = try bc.checkArity(node_idx, args, 0);
                         bc.node_types[(node_idx).int()] = Type.bool;
                         return Type.bool;
-                    },
-                    .call_trace => {
-                        if (try bc.checkArity(node_idx, args, 2)) {
-                            if (!bc.in_unsafe)
-                                try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'call_trace' requires an 'unsafe' block", .{});
-                            for (args) |a| {
-                                const t = try bc.typeOf(a);
-                                if (t.kind != .int and t.kind != .invalid)
-                                    try bc.report(.{ .span = bc.spanOf(a), .code = .T0040 }, "'call_trace' expects an 'int' address, got '{f}'", .{bc.fmtType(t)});
-                            }
-                        }
-                        bc.node_types[(node_idx).int()] = Type.unit;
-                        return Type.unit;
                     },
                     .call_hash => {
                         if (try bc.checkArity(node_idx, args, 2)) {
@@ -4427,7 +4418,7 @@ pub const BodyChecker = struct {
                     // form handled above; a bare-call misuse names no type, so it can never
                     // produce a size/align/descriptor — reject with the type-arg hint
                     // (mirroring `.gc_array`), never fall through to the generic path.
-                    .size_of, .align_of, .descriptor_of => {
+                    .size_of, .align_of, .descriptor_of, .layout_of => {
                         try bc.drainArgs(args);
                         try bc.sink.report(.{ .span = bc.tokSpan(callee.main_token), .code = .T0054 }, "'{s}' requires a type argument, e.g. {s}[int]()", .{ bn, bn });
                         return .invalid;

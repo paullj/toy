@@ -90,6 +90,7 @@ fn lowerDigitsToStr(gpa: std.mem.Allocator, comptime signed: bool) error{OutOfMe
     try emit(&code, gpa, A.strSp(10, 0)); // [sp+0] = cursor
     try emit(&code, gpa, A.strSp(2, 8)); // [sp+8] = len
     try emit(&code, gpa, A.movReg(0, 2)); // x0 = len (gc_alloc arg)
+    try emit(&code, gpa, A.movz(1, 0, 0)); // x1 = 0: the bytes hold no reference
     try emitRuntimeCall(&code, &relocs, gpa, .alloc); // x0 = cell
     // Reload cursor + len; copy len bytes forward cell[0..len] <- stack[cursor..].
     try emit(&code, gpa, A.movReg(3, 0)); // x3 = cell (dst base)
@@ -149,6 +150,7 @@ pub fn lowerStrConcat(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     try emit(&code, gpa, A.strSp(2, 16)); // [sp+16] = ptr_b
     try emit(&code, gpa, A.strSp(3, 24)); // [sp+24] = len_b
     try emit(&code, gpa, A.addReg(0, 1, 3)); // x0 = len_a + len_b (gc_alloc arg)
+    try emit(&code, gpa, A.movz(1, 0, 0)); // x1 = 0: the bytes hold no reference
     try emitRuntimeCall(&code, &relocs, gpa, .alloc); // x0 = buf
     try emit(&code, gpa, A.strSp(0, 32)); // [sp+32] = buf
 

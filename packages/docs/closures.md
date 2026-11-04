@@ -108,7 +108,7 @@ fn main() -> int {
 
 - **A closure value is a 16-byte pair `{fn, env}`:**
   - `fn` is the code pointer.
-  - `env` points to a GC cell, which holds the copied captures and pointers to the boxed captures. The collector scans the cell word by word: it has no type descriptor yet.
+  - `env` points to a GC cell, which holds the copied captures and pointers to the boxed captures. The cell carries a layout made from the captures' types, so the collector reads only the words that hold references.
   - `env` is null for a named function and for a lambda that captures nothing, so a named function as a value costs no allocation.
   - At `-O1`, a closure that does not escape keeps its env in a slot of the frame that makes it (see Escape analysis).
 - **Calling a function value** is a `call_indirect`, with `env` as a hidden first argument.

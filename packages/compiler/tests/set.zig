@@ -1,7 +1,7 @@
 //! End-to-end coverage for `Set[T]` over the erased `Map[T, ()]`: `.add` dedup, `.contains`
 //! hit/miss, insertion-order key iteration across a grow (also through `each` and `filter`),
-//! single-handle sharing, survival of a forced collection (conservative scan of the Set ->
-//! Map -> entries -> str-key buffers), and -jN determinism. Each check surfaces as the
+//! single-handle sharing, survival of a forced collection (the Set -> Map -> entries ->
+//! str-key buffers), and -jN determinism. Each check surfaces as the
 //! child's EXIT CODE (0 on success), the only thing this harness observes. Set is pure
 //! library wiring over the Map: no new core surface.
 
@@ -166,7 +166,7 @@ const str_collect_src =
     \\
 ;
 
-test "set: Set[str] with owned keys survives a forced collection (conservative scan)" {
+test "set: Set[str] with owned keys survives a forced collection" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -178,9 +178,9 @@ test "set: Set[str] with owned keys survives a forced collection (conservative s
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     // Owned (concat'd) str keys are heap buffers; churning ~20000 dead Vec[int] forces at
-    // least one collection. The conservative object scan must keep the Set's Map header,
-    // entries array, and each 8-aligned str-key ptr's buffer alive, so every lookup by a
-    // content-equal literal still hits. A mis-swept key buffer changes the exit.
+    // least one collection. The collector must keep the Set's Map header, entries array,
+    // and each str key's buffer alive, so every lookup by a content-equal literal still
+    // hits. A mis-swept key buffer changes the exit.
     const prog = try compile(gpa, io, dir, str_collect_src, &.{});
     defer gpa.free(prog);
     try std.testing.expectEqual(@as(u8, 0), try runExit(gpa, io, prog));

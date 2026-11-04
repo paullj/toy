@@ -56,9 +56,10 @@ pub fn buildAndRunWith(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, ent
 /// into a `Map[str,int]` (which grows `cap` to 128, scattering the 64 dense entries into
 /// physical buckets ≥ len), then a forced collection while ~20000 dead heap strings churn the
 /// same size classes so a swept key buffer is reused and overwritten. It exits 42 iff every
-/// key still maps to its value. The precise `mp_trace` keeps them by walking the DENSE
-/// `entries[0..len)` and marking each key buffer — the backings are leaf-marked, so a
-/// physical-bucket or truncated walk misses the scattered keys and this flips to a low count.
+/// key still maps to its value. The collector's `trace_map` keeps them by walking the DENSE
+/// `entries[0..len)` and marking each key buffer — the backings have no layout of their
+/// own, so a physical-bucket or truncated walk misses the scattered keys and this flips to a
+/// low count.
 const map_high_bucket_src =
     \\import std/vec
     \\import std/map
@@ -94,10 +95,10 @@ const map_high_bucket_src =
     \\
 ;
 
-test "gc: high-bucket-collision Map[str,int] keys survive a forced collection (precise mp_trace)" {
-    // THE load-bearing proof of descriptor-driven container tracing: with the entries backing
-    // leaf-marked, the scattered collision keys are reached ONLY through the dense
-    // entries[0..len) walk that dispatches each key through the str descriptor's trace unit.
+test "gc: high-bucket-collision Map[str,int] keys survive a forced collection (precise trace_map)" {
+    // THE load-bearing proof of layout-driven container tracing: with no layout on the
+    // entries backing, the scattered collision keys are reached ONLY through the dense
+    // entries[0..len) walk that runs the str key layout over each key.
     // A "walk physical buckets[0..len)" mutation sweeps the scattered keys → a low exit code;
     // exit 42 confirms the precise walk is live (output-identity alone cannot show this).
     const gpa = std.testing.allocator;
@@ -109,8 +110,8 @@ test "gc: high-bucket-collision Map[str,int] keys survive a forced collection (p
 }
 
 test "gc: a descriptor-traced Map program is byte-identical at -j1 and -j8" {
-    // The widened stack-map (off,tag) payload + the descriptor/trace-unit bytes are pure
-    // functions of source, so the container-tracing collector image is `-jN` byte-identical.
+    // The stack-map payload + the descriptor and layout bytes are pure functions of source,
+    // so the container-tracing collector image is `-jN` byte-identical.
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -237,7 +238,7 @@ test "dfe: a collection inside a kept fn works after the link drops an allocatin
 
 test "dfe: a heap type only dropped code uses leaves the heap-free code unchanged, at -O0 and -O1" {
     // Codegen plans a descriptor for every typechecked heap type, so rooting every planned
-    // descriptor would keep its hash/eq/trace units and the whole collector in a program
+    // descriptor would keep its hash/eq units and the whole collector in a program
     // that never allocates.
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -611,11 +612,11 @@ test "gc: forced collection count is deterministic across identical runs (waterm
     try std.testing.expectEqual(a, b);
 }
 
-test "gc: a str-only aggregate as a Vec element survives churn (trace unit reaches the buffer)" {
-    // A struct whose only managed content is a `str` is still trace-requiring: as a container
-    // element its buffer is reached ONLY through the descriptor's trace unit dispatched by the
-    // dense element walk. If the aggregate earned no trace unit (trace_off == 0) the leaf-marked
-    // backing keeps the struct but the str buffers are swept → the read-back fails (exit != 7).
+test "gc: a str-only aggregate as a Vec element survives churn (its layout reaches the buffer)" {
+    // A struct whose only managed content is a `str` still has a layout: as a container
+    // element its buffer is reached ONLY through the element layout the dense element walk
+    // runs. With no element layout the backing keeps the struct but the str buffers are
+    // swept → the read-back fails (exit != 7).
     // Built in a separate frame so a stale stack pointer cannot conservatively over-retain them.
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -763,7 +764,7 @@ const churn_src =
     \\
 ;
 
-test "gc: an enum word that is a container in one variant only is word-scanned" {
+test "gc: an enum word that is a container in one variant only is traced by the live variant" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

@@ -49,7 +49,7 @@ pub fn to_cstr(s: str) -> rawptr {
 # keeps alive while toy code holds the cstr, as it would a rawptr. The cell is allocated
 # before the copy, so the copy is never held across an allocation.
 pub fn cstr_of(s: str) -> cstr {
-    cell := gc_alloc(8)
+    cell := gc_alloc(8, layout_of[cstr]())
     unsafe { store(cell, to_cstr(s)) }
     c: cstr = unsafe { load(cell) }
     return c
@@ -57,14 +57,14 @@ pub fn cstr_of(s: str) -> cstr {
 
 # A cstr is not a rawptr to toy code, so its address is read back through a cell.
 fn cstr_addr(c: cstr) -> rawptr {
-    cell := gc_alloc(8)
+    cell := gc_alloc(8, layout_of[cstr]())
     unsafe { store(cell, c) }
     p: rawptr = unsafe { load(cell) }
     return p
 }
 
 pub fn cstr_is_null(c: cstr) -> bool {
-    cell := gc_alloc(8)
+    cell := gc_alloc(8, layout_of[cstr]())
     unsafe { store(cell, c) }
     p: int = unsafe { load(cell) }
     return p == 0
@@ -118,8 +118,8 @@ pub fn realtime_ns() -> int {
 # `rem` (EINTR is 4), so it sleeps again for that remainder.
 pub fn sleep_ns(ns: int) {
     if ns <= 0 { return }
-    req := gc_alloc(16)
-    rem := gc_alloc(16)
+    req := gc_alloc(16, 0)
+    rem := gc_alloc(16, 0)
     unsafe {
         store(req, ns / 1_000_000_000)
         store(offset(req, 8), ns % 1_000_000_000)
@@ -138,7 +138,7 @@ pub extern fn getentropy(buf: rawptr, len: int) -> int
 
 # 64 bits from the kernel's CSPRNG.
 pub fn entropy_u64() -> uint64 {
-    buf := gc_alloc(8)
+    buf := gc_alloc(8, 0)
     if (unsafe { getentropy(buf, 8) } & 0xFFFF_FFFF) != 0 { panic("getentropy failed") }
     v: uint64 = unsafe { load(buf) }
     return v

@@ -1,0 +1,28 @@
+# expect: exit 0
+# A user Hash impl that allocates runs while the map grows, so a collection can fire with
+# half the entries rehashed. Every key and value must stay reachable through the header
+# for the whole grow, or the rest are swept and their buffers reused by the churn.
+import std/gc
+import std/map
+import std/str
+struct K { s: str, n: int }
+impl K has Hashable {
+    fn hash(self) -> int {
+        t := self.s.concat("!")
+        return self.n * 31 + t.byte_at(1)
+    }
+    fn eq(self, o: K) -> bool { self.n == o.n && self.s == o.s }
+}
+fn label(i: int) -> str { return "v".concat(i.to_string()) }
+fn main() -> int {
+    m := Map[K, str].new()
+    for i in 0..200 { m.set(K { s: "k".concat(i.to_string()), n: i }, label(i)) }
+    gc.collect()
+    for i in 0..2000 { _j := label(i).concat("junk") }
+    gc.collect()
+    for i in 0..200 {
+        got := m.get(K { s: "k".concat(i.to_string()), n: i }).or("")
+        if got != label(i) { return 1 + i % 200 }
+    }
+    return 0
+}

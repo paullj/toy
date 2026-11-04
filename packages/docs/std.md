@@ -32,9 +32,10 @@ and add no module-graph or content-fingerprint surface.
   - `.bundled`: `ref_new`, `ref_get`, `ref_set`, `gc_collect` and `gc_stats`. They take
     no pointer, so std may name them without breaking memory safety.
   - `.core`: the raw heap and pointer intrinsics (`gc_alloc`, `load`, `store`,
-    `offset`, `size_of`, `descriptor_of`, `load_byte`, `store_byte`, ...) and the ones
-    the collector runs on (`control_block`, `frame_address`, `stack_map`, `text_base`,
-    `gc_stress`, `call_trace`). Only core names them, and `load`/`store` need an
+    `offset`, `size_of`, `descriptor_of`, `layout_of`, `load_byte`, `store_byte`, ...)
+    and the ones the collector runs on (`control_block`, `frame_address`, `stack_map`,
+    `text_base`, `gc_stress`). `gc_alloc(size, layout)` takes the layout the collector
+    traces the object by: a `layout_of[T]()`, or 0 for bytes with no reference. Only core names them, and `load`/`store` need an
     `unsafe { }` block (T0038). An address is a `rawptr` or, in the runtime, an `int`.
 - **Universal methods**: `x.to_string()` on every `Display` value, and `x.hash()` on
   every `Hash` value (see `typesystem.md`).
@@ -62,7 +63,7 @@ declares its own externs as `ffi.md` describes.
 | `core/text` | raw `str` parts: `slice`, the `alloc`/`put`/`window`/`take` buffer that builds a str once, and `join` over it |
 | `core/mem_selftest`, `core/desc_selftest` | heap and descriptor self-checks |
 | `core/rt/str` | the runtime for `str` operators: `str_eq` |
-| `core/rt/gc` | the collector: `alloc`, `collect`, the `mark` and `mark_leaf` a trace unit calls, and the `collections` and `span_count` counters |
+| `core/rt/gc` | the collector: `alloc`, `collect`, and the `collections` and `span_count` counters; it traces each object by the layout it was allocated with |
 | `core/rt/stack` | the stack overflow handler: `guard`, which `main` calls first, maps a signal stack for it and installs it |
 
 `core/rt/` is the runtime: the fns the compiler's lowered code calls. Every program

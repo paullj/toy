@@ -633,8 +633,7 @@ pub fn displayBlockingBox(structs: []const StructSym, enums: []const EnumSym, co
 /// Whether `recv` is, or transitively (by-value) HOLDS, a managed box. A box has no stable
 /// hashable value (its identity is a heap cell), so a Hashable KEY must exclude it — the Ref
 /// guard the structural Hash relation itself lacks (a box's reified field is `int`, which
-/// `structural(hash)` would wrongly accept). Mirrors `derive_synth.needsTrace`'s by-value
-/// walk but pure over the tables so both callers share it; a box is a LEAF (never recursed).
+/// `structural(hash)` would wrongly accept). A box is a LEAF (never recursed).
 /// Terminates: by-value cycles are already a compile error and a box's field is `int`, so the
 /// by-value graph is a finite DAG. `memo` keyed on (nominal id + enum flag) collapses shared
 /// subtrees; the transient `App` arm is unmemoized (bounded by the finite by-value DAG).

@@ -36,7 +36,7 @@ const collision_src =
     \\
 ;
 
-test "map: collisions + a grow survive a forced collection (conservative scan)" {
+test "map: collisions + a grow survive a forced collection" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

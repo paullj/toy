@@ -1,22 +1,23 @@
 # A growable, traced array primitive: the ONE growable container. The handle is an
 # 8-byte reference (`gc_array[T]`, a reused native box) pointing at a heap header
 # `{len@0, cap@8, elems@16}` addressed by literal offsets, followed by a self-describing
-# trace stash `{shape@32, elem_desc@40, elem_size@48}`. The element backing lives at
+# trace stash `{shape@32, elem_layout@40, elem_size@48}`. The element backing lives at
 # `elems`, each element at `elems + i*size_of[T]()`. `:=` copies the handle, so two
 # bindings share the same growable (mutation through one is seen through the other).
 # `ga_grow` leaks the old backing to the collector.
 
 # Construct an empty array with a small initial backing. `len` is born 0 (cells are
 # zeroed on alloc); `cap` starts at 4. The stash records `shape=0` (this is a Vec, not a
-# Map) plus the element type's descriptor + size, so the erased collector — which sees
-# only a structurally-identical `gc_array` handle — can trace the live elements precisely.
+# Map) plus the element type's layout + size, so the erased collector — which sees only a
+# structurally-identical `gc_array` handle — can trace the live elements precisely. The
+# backing has no layout of its own: only the header knows how many elements are live.
 pub fn ga_new[T]() -> gc_array[T] {
-    hdr := gc_alloc(56)
+    hdr := gc_alloc(56, header_layout())
     unsafe {
         store(offset(hdr, 8), 4)
-        store(offset(hdr, 16), gc_alloc(4 * size_of[T]()))
+        store(offset(hdr, 16), gc_alloc(4 * size_of[T](), 0))
         store(offset(hdr, 32), 0)
-        store(offset(hdr, 40), descriptor_of[T]())
+        store(offset(hdr, 40), layout_of[T]())
         store(offset(hdr, 48), size_of[T]())
     }
     return gc_array[T](hdr)
@@ -28,12 +29,12 @@ pub fn ga_new[T]() -> gc_array[T] {
 # about 3% of instructions in programs that make many small Vecs.
 pub fn ga_with_cap[T](n: int) -> gc_array[T] {
     c := if n < 4 { 4 } else { n }
-    hdr := gc_alloc(56)
+    hdr := gc_alloc(56, header_layout())
     unsafe {
         store(offset(hdr, 8), c)
-        store(offset(hdr, 16), gc_alloc(c * size_of[T]()))
+        store(offset(hdr, 16), gc_alloc(c * size_of[T](), 0))
         store(offset(hdr, 32), 0)
-        store(offset(hdr, 40), descriptor_of[T]())
+        store(offset(hdr, 40), layout_of[T]())
         store(offset(hdr, 48), size_of[T]())
     }
     return gc_array[T](hdr)
@@ -86,15 +87,14 @@ pub fn ga_push[T](a: gc_array[T], x: T) {
 
 extern fn memcpy(dst: rawptr, src: rawptr, n: int) -> rawptr
 
-# Double the backing and copy the live prefix over. Store-before-alloc/copy: a collection
-# can fire inside `gc_alloc`, so the header still holds the OLD backing there (keeping it
-# reachable); once `ne` is allocated, publish it into the rooted header BEFORE the copy so
-# a later collection keeps BOTH arrays live (old via the spilled `e`, new via the header).
-# The header never moves, so every alias sees the new backing. libSystem's `memcpy` moves
+# Double the backing and copy the live prefix over. A collection can fire inside
+# `gc_alloc`, so the header still holds the OLD backing there (keeping its elements traced);
+# nothing allocates between the copy and the publish. The header never moves, so every
+# alias sees the new backing. libSystem's `memcpy` moves
 # the bytes in bulk: a toy loop costs dozens of instructions per element.
 pub fn ga_grow[T](a: gc_array[T], c: int) {
     nc := c * 2
-    ne := gc_alloc(nc * size_of[T]())
+    ne := gc_alloc(nc * size_of[T](), 0)
     e: rawptr = unsafe { load(offset(a, 16)) }
     unsafe {
         store(offset(a, 16), ne)
@@ -106,12 +106,18 @@ pub fn ga_grow[T](a: gc_array[T], c: int) {
 # The container-precise trace lives in the collector, not here: the collector is erased and
 # a `Vec[int]` handle and a `Map[str,int]` handle reify to structurally-identical
 # `gc_array` boxes, so nothing at a call site could tell it which walk to run. Instead the
-# header carries its own `shape` byte + per-type element/K/V descriptors (below), which the
-# collector reads to trace buckets/entries + each live entry through the K/V descriptors.
+# header carries its own `shape` byte + per-type element/K/V layouts (below), which the
+# collector reads to trace buckets/entries + each live entry through the K/V layouts.
+
+# The layout a header is allocated with: core/rt/gc's `container`, which walks the elements
+# by the header's own fields. No layout program is at address 1.
+fn header_layout() -> int {
+    return 1
+}
 
 # An erased open-addressing hash table: the ONE hashed container. The 8-byte handle
 # (`gc_array[int]`, a reused native box) points at a header {buckets@0, entries@8,
-# cap@16, len@24}, followed by the trace stash {shape@32=1, key_desc@40, val_desc@48,
+# cap@16, len@24}, followed by the trace stash {shape@32=1, key_layout@40, val_layout@48,
 # key_size@56, stride@64} the erased collector reads to trace live entries precisely.
 # `buckets` is a `cap`-slot int array mapping a hash bucket to
 # `entry_index+1` (0 == EMPTY, free because cells are zeroed on alloc); `entries` is a
@@ -123,19 +129,22 @@ pub fn ga_grow[T](a: gc_array[T], c: int) {
 # like bool leaves later cells unaligned. `V` may be zero-sized (`()`, as in `Set`): the
 # stride is then `size_of[K] + 0` and the value store/load are no-ops. An owned (heap-backed)
 # `str` key stores its `ptr` at the cell's key offset; the collector reaches it by walking
-# entries[0..len) and marking each key through the K descriptor's trace unit (the entries
-# backing is leaf-marked, not word-scanned), so a scalar/static-pointer key needs no reach.
+# entries[0..len) and running the K layout over each key (the entries backing has no
+# layout of its own), so a scalar/static-pointer key needs no reach.
+#
+# The stash is written before either backing is allocated: a collection there walks the
+# header by its shape, and one still 0 would read it as a Vec and drop the buckets.
 pub fn mp_new[K, V]() -> gc_array[int] {
-    hdr := gc_alloc(72)
+    hdr := gc_alloc(72, header_layout())
     unsafe {
-        store(offset(hdr, 0), gc_alloc(8 * 8))
-        store(offset(hdr, 8), gc_alloc(8 * (size_of[K]() + size_of[V]())))
         store(offset(hdr, 16), 8)
         store(offset(hdr, 32), 1)
-        store(offset(hdr, 40), descriptor_of[K]())
-        store(offset(hdr, 48), descriptor_of[V]())
+        store(offset(hdr, 40), layout_of[K]())
+        store(offset(hdr, 48), layout_of[V]())
         store(offset(hdr, 56), size_of[K]())
         store(offset(hdr, 64), size_of[K]() + size_of[V]())
+        store(offset(hdr, 0), gc_alloc(8 * 8, 0))
+        store(offset(hdr, 8), gc_alloc(8 * (size_of[K]() + size_of[V]()), 0))
     }
     return gc_array[int](hdr)
 }
@@ -175,7 +184,7 @@ pub fn mp_find[K, V](m: gc_array[int], k: K) -> int {
         fh := offset(text_base(), ho)
         fe := offset(text_base(), eo)
         stride := size_of[K]() + size_of[V]()
-        qk := gc_alloc(size_of[K]())
+        qk := gc_alloc(size_of[K](), layout_of[K]())
         store(qk, k)
         cap := load(offset(m, 16))
         buckets := load(offset(m, 0))
@@ -205,7 +214,7 @@ pub fn mp_set[K, V](m: gc_array[int], k: K, v: V) {
         fh := offset(text_base(), ho)
         fe := offset(text_base(), eo)
         stride := size_of[K]() + size_of[V]()
-        qk := gc_alloc(size_of[K]())
+        qk := gc_alloc(size_of[K](), layout_of[K]())
         store(qk, k)
         cap := load(offset(m, 16))
         buckets := load(offset(m, 0))
@@ -237,10 +246,9 @@ pub fn mp_set[K, V](m: gc_array[int], k: K, v: V) {
 
 # Double the capacity, copy the entries array IN INSERTION ORDER (so iteration order
 # survives a grow — the LOCK), and rebuild `buckets` by rehashing each entry's key.
-# Store-before-alloc/copy (the ga_grow rule): the two arrays are allocated then published
-# into the rooted header BEFORE the copy, so a collection mid-rehash keeps the NEW arrays
-# live via the header and the OLD arrays live via the spilled `oe` local; the header never
-# moves, so every alias sees the new backing. (No alloc occurs during the copy loop.)
+# The entries are copied whole before the new arrays are published, and the rehash reads
+# them from the new backing: a user hash may allocate and collect, and the header is the
+# only thing that traces entries (a backing has no layout of its own).
 fn mp_grow[K, V](m: gc_array[int]) {
     dp := descriptor_of[K]()
     unsafe {
@@ -248,23 +256,18 @@ fn mp_grow[K, V](m: gc_array[int]) {
         stride := size_of[K]() + size_of[V]()
         cap := load(offset(m, 16))
         len := load(offset(m, 24))
-        oe := load(offset(m, 8))
+        oe: rawptr = load(offset(m, 8))
         nc := cap * 2
-        nb := gc_alloc(nc * 8)
-        ne := gc_alloc(nc * stride)
+        nb := gc_alloc(nc * 8, 0)
+        ne := gc_alloc(nc * stride, 0)
+        memcpy(ne, oe, len * stride)
         store(offset(m, 0), nb)
         store(offset(m, 8), ne)
         store(offset(m, 16), nc)
         mask := nc - 1
         j := 0
         while j < len {
-            src := offset(oe, j * stride)
-            dst := offset(ne, j * stride)
-            kk: K = load(src)
-            store(dst, kk)
-            vv: V = load(offset(src, size_of[K]()))
-            store(offset(dst, size_of[K]()), vv)
-            b := call_hash(fh, dst) & mask
+            b := call_hash(fh, offset(ne, j * stride)) & mask
             while load(offset(nb, b * 8)) != 0 { b = (b + 1) & mask }
             store(offset(nb, b * 8), j + 1)
             j = j + 1

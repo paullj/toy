@@ -67,8 +67,8 @@ pub const builtin_names = std.StaticStringMap(Type).initComptime(.{
 /// signature keeps one.
 ///
 /// `cstr` (APPENDED — ordinals frozen) is a C `const char*` to NUL-terminated bytes: one
-/// pointer word like `rawptr`, and traced like it (conservatively, so a pointer into C
-/// memory is ignored and one into the heap keeps its cell alive). It is its own kind,
+/// pointer word like `rawptr`, and traced like it: a pointer into C memory is ignored and
+/// one into the heap keeps its cell alive. It is its own kind,
 /// not a `rawptr`, so the `str` conversions of std/ffi are its methods alone.
 pub const Kind = enum(u8) { invalid, unit, int, bool, str, never, @"struct", @"enum", type_var, app, float, rawptr, func, cstr };
 

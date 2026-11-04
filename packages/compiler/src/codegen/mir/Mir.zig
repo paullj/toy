@@ -104,10 +104,9 @@ pub const VReg = struct {
     /// Set on an IR value's register, naming that value; a selector temporary has none
     /// and stays within one block with no call in between (`tempsStayLocal`).
     home: ?FrameRef = null,
-    /// How the collector traces the register's value when it is a GC reference (null
-    /// otherwise). A reference live across a safepoint must be in a stack slot there, and
-    /// the slot joins that safepoint's stack map with this tag.
-    ref: ?FrameLayout.Root.Tag = null,
+    /// The register's value is a GC reference. A reference live across a safepoint must be
+    /// in a stack slot there, and the slot joins that safepoint's stack map.
+    ref: bool = false,
 };
 
 /// A frame object, resolved to an offset only by the encoder through `Frame`.

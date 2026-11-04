@@ -11,8 +11,7 @@ const runtime = @import("../runtime/runtime.zig");
 const types = @import("../../types.zig");
 const StdNames = @import("../../symbols/StdNames.zig");
 
-/// Per IR value, how the collector traces its register when it holds a reference, or
-/// null. An aggregate value lives in memory the frame's map names, so it has none. A
+/// Per IR value, whether its register holds a reference. An aggregate value lives in memory the frame's map names, so it has none. A
 /// `field_addr` result counts too: it may point into a heap object whose base is dead
 /// by the next safepoint. Caller owns the result.
 pub fn valueRefs(
@@ -20,15 +19,15 @@ pub fn valueRefs(
     ir: *const Ir.Function,
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
-) error{OutOfMemory}![]?FrameLayout.Root.Tag {
-    const refs = try gpa.alloc(?FrameLayout.Root.Tag, ir.values.len);
+) error{OutOfMemory}![]bool {
+    const refs = try gpa.alloc(bool, ir.values.len);
     errdefer gpa.free(refs);
     for (ir.values, refs) |vd, *r| {
-        r.* = if (inRegister(vd.type)) try FrameLayout.wordRootTag(gpa, vd.type, layouts, enum_layouts) else null;
+        r.* = inRegister(vd.type) and try FrameLayout.isWordRef(gpa, vd.type, layouts, enum_layouts);
     }
     for (ir.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
         .field_addr => if (ins.result != Ir.none_value and inRegister(ir.values[ins.result].type)) {
-            if (refs[ins.result] == null) refs[ins.result] = .word;
+            refs[ins.result] = true;
         },
         else => {},
     };
@@ -73,7 +72,7 @@ test "callFacts: a core/rt fn is no safepoint; a minted unit in a core/rt module
     try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/str.f$int" }).safepoint);
     try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/mem.ga_push$int" }).safepoint);
     try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/gc.alloc" }).safepoint);
-    try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/gc.mark" }).safepoint);
+    try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/gc.collections" }).safepoint);
 }
 
 test "valueRefs: a rawptr value and a field address are references; an int is not" {
@@ -99,7 +98,5 @@ test "valueRefs: a rawptr value and a field address are references; an int is no
     defer func.deinit(gpa);
     const refs = try valueRefs(gpa, &func, &.{}, &.{});
     defer gpa.free(refs);
-    try testing.expectEqual(@as(?FrameLayout.Root.Tag, null), refs[0]);
-    try testing.expectEqual(@as(?FrameLayout.Root.Tag, .word), refs[1]);
-    try testing.expectEqual(@as(?FrameLayout.Root.Tag, .word), refs[2]);
+    try testing.expectEqualSlices(bool, &.{ false, true, true }, refs);
 }

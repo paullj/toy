@@ -371,7 +371,7 @@ test "T0082: a runtime fn that calls the collector's entries reaches it" {
     try expectErrors(".toy-test-rt-entry",
         \\import core/rt/gc
         \\pub fn grab() -> rawptr {
-        \\    return gc.alloc(16)
+        \\    return gc.alloc(16, 0)
         \\}
         \\pub fn run() {
         \\    gc.collect()
@@ -389,10 +389,8 @@ test "T0082: a runtime fn that calls the collector's entries reaches it" {
 fn expectCollectorAbi(sigs: []const Sig) !void {
     const Want = struct { f: StdNames.RuntimeFn, params: []const Typecheck.Kind, ret: Typecheck.Kind };
     const want = [_]Want{
-        .{ .f = .alloc, .params = &.{.int}, .ret = .rawptr },
+        .{ .f = .alloc, .params = &.{ .int, .int }, .ret = .rawptr },
         .{ .f = .collect, .params = &.{}, .ret = .unit },
-        .{ .f = .mark, .params = &.{.int}, .ret = .unit },
-        .{ .f = .mark_leaf, .params = &.{.int}, .ret = .unit },
         .{ .f = .collections, .params = &.{}, .ret = .int },
         .{ .f = .span_count, .params = &.{}, .ret = .int },
         .{ .f = .stack_guard, .params = &.{}, .ret = .unit },
@@ -407,7 +405,7 @@ fn expectCollectorAbi(sigs: []const Sig) !void {
     }
 }
 
-test "the bundled collector takes what lower and the trace units pass it" {
+test "the bundled collector takes what lower passes it" {
     const gpa = testing.allocator;
     const got = try runtimeErrors(gpa, ".toy-test-rt-gc-abi", "pub fn f() -> int {\n    return 1\n}\n", &.{}, false, &expectCollectorAbi);
     defer freeAll(gpa, got);

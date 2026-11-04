@@ -128,18 +128,16 @@ test "ref: a Vec[Ref[int]] program is byte-identical at -j1 and -j8" {
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-ref-box-element-determinism", src, &.{}, null);
 }
 
-test "ref: a derivable + Ref-containing type emits a deterministic trace unit (-j1 == -j8)" {
+test "ref: a derivable + Ref-containing type builds deterministically (-j1 == -j8)" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
     try skipUnlessBackend(io);
 
-    // `Node` derives `Eq` (used via `==`) AND holds a `Ref` field, so the one descriptor
-    // producer co-emits a `trace` unit that `bl`s `gc_mark`. Both the trace unit's synthetic
+    // `Node` derives `Eq` (used via `==`) AND holds a `Ref` field, so its derived unit's
     // name (minted off the reified struct id, which rides the (depth, structural-key) order)
-    // and `gc_mark`'s appended body are a pure function of source — so the two images are
-    // byte-identical, the spike's determinism guarantee.
+    // and its GC layout program must both be a pure function of source.
     const src =
         \\import std/ref
         \\struct Node { v: int, next: Ref[int] }

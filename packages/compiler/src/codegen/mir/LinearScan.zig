@@ -44,7 +44,7 @@ const Moves = @import("Moves.zig");
 const FrameLayout = @import("../frame/FrameLayout.zig");
 
 /// A stack-map entry: a spill slot that holds a live reference at a safepoint.
-pub const Root = struct { spill: u32, tag: FrameLayout.Root.Tag };
+pub const Root = struct { spill: u32 };
 
 pub const Result = struct {
     /// One per safepoint call, in code order.
@@ -152,7 +152,7 @@ pub fn LinearScan(comptime Target: type) type {
             }
 
             fn isRef(a: *const A, it: *const Interval) bool {
-                return a.func.vregs.items[it.vreg].ref != null;
+                return a.func.vregs.items[it.vreg].ref;
             }
 
             fn buildIntervals(a: *A) Error!void {
@@ -663,7 +663,7 @@ pub fn LinearScan(comptime Target: type) type {
                         if (s >= it.end()) break;
                         if (!(it.covers(s) and it.covers(s + 1))) continue;
                         if (!it.spilled) return error.Unallocatable;
-                        try lists[k].append(gpa, .{ .spill = a.slot_of[it.vreg], .tag = a.func.vregs.items[it.vreg].ref.? });
+                        try lists[k].append(gpa, .{ .spill = a.slot_of[it.vreg] });
                     }
                 }
                 const maps = try gpa.alloc([]Root, sp.len);
@@ -1039,7 +1039,7 @@ const Machine = struct {
                             const idx = safepointIndex(f, block, k - 1);
                             for (ms[idx]) |root| m.slots[root.spill] ^= moved;
                         } else for (f.vregs.items, 0..) |vr, v| {
-                            if (vr.ref != null) m.vregs[v] ^= moved;
+                            if (vr.ref) m.vregs[v] ^= moved;
                         }
                     }
                 },
@@ -1086,7 +1086,7 @@ const Gen = struct {
         try g.blocks.items[g.cur].insts.append(g.gpa, .{ .op = op });
     }
     fn fresh(g: *Gen) !Mir.Reg {
-        const ref: ?FrameLayout.Root.Tag = if (g.rng.uintLessThan(u8, 3) == 0) .word else null;
+        const ref = g.rng.uintLessThan(u8, 3) == 0;
         const r = try g.f.newVReg(g.gpa, .gpr, null);
         g.f.vregs.items[r.index()].ref = ref;
         return r;
@@ -1158,7 +1158,7 @@ const Gen = struct {
             },
             1 => {
                 const counter = try g.fresh();
-                g.f.vregs.items[counter.index()].ref = null;
+                g.f.vregs.items[counter.index()].ref = false;
                 try g.emit(.{ .imm = .{ .rd = counter, .imm = 1 + g.rng.uintLessThan(u64, 3) } });
                 const header = try g.newBlock();
                 const body = try g.newBlock();
@@ -1271,7 +1271,7 @@ test "linear scan: a value live across a call takes the callee-saved register; a
     defer f.deinit(gpa);
     const n = try f.newVReg(gpa, .gpr, null);
     const r = try f.newVReg(gpa, .gpr, null);
-    f.vregs.items[r.index()].ref = .container;
+    f.vregs.items[r.index()].ref = true;
     const insts = &f.blocks[0].insts;
     try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = n, .imm = 1 } } });
     try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = r, .imm = 2 } } });
@@ -1298,7 +1298,7 @@ test "linear scan: a value live across a call takes the callee-saved register; a
     };
     try testing.expect(store_before and reload_after);
     try testing.expectEqual(@as(usize, 1), res.maps.len);
-    try testing.expectEqualSlices(Root, &.{.{ .spill = 0, .tag = .container }}, res.maps[0]);
+    try testing.expectEqualSlices(Root, &.{.{ .spill = 0 }}, res.maps[0]);
 }
 
 test "linear scan: a reference kept past a safepoint is in its slot across it, with no reload and no keep left" {
@@ -1308,7 +1308,7 @@ test "linear scan: a reference kept past a safepoint is in its slot across it, w
     var f = try TF.init(gpa, 1);
     defer f.deinit(gpa);
     const r = try f.newVReg(gpa, .gpr, null);
-    f.vregs.items[r.index()].ref = .word;
+    f.vregs.items[r.index()].ref = true;
     const insts = &f.blocks[0].insts;
     try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = r, .imm = 2 } } });
     try insts.append(gpa, .{ .op = .{ .mov = .{ .rd = Mir.Reg.gp(0), .rn = r } } });
@@ -1319,7 +1319,7 @@ test "linear scan: a reference kept past a safepoint is in its slot across it, w
     var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
     defer res.deinit(gpa);
     try testing.expectEqual(@as(usize, 1), res.maps.len);
-    try testing.expectEqualSlices(Root, &.{.{ .spill = 0, .tag = .word }}, res.maps[0]);
+    try testing.expectEqualSlices(Root, &.{.{ .spill = 0 }}, res.maps[0]);
     var seen_call = false;
     for (f.blocks[0].insts.items) |i| switch (i.op) {
         .call => seen_call = true,
@@ -1335,7 +1335,7 @@ test "linear scan: a call that never collects keeps a reference in a register" {
     var f = try TF.init(gpa, 1);
     defer f.deinit(gpa);
     const r = try f.newVReg(gpa, .gpr, null);
-    f.vregs.items[r.index()].ref = .word;
+    f.vregs.items[r.index()].ref = true;
     const insts = &f.blocks[0].insts;
     try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = r, .imm = 2 } } });
     try insts.append(gpa, .{ .op = .{ .call = .{ .safepoint = false } } });

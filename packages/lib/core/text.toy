@@ -13,7 +13,7 @@ import core/mem
 pub fn slice(s: str, lo: int, hi: int) -> str {
     if lo < 0 || lo > hi || hi > s.len() { panic("str slice out of bounds") }
     if hi == lo { return "" }
-    cell := gc_alloc(16)
+    cell := gc_alloc(16, layout_of[str]())
     unsafe {
         store(cell, s)
         p: int = load(cell)
@@ -29,7 +29,7 @@ pub fn slice(s: str, lo: int, hi: int) -> str {
 # buffer lives while the builder holds it.
 pub fn alloc(n: int) -> rawptr {
     if n < 0 { panic("str buffer size is negative") }
-    buf := gc_alloc(n + 8)
+    buf := gc_alloc(n + 8, 0)
     unsafe { store(buf, n) }
     return buf
 }
@@ -61,7 +61,7 @@ pub fn take(buf: rawptr, n: int) -> str {
     cap: int = unsafe { load(buf) }
     if n < 0 || n > cap { panic("str buffer read out of bounds") }
     if n == 0 { return "" }
-    cell := gc_alloc(16)
+    cell := gc_alloc(16, layout_of[str]())
     unsafe {
         store(cell, offset(buf, 8))
         store(offset(cell, 8), n)

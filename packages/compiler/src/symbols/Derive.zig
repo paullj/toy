@@ -23,7 +23,7 @@ const Type = @import("../layout/Type.zig").Type;
 /// char conversions `.conv_int_char`/`.conv_char_byte` (source-less `TryInto` witnesses,
 /// not real conformance methods — see `derive_synth`). The ordinal folds into the mangled
 /// name + the sort key, so it must stay stable.
-pub const Kind = enum(u8) { eq, ord, hash, display, conv_int_char, conv_char_byte, conv_float_int, trace };
+pub const Kind = enum(u8) { eq, ord, hash, display, conv_int_char, conv_char_byte, conv_float_int };
 
 /// The method a `Kind` synthesizes (a pure function of the kind). Used for the
 /// mangled name segment; `Eq` derives an `eq` method, `Ord` a `cmp` method, `Hash` a
@@ -38,7 +38,6 @@ pub fn methodName(k: Kind) []const u8 {
         .conv_int_char => "int_to_char",
         .conv_char_byte => "char_to_byte",
         .conv_float_int => "float_to_int",
-        .trace => "trace",
     };
 }
 
@@ -70,14 +69,6 @@ pub const FieldWitness = union(enum) {
     /// call `display(field_self) -> str` and append the returned rendering to the
     /// accumulator str. Append-only (ordinal 5).
     display_call: []const u8,
-    /// A MANAGED (reference) field of a `Trace` derive: the trace boundary. The emitter
-    /// loads the 8-byte cell pointer and calls `mark` on it — it does NOT recurse into the
-    /// pointee's descriptor. Append-only (ordinal 6).
-    trace_mark,
-    /// A by-value aggregate (struct / enum) field of a `Trace` derive that itself holds a
-    /// managed field: call the sibling `trace(field_self) -> ()` witness. Append-only
-    /// (ordinal 7).
-    trace_call: []const u8,
 };
 
 /// One authorized structural-derive recipe. `field_witnesses`, `params`, and `name`
@@ -162,7 +153,7 @@ pub fn writeKey(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), protocol_id: u3
 /// name SCALAR key types (a `Map[int, V]` key is an `int`), so they get their own
 /// scalar-capable name (`Mangle.erased`) rather than `Mangle.derive` (which asserts a
 /// nominal struct/enum via `carriesIntDesc`).
-pub const ErasedKind = enum { hash, eq, trace };
+pub const ErasedKind = enum { hash, eq };
 
 const testing = std.testing;
 
