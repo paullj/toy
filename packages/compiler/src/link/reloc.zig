@@ -169,8 +169,9 @@ pub const desc_table_base_hash: u64 = 0xDE5C_0000_0000_0000;
 pub const gc_stackmap_base_hash: u64 = 0x57AC_C0DE_BA5E_0000;
 
 /// Bytes of the writable zero-fill `__bss` an image gets when any reloc targets `.data`.
-/// Only the GC control block lives there; it asserts it fits.
-pub const bss_size: u32 = 256;
+/// Only the GC control block lives there, whose fields `core/rt/gc` names by offset; a
+/// test below holds every one of them inside.
+pub const bss_size: u32 = 512;
 
 comptime {
     std.debug.assert(gc_stackmap_base_hash != symtab_base_hash and
@@ -184,6 +185,33 @@ test "reserved side-table base hashes are pairwise distinct and nonzero" {
     try testing.expect(symtab_base_hash != gc_stackmap_base_hash);
     try testing.expect(desc_table_base_hash != gc_stackmap_base_hash);
     try testing.expect(gc_stackmap_base_hash != 0);
+}
+
+test "every control block field core/rt/gc names fits in __bss" {
+    const classes = @import("../codegen/abi/Abi.zig").size_classes.len;
+    const src = for (@import("bundled_std").modules) |m| {
+        if (std.mem.eql(u8, m.path, "core/rt/gc")) break m.source;
+    } else return error.TestUnexpectedResult;
+    var fields: usize = 0;
+    var end: usize = 0;
+    var lines = std.mem.tokenizeScalar(u8, src, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "fn ") or std.mem.indexOf(u8, line, "(cb: int") == null) continue;
+        const at = std.mem.indexOf(u8, line, "{ return cb") orelse continue;
+        var rest = line[at + "{ return cb".len ..];
+        var off: usize = 0;
+        if (std.mem.startsWith(u8, rest, " + ")) {
+            rest = rest[3..];
+            const n = std.mem.indexOfScalar(u8, rest, ' ').?;
+            off = try std.fmt.parseInt(usize, rest[0..n], 10);
+        }
+        // A per-class field is one head for each size class.
+        const words: usize = if (std.mem.indexOf(u8, rest, "class * 8") != null) classes else 1;
+        end = @max(end, off + words * 8);
+        fields += 1;
+    }
+    try testing.expect(fields >= 15);
+    try testing.expect(end <= bss_size);
 }
 
 test "SymbolId.name is the single source of truth for name ownership" {

@@ -18,6 +18,10 @@
 # by running its element layouts over the live elements (`trace_vec`, `trace_map`). Only
 # offsets are read, so the layouts would serve a moving collector too.
 #
+# The sweep is lazy: a collection only marks, then files each span, one with no marked cell
+# in a pool any class refills from, every other one on its class's unswept list, which
+# allocation sweeps a span at a time once the class's freelist runs dry.
+#
 # The control block is in the image's zero-fill __bss, so every field starts at 0. A span
 # is a 256-byte header, the layout table, then cells of one size; a large object (over 8
 # KiB) has a mapping of its own with the same header shape. The fns at the end name each
@@ -29,6 +33,7 @@ extern fn malloc(n: int) -> int
 extern fn realloc(p: int, n: int) -> int
 extern fn calloc(n: int, size: int) -> int
 extern fn free(p: int)
+extern fn memset(p: int, c: int, n: int) -> int
 
 # A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `container()` or the
 # address of a layout program. Every caller built with the inliner takes this body spliced
@@ -74,9 +79,10 @@ pub fn alloc_slow(size: int, layout: int) -> rawptr {
     head := freelist(cb, class)
     cell := word(head)
     if cell == 0 {
-        if over_budget(cb) {
+        cell = sweep_class(cb, class)
+        if cell == 0 && over_budget(cb) {
             collect_from(cb, fp)
-            cell = word(head)
+            cell = sweep_class(cb, class)
         }
         if cell == 0 { cell = refill(cb, class, cell_size) }
     }
@@ -137,18 +143,43 @@ fn map_pages(len: int) -> int {
     return unsafe { mmap(0, len, 3, 4098, -1, 0) }
 }
 
-# Map a span for size class `class` and put its cells on the class's freelist. Returns the
-# freelist head.
+# Sweep the class's unswept spans until one frees a cell. Returns the freelist head.
+fn sweep_class(cb: int, class: int) -> int {
+    head := freelist(cb, class)
+    while word(head) == 0 && sweep_next(cb, class) {}
+    return word(head)
+}
+
+# Sweep the next of the class's unswept spans. False when none is left.
+fn sweep_next(cb: int, class: int) -> bool {
+    list := unswept(cb, class)
+    span := word(list)
+    if span == 0 { return false }
+    set_word(list, word(span_link(span)))
+    sweep_span(cb, span)
+    return true
+}
+
+# Give size class `class` a span, an empty one if a collection found any, else a new
+# mapping, and put its cells on the class's freelist. Returns the freelist head.
 fn refill(cb: int, class: int, cell_size: int) -> int {
-    span := map_pages(16384)
-    set_word(span, word(span_list(cb)))
-    set_word(span_list(cb), span)
+    span := word(span_pool(cb))
+    if span != 0 {
+        set_word(span_pool(cb), word(span_link(span)))
+        # Its cells died unswept, and its layout entries were written for another class's
+        # cell boundaries.
+        unsafe { memset(span + 256, 0, 16384 - 256) }
+    } else {
+        span = map_pages(16384)
+        set_word(span, word(span_list(cb)))
+        set_word(span_list(cb), span)
+        set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
+    }
     count := (16384 - first_cell()) / cell_size
     set_word(span_cell_size(span), cell_size)
     set_word(span_cell_count(span), count)
     set_word(span_cells(span), span + first_cell())
     set_word(span_class(span), class)
-    set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
     head := freelist(cb, class)
     i := 0
     while i < count {
@@ -184,9 +215,13 @@ fn collect_from(cb: int, fp: int) {
         set_word(mark_cap(cb), 4096)
     }
     set_word(mark_len(cb), 0)
-    # The sweep rebuilds every freelist.
+    # A span the last cycle left unswept still holds its dead objects whole, and a stale
+    # root that marked one would trace pointers into memory since freed or unmapped. Its
+    # sweep zeroes them and clears its marks. Its free cells, like every class's, are found
+    # again by the sweep after this collection.
     class := 0
     while class < 13 {
+        while sweep_next(cb, class) {}
         set_word(freelist(cb, class), 0)
         class += 1
     }
@@ -195,7 +230,7 @@ fn collect_from(cb: int, fp: int) {
     drain(cb)
     unsafe { free(word(span_table(cb))) }
     set_word(span_table(cb), 0)
-    live := sweep_spans(cb) + sweep_large(cb)
+    live := file_spans(cb) + sweep_large(cb)
     set_word(collections_run(cb), word(collections_run(cb)) + 1)
     set_word(allocated(cb), 0)
     set_word(kept(cb), live)
@@ -500,45 +535,86 @@ fn trace_map(header: int) {
     }
 }
 
-# Free every unmarked cell onto its class's freelist, zeroed for the next `alloc`, and clear
-# the marks. Returns the bytes kept.
-fn sweep_spans(cb: int) -> int {
+# After marking, put each span with no marked cell in the pool for any class to take, and
+# leave every other one on its class's unswept list, to be swept when the class runs out of
+# cells: the sweep writes each dead cell just before the program takes it, rather than every
+# dead cell of the heap at once and again on allocation. A pooled span has a cell count of
+# 0, so no word marks into its dead cells. Pooled spans stay mapped: unmapping those past
+# the next cycle's budget cost binary_trees 7% in mmap churn and no peak RSS. Returns the
+# bytes kept.
+fn file_spans(cb: int) -> int {
     live := 0
+    set_word(span_pool(cb), 0)
     span := word(span_list(cb))
     while span != 0 {
-        size := word(span_cell_size(span))
         count := word(span_cell_count(span))
-        cells := word(span_cells(span))
-        head := freelist(cb, word(span_class(span)))
-        # A byte of mark bits at a time: its 8 cells, then the byte cleared whole.
-        at := span_marks(span)
-        i := 0
-        while i < count {
-            bits := byte(at)
-            bit := 1
-            while bit < 256 && i < count {
-                if (bits & bit) != 0 {
-                    live += size
-                } else {
-                    cell := cells + i * size
-                    # Word 0 becomes the freelist link.
-                    k := 8
-                    while k < size {
-                        set_word(cell + k, 0)
-                        k += 8
-                    }
-                    set_word(cell, word(head))
-                    set_word(head, cell)
-                }
-                bit += bit
-                i += 1
-            }
-            set_byte(at, 0)
-            at += 1
+        marked := 0
+        if count != 0 { marked = marked_cells(span, count) }
+        if marked == 0 {
+            set_word(span_cell_count(span), 0)
+            set_word(span_link(span), word(span_pool(cb)))
+            set_word(span_pool(cb), span)
+        } else {
+            live += marked * word(span_cell_size(span))
+            list := unswept(cb, word(span_class(span)))
+            set_word(span_link(span), word(list))
+            set_word(list, span)
         }
         span = word(span)
     }
     return live
+}
+
+# The mark bits set in a span, a word of them at a time (SWAR popcount). The bits past the
+# last cell are never set, and the last word ends before `span_link`.
+fn marked_cells(span: int, count: int) -> int {
+    n := 0
+    at := span_marks(span)
+    end := at + (count + 63) / 64 * 8
+    while at < end {
+        x := word(at)
+        if x != 0 {
+            x = x -% ((x >> 1) & 0x5555_5555_5555_5555)
+            x = (x & 0x3333_3333_3333_3333) + ((x >> 2) & 0x3333_3333_3333_3333)
+            x = (x + (x >> 4)) & 0x0F0F_0F0F_0F0F_0F0F
+            n += (x *% 0x0101_0101_0101_0101) >> 56
+        }
+        at += 8
+    }
+    return n
+}
+
+# Free every unmarked cell of `span` onto its class's freelist, zeroed for the next `alloc`,
+# and clear the marks.
+fn sweep_span(cb: int, span: int) {
+    size := word(span_cell_size(span))
+    count := word(span_cell_count(span))
+    cells := word(span_cells(span))
+    head := freelist(cb, word(span_class(span)))
+    # A byte of mark bits at a time: its 8 cells, then the byte cleared whole.
+    at := span_marks(span)
+    i := 0
+    while i < count {
+        bits := byte(at)
+        bit := 1
+        while bit < 256 && i < count {
+            if (bits & bit) == 0 {
+                cell := cells + i * size
+                # Word 0 becomes the freelist link.
+                k := 8
+                while k < size {
+                    set_word(cell + k, 0)
+                    k += 8
+                }
+                set_word(cell, word(head))
+                set_word(head, cell)
+            }
+            bit += bit
+            i += 1
+        }
+        set_byte(at, 0)
+        at += 1
+    }
 }
 
 # Unmap every unmarked large object and clear the marks. Returns the bytes kept.
@@ -583,6 +659,10 @@ fn table_mask(cb: int) -> int { return cb + 200 }
 fn table_shift(cb: int) -> int { return cb + 208 }
 fn heap_low(cb: int) -> int { return cb + 216 }
 fn heap_high(cb: int) -> int { return cb + 224 }
+# 13 heads of spans marked by the last collection and not yet swept, one per size class.
+fn unswept(cb: int, class: int) -> int { return cb + 240 + class * 8 }
+# The head of the spans the last collection found empty.
+fn span_pool(cb: int) -> int { return cb + 344 }
 
 # Span header fields; word 0 links the next span. A large object's header has a cell size
 # of 0, and its own fields at 16, 32, 40 and 48.
@@ -591,6 +671,8 @@ fn span_cell_count(span: int) -> int { return span + 16 }
 fn span_cells(span: int) -> int { return span + 24 }
 fn span_class(span: int) -> int { return span + 32 }
 fn span_marks(span: int) -> int { return span + 40 }
+# Links the span into an unswept list or the pool; past the most mark bits a span has.
+fn span_link(span: int) -> int { return span + 144 }
 fn large_size(obj: int) -> int { return obj + 16 }
 fn large_len(obj: int) -> int { return obj + 32 }
 fn large_mark(obj: int) -> int { return obj + 40 }

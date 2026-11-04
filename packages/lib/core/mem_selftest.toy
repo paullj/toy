@@ -185,3 +185,40 @@ pub fn large_interior_survivor() -> int {
     }
     return unsafe { load(mid) }
 }
+
+# Spans the sweep finds empty serve any size class, and a reused span hands out zeroed
+# cells. Fill about 20 spans with 16-byte cells holding nonzero words, drop them all and
+# collect, then take 15 spans' worth of 64-byte cells: within the budget, so no collection
+# runs, and the span count must not grow. Returns 1; 100+n when n spans were mapped
+# anyway, 2 when a cell came back dirty.
+pub fn empty_spans_reused() -> int {
+    i := 0
+    loop {
+        if i >= 16120 { break }
+        p := gc_alloc(16, 0)
+        unsafe {
+            store(p, i + 1)
+            store(offset(p, 8), i + 1)
+        }
+        i = i + 1
+    }
+    gc_collect()
+    s0 := gc_span_count()
+    dirty := 0
+    j := 0
+    loop {
+        if j >= 3015 { break }
+        q := gc_alloc(64, 0)
+        k := 0
+        while k < 64 {
+            w := unsafe { load(offset(q, k)) }
+            if w != 0 { dirty = dirty + 1 }
+            k = k + 8
+        }
+        j = j + 1
+    }
+    grown := gc_span_count() - s0
+    if grown != 0 { return 100 + grown }
+    if dirty != 0 { return 2 }
+    return 1
+}

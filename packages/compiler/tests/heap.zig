@@ -478,6 +478,19 @@ test "gc: a large object rooted only through its third page survives (every page
     try std.testing.expectEqual(@as(u8, 9), code);
 }
 
+test "gc: spans a collection empties are reused by another size class, zeroed" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const code = try buildAndRunWith(gpa, io, ".toy-test-gc-span-reuse",
+        \\import core/mem_selftest
+        \\fn main() -> int { return mem_selftest.empty_spans_reused() }
+        \\
+    , &.{harness.dev_core_imports});
+    try std.testing.expectEqual(@as(u8, 1), code);
+}
+
 test "heap: repeated span exhaustion keeps mmapping fresh spans (arena count >= 3)" {
     // Allocating past two full spans forces two refills. This catches a refill that
     // fails to persist the new span's limit: such a bug bumps unbounded off the second
