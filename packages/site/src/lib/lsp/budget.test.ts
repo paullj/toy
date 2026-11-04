@@ -3,11 +3,12 @@ import { expect, it } from 'vitest';
 import { loadServer, WASM } from './rpc.test-util';
 
 // Budgets for what the docs site ships and how fast a check answers. They leave headroom
-// over today's numbers (~525 KB with runtime safety on after the Usable language milestone's
-// std and checker work, up from ~464 KB before it and ~326 KB before the closures roadmap;
-// well under 1 ms per check of a std-free document, about 1 ms for an edit of a std/vec one
-// and every request that follows it, on an M-series laptop) so only a real regression trips.
-const MAX_BROTLI_BYTES = 600_000;
+// over today's numbers (~600 KB once the collector moved into the embedded core/rt sources,
+// up from ~525 KB after the Usable language milestone, ~464 KB before it and ~326 KB before
+// the closures roadmap; well under 1 ms per check of a std-free document, about 1 ms for an
+// edit of a std/vec one and every request that follows it, on an M-series laptop) so only a
+// real regression trips.
+const MAX_BROTLI_BYTES = 700_000;
 const MAX_MEDIAN_CHECK_MS = 25;
 
 const doc = `pub protocol Area {
