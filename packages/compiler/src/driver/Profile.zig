@@ -15,9 +15,9 @@ name: Name = .debug,
 /// The IR passes. Starts as the profile's own choice; `-O`, `--opt` and `--no-opt` change it.
 opt: Opt.Config = .O0,
 /// Every heap allocation collects first, so a missing root or a wrong trace shows up in
-/// any allocating program, not only in one that outgrows the collection budget. Only the
-/// appended runtime changes, but it joins the key anyway so a stress build never serves a
-/// normal one from the cache, whatever later lowering starts to read it.
+/// any allocating program, not only in one that outgrows the collection budget. The
+/// runtime reads it, and so does every unit the allocation fast path is spliced into, so it
+/// joins the key: a stress build never serves a normal one from the cache.
 gc_stress: bool = false,
 
 pub const debug: Profile = of(.debug);

@@ -58,6 +58,7 @@ pub const ElemPrim = enum {
 pub const RuntimeFn = enum {
     str_eq,
     alloc,
+    alloc_slow,
     collect,
     collections,
     span_count,
@@ -67,6 +68,7 @@ pub const RuntimeFn = enum {
         return switch (f) {
             .str_eq => "core/rt/str.str_eq",
             .alloc => "core/rt/gc.alloc",
+            .alloc_slow => "core/rt/gc.alloc_slow",
             .collect => "core/rt/gc.collect",
             .collections => "core/rt/gc.collections",
             .span_count => "core/rt/gc.span_count",
@@ -78,7 +80,15 @@ pub const RuntimeFn = enum {
     /// `core/rt` fns that reach the collector, so T0082 counts a call to one as an
     /// allocation, and every call to one is a safepoint.
     pub fn collects(f: RuntimeFn) bool {
-        return f == .alloc or f == .collect;
+        return f == .alloc or f == .alloc_slow or f == .collect;
+    }
+
+    /// The allocation fast path (#211): a unit built with the inliner splices each call to
+    /// it in once its own optimization is done, so the size and layout fold and only the
+    /// slow path is a call. The callers' keys need not fold it: bundled source joins the
+    /// compiler stamp.
+    pub fn spliced(f: RuntimeFn) bool {
+        return f == .alloc;
     }
 
     pub fn lookup(sym: []const u8) ?RuntimeFn {
@@ -99,6 +109,7 @@ pub fn userCallMayCollect(sym: []const u8) bool {
 test "userCallMayCollect: only the collector's entries among core/rt source fns" {
     try std.testing.expect(userCallMayCollect("main"));
     try std.testing.expect(userCallMayCollect("core/rt/gc.alloc"));
+    try std.testing.expect(userCallMayCollect("core/rt/gc.alloc_slow"));
     try std.testing.expect(userCallMayCollect("core/rt/gc.collect"));
     try std.testing.expect(userCallMayCollect("core/rt/str.f$int"));
     try std.testing.expect(!userCallMayCollect("core/rt/gc.collections"));

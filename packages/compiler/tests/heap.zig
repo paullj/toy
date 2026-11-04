@@ -838,3 +838,87 @@ test "gc: an enum word that is a container in one variant only is traced by the 
         try std.testing.expectEqual(cs.want, code);
     }
 }
+
+test "alloc: the inliner splices the fast path into the caller, which calls only the slow path" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const dir = ".toy-test-alloc-spliced";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir);
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/main.toy", .data =
+        \\fn counter() -> fn() -> int {
+        \\    n := 41
+        \\    fn() {
+        \\        n = n + 1
+        \\        n
+        \\    }
+        \\}
+        \\fn main() -> int {
+        \\    next := counter()
+        \\    return next()
+        \\}
+        \\
+    });
+    const Case = struct { flags: []const []const u8, spliced: bool, pops: bool };
+    for ([_]Case{
+        .{ .flags = &.{"-O0"}, .spliced = false, .pops = false },
+        .{ .flags = &.{"-O1"}, .spliced = true, .pops = true },
+        .{ .flags = &.{"--release"}, .spliced = true, .pops = true },
+        .{ .flags = &.{ "-O1", "--no-opt=inline" }, .spliced = false, .pops = false },
+        // Stress folds the fast path away: every allocation collects first.
+        .{ .flags = &.{ "--gc-stress", "-O1" }, .spliced = true, .pops = false },
+    }) |c| {
+        const ir = try harness.emitIr(gpa, io, dir ++ "/main.toy", c.flags);
+        defer gpa.free(ir);
+        // `n`'s box and the closure's env are allocated by `counter` itself.
+        const body = harness.irBody(ir, "main.counter") orelse return error.TestExpectedMain;
+        errdefer std.debug.print("{s}\n", .{body});
+        try std.testing.expectEqual(!c.spliced, std.mem.indexOf(u8, body, "call @core/rt/gc.alloc(") != null);
+        try std.testing.expectEqual(c.spliced, std.mem.indexOf(u8, body, "call @core/rt/gc.alloc_slow(") != null);
+        // The fast path reads a freelist head off the control block.
+        try std.testing.expectEqual(c.pops, std.mem.indexOf(u8, body, "data_addr +0") != null);
+    }
+}
+
+test "gc: refs a recursive fn holds across spliced allocations survive stress at every level" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // `a` is live across the recursive call and across `b`'s allocation, whose slow path
+    // is the call that collects; `v`'s Vec across both pushes.
+    const src =
+        \\import std/ref
+        \\import std/vec
+        \\fn build(n: int) -> Vec[Ref[int]] {
+        \\    if n == 0 { return Vec[Ref[int]].new() }
+        \\    a := Ref.new(n)
+        \\    v := build(n - 1)
+        \\    b := Ref.new(n * 2)
+        \\    v.push(a)
+        \\    v.push(b)
+        \\    return v
+        \\}
+        \\fn main() -> int {
+        \\    v := build(20)
+        \\    total := 0
+        \\    for r in v { total = total + r.get() }
+        \\    return total % 256
+        \\}
+        \\
+    ;
+    // 3 * (1 + ... + 20) = 630.
+    for ([_][]const []const u8{
+        &.{ "--gc-stress", "-O0" },
+        &.{ "--gc-stress", "-O1" },
+        &.{ "--gc-stress", "--release" },
+        &.{"--release"},
+    }) |flags| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-alloc-spliced-gc", src, flags);
+        try std.testing.expectEqual(@as(u8, 630 % 256), code);
+    }
+}

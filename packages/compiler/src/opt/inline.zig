@@ -39,10 +39,21 @@ pub const budget = 30;
 /// no IR this caller may read, or its cache key would not cover it.
 pub const Lookup = struct {
     ctx: *anyopaque,
-    findFn: *const fn (ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function,
+    findFn: FindFn,
+    /// The callees `splice` takes once the unit's own optimization is done, or null for
+    /// none: a body lowered to be inlined elsewhere keeps such a call, so it is measured
+    /// against the budget as one instruction.
+    splicedFn: ?FindFn = null,
+
+    pub const FindFn = *const fn (ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function;
 
     pub fn find(l: Lookup, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
         return l.findFn(l.ctx, name);
+    }
+
+    /// The lookup `splice` reads, or null.
+    pub fn spliced(l: Lookup) ?Lookup {
+        return .{ .ctx = l.ctx, .findFn = l.splicedFn orelse return null };
     }
 };
 
@@ -54,6 +65,17 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, lookup: Lookup, max: usiz
     // inlining grows it; a recursion multiplies that by its depth and could overflow the
     // stack where the uninlined build does not.
     if (calls(func, func.name.name)) return false;
+    return inlineSites(gpa, func, lookup, max, stats);
+}
+
+/// Splice every direct call whose callee `lookup` hands over, whatever its size, and in a
+/// caller that recurses too: the lookup hands over only bodies whose slots are scalar
+/// params that mem2reg promotes, so they leave the frame as it was.
+pub fn splice(gpa: std.mem.Allocator, func: *Ir.Function, lookup: Lookup, stats: *Stats) error{OutOfMemory}!bool {
+    return inlineSites(gpa, func, lookup, std.math.maxInt(usize), stats);
+}
+
+fn inlineSites(gpa: std.mem.Allocator, func: *Ir.Function, lookup: Lookup, max: usize, stats: *Stats) error{OutOfMemory}!bool {
     var sp: Splicer = try .init(gpa, func);
     defer sp.deinit();
     var sites: std.ArrayList(Site) = .empty;
@@ -865,5 +887,56 @@ test "inline leaves a recursive caller as it is, and a callee that calls back in
         var st: Opt.Stats = .{};
         try testing.expect(!try run(gpa, &func, table.lookup(), budget, &st));
         try testing.expectEqual(@as(usize, 2), callCount(&func));
+    }
+}
+
+test "splice takes an oversized callee, and into a caller that recurses" {
+    const gpa = testing.allocator;
+    var add1 = try addK(gpa, "add1", 1, false);
+    defer add1.deinit(gpa);
+    var table: Table = .{ .fns = &.{&add1} };
+    var func = try caller(gpa, "add1");
+    defer func.deinit(gpa);
+    const instrs = try gpa.alloc(Ir.Instr, 3);
+    @memcpy(instrs[0..2], func.blocks[0].instrs);
+    instrs[2] = .{ .result = 2, .op = .{ .call = .{
+        .callee = .{ .kind = .user_fn, .name = "main" },
+        .args = try ops(gpa, &.{}),
+        .ret_slot = Ir.none_slot,
+    } } };
+    gpa.free(func.blocks[0].instrs);
+    func.blocks[0].instrs = instrs;
+    gpa.free(func.values);
+    func.values = try vals(gpa, 3);
+    var st: Opt.Stats = .{};
+    try testing.expect(!try run(gpa, &func, table.lookup(), budget, &st));
+    try testing.expect(!fits(&add1, 3));
+    try testing.expect(try splice(gpa, &func, table.lookup(), &st));
+    try testing.expectEqual(@as(usize, 1), st.calls_inlined);
+    try testing.expectEqual(@as(usize, 1), callCount(&func));
+}
+
+var spliced_table: Table = .{ .fns = &.{} };
+
+test "optimize splices last, and only with a spliced lookup" {
+    const gpa = testing.allocator;
+    var add1 = try addK(gpa, "add1", 1, false);
+    defer add1.deinit(gpa);
+    var none: Table = .{ .fns = &.{} };
+    spliced_table = .{ .fns = &.{&add1} };
+    for ([_]bool{ false, true }) |with| {
+        var func = try caller(gpa, "add1");
+        defer func.deinit(gpa);
+        // The regular inliner finds nothing, so only `splicedFn` can take the call.
+        var l = none.lookup();
+        if (with) l.splicedFn = struct {
+            fn f(_: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
+                return Table.find(&spliced_table, name);
+            }
+        }.f;
+        var st: Opt.Stats = .{};
+        try Opt.optimize(gpa, &func, .O1, l, &st);
+        try testing.expectEqual(@as(usize, if (with) 0 else 1), callCount(&func));
+        try testing.expectEqual(@as(?i64, if (with) 42 else null), returnedConst(&func));
     }
 }

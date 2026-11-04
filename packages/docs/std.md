@@ -71,11 +71,13 @@ carries these modules, and the linker keeps only the fns something calls. No fn 
 `core/rt/` may reach a GC allocation, directly or through calls (T0082): after type
 checking, the compiler walks the call graph from each one and reports the call path to
 any allocation. A call to a runtime fn therefore never lets the collector run, except a
-call to the collector's two entries, `core/rt/gc` `alloc` and `collect`: the rule counts a
-call to either as an allocation, and lowered code calls them where `gc_alloc` and
-`gc_collect` stand. The fns have plain names; nothing marks them but their module. They
-build with the release profile whatever the program's, as the hand-written machine code
-they replace did.
+call to the collector's entries, `core/rt/gc` `alloc`, `alloc_slow` and `collect`: the
+rule counts a call to any of them as an allocation, and lowered code calls `alloc` and
+`collect` where `gc_alloc` and `gc_collect` stand. A build with the inliner on splices
+`alloc` into each caller once that caller is optimized, so the allocation fast path, a
+freelist pop, costs no call, and only its slow path, `alloc_slow`, is called. The fns have
+plain names; nothing marks them but their module. They build with the release profile
+whatever the program's, as the hand-written machine code they replace did.
 
 ## std
 
