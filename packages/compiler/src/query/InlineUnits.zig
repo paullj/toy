@@ -13,6 +13,7 @@ const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
 const Walk = @import("../ast/Walk.zig");
 const lower = @import("../lower.zig");
+const StdNames = @import("../symbols/StdNames.zig");
 const Frozen = Engine.Frozen;
 
 /// Every unit of the program, found by its symbol: a read-only view of the codegen plan.
@@ -52,7 +53,7 @@ fn inlineCandidate(fr: *const Frozen) ?Ast.Index {
     // lowered to find out.
     var shape: Shape = .{};
     Walk.walk(src, s.decl, &shape) catch unreachable;
-    if (shape.loop or shape.nodes > inline_nodes_max) return null;
+    if (shape.loop or (shape.nodes > inline_nodes_max and !spliced(fr.sym.name))) return null;
     return s.decl;
 }
 
@@ -73,6 +74,13 @@ const Shape = struct {
         }
     }
 };
+
+/// A callee `Opt.inliner.splice` takes whatever its size (`StdNames.RuntimeFn.spliced`).
+/// Bundled, so the compiler stamp covers its body in every caller's key.
+fn spliced(name: []const u8) bool {
+    const f = StdNames.RuntimeFn.lookup(name) orelse return false;
+    return f.spliced() and StdNames.isBundledRuntimeSym(name);
+}
 
 /// The callees a keyed body's key folds by name, the only ones it may inline: its call
 /// identities (`AstWalk.walkCalls`) and an instance's conformance witnesses.
@@ -136,17 +144,33 @@ const Facts = struct {
     calls: []const []const u8,
 };
 
-/// The callee IR a build's inliner prepared, by `(symbol, depth)`, shared by every unit's
-/// lowering so each candidate is lowered once per depth. A prepared body is a pure
-/// function of the callee's `Frozen` view, so when two jobs race to prepare one, either
+/// The callee IR a build's inliner prepared, by `(symbol, passes, depth)`, shared by every
+/// unit's lowering so each candidate is lowered once per depth. Depth `inline_depth` is a
+/// body as its own unit lowers it, which `Opt.inliner.splice` takes. The passes join the
+/// key because one build prepares bodies with two: a unit's own, and a `core/rt` unit's,
+/// which a spliced body and its callees take. A prepared body is a pure function of the
+/// callee's `Frozen` view and the passes, so when two jobs race to prepare one, either
 /// result is the same; the first stored stands and the other is freed.
 pub const InlineCache = struct {
-    memo: std.StringHashMapUnmanaged([inline_depth]Entry) = .empty,
+    memo: std.HashMapUnmanaged(MemoKey, [inline_depth + 1]Entry, MemoContext, std.hash_map.default_max_load_percentage) = .empty,
     /// Each unit the inliner looked at: its `Facts`, or null when it is no candidate.
     facts: std.StringHashMapUnmanaged(?Facts) = .empty,
     spin: Cache.SpinLock = .{},
 
     const Entry = union(enum) { unknown, none, ir: *Ir.Function };
+
+    /// The name is borrowed from the unit's symbol, which outlives the cache.
+    const MemoKey = struct { name: []const u8, cfg: Opt.Config };
+
+    const MemoContext = struct {
+        pub fn hash(_: MemoContext, k: MemoKey) u64 {
+            return std.hash.Wyhash.hash(@as(u8, @bitCast(k.cfg)), k.name);
+        }
+
+        pub fn eql(_: MemoContext, a: MemoKey, b: MemoKey) bool {
+            return @as(u8, @bitCast(a.cfg)) == @as(u8, @bitCast(b.cfg)) and std.mem.eql(u8, a.name, b.name);
+        }
+    };
 
     pub fn deinit(c: *InlineCache, gpa: std.mem.Allocator) void {
         var it = c.memo.valueIterator();
@@ -197,19 +221,19 @@ pub const InlineCache = struct {
         c.spin.unlock();
     }
 
-    fn get(c: *InlineCache, name: []const u8, depth: usize) Entry {
+    fn get(c: *InlineCache, name: []const u8, cfg: Opt.Config, depth: usize) Entry {
         c.lock();
         defer c.unlock();
-        const m = c.memo.get(name) orelse return .unknown;
+        const m = c.memo.get(.{ .name = name, .cfg = cfg }) orelse return .unknown;
         return m[depth];
     }
 
-    /// Store `f` as `(name, depth)`'s IR unless a racing job stored first; returns what
-    /// stands. Takes ownership of `f`.
-    fn put(c: *InlineCache, gpa: std.mem.Allocator, name: []const u8, depth: usize, f: ?*Ir.Function) error{OutOfMemory}!?*Ir.Function {
+    /// Store `f` as `(name, cfg, depth)`'s IR unless a racing job stored first; returns
+    /// what stands. Takes ownership of `f`.
+    fn put(c: *InlineCache, gpa: std.mem.Allocator, name: []const u8, cfg: Opt.Config, depth: usize, f: ?*Ir.Function) error{OutOfMemory}!?*Ir.Function {
         c.lock();
         defer c.unlock();
-        const m = c.memo.getOrPut(gpa, name) catch |err| {
+        const m = c.memo.getOrPut(gpa, .{ .name = name, .cfg = cfg }) catch |err| {
             if (f) |p| destroyIr(gpa, p);
             return err;
         };
@@ -252,18 +276,19 @@ const Inliner = struct {
     /// `name`'s optimized IR with its callees inlined `depth` levels deep, or null when it
     /// is no candidate. Lives as long as the cache.
     fn prepared(self: Inliner, name: []const u8, depth: usize) error{OutOfMemory}!?*const Ir.Function {
-        switch (self.units.cache.get(name, depth)) {
+        switch (self.units.cache.get(name, self.cfg, depth)) {
             .ir => |p| return p,
             .none => return null,
             .unknown => {},
         }
-        return self.units.cache.put(self.gpa, name, depth, try self.build(name, depth));
+        return self.units.cache.put(self.gpa, name, self.cfg, depth, try self.build(name, depth));
     }
 
     fn build(self: Inliner, name: []const u8, depth: usize) error{OutOfMemory}!?*Ir.Function {
         // Leaf first: a callee whose own body, before its callees are inlined, is already
         // over budget or loops is not lowered again deeper.
-        if (depth > 0) {
+        // Depth `inline_depth` is a spliced body, which no budget limits.
+        if (depth > 0 and depth < inline_depth) {
             const leaf = try self.prepared(name, 0) orelse return null;
             if (!Opt.inliner.fits(leaf, Opt.inliner.budget)) return null;
         }
@@ -295,14 +320,27 @@ const Scope = struct {
     /// The callees this lowering may splice, by name. Borrowed.
     allowed: []const []const u8 = &.{},
     any: bool = false,
+    /// The passes a `core/rt` unit builds with, which a spliced body is prepared with
+    /// whatever this unit's are: one body for every caller, as its own unit lowers it.
+    runtime_cfg: ?Opt.Config = null,
 
     fn lookup(s: *Scope) Opt.inliner.Lookup {
-        return .{ .ctx = s, .findFn = find };
+        return .{ .ctx = s, .findFn = find, .splicedFn = if (s.runtime_cfg != null) findSpliced else null };
+    }
+
+    fn findSpliced(ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
+        const s: *Scope = @ptrCast(@alignCast(ctx));
+        if (!spliced(name)) return null;
+        var rt = s.inliner;
+        rt.cfg = s.runtime_cfg.?;
+        return rt.prepared(name, inline_depth);
     }
 
     fn find(ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
         const s: *Scope = @ptrCast(@alignCast(ctx));
         if (s.depth == 0) return null;
+        // Never over the budget, and taken whole by `findSpliced` once the unit is done.
+        if (spliced(name)) return null;
         if (!s.any and !containsName(s.allowed, name)) return null;
         return s.inliner.prepared(name, s.depth - 1);
     }
@@ -321,7 +359,7 @@ pub const CallerScope = struct {
         const cfg = fr.profile.opt;
         if (!cfg.@"inline") return cs;
         const u = fr.units orelse return cs;
-        var sc: Scope = .{ .inliner = .{ .gpa = gpa, .units = u, .cfg = cfg }, .depth = inline_depth };
+        var sc: Scope = .{ .inliner = .{ .gpa = gpa, .units = u, .cfg = cfg }, .depth = inline_depth, .runtime_cfg = fr.profile.forRuntime().opt };
         switch (fr.body) {
             .source => |s| if (s.cached) {
                 try appendCallNames(gpa, fr, s.decl, &cs.allowed);
@@ -346,3 +384,25 @@ pub const CallerScope = struct {
         return sc.lookup();
     }
 };
+
+test "a prepared body is kept apart for each set of passes" {
+    const gpa = std.testing.allocator;
+    var cache: InlineCache = .{};
+    defer cache.deinit(gpa);
+    const p = try gpa.create(Ir.Function);
+    p.* = .{
+        .name = .{ .kind = .user_fn, .name = "f" },
+        .params = &.{},
+        .ret_type = Ir.Type.int,
+        .slots = &.{},
+        .values = &.{},
+        .blocks = &.{},
+        .entry = 0,
+        .exit = 0,
+    };
+    try std.testing.expectEqual(p, (try cache.put(gpa, "f", Opt.Config.O1, 1, p)).?);
+    try std.testing.expect(cache.get("f", Opt.Config.O1, 1) == .ir);
+    var other = Opt.Config.O1;
+    other.mem2reg = false;
+    try std.testing.expect(cache.get("f", other, 1) == .unknown);
+}

@@ -1,7 +1,8 @@
 # The collector: a non-moving, stop-the-world mark-sweep over 16 KiB spans of size-class
-# cells. Lowered code calls its two entries, `alloc` and `collect`. A call between core/rt
-# fns is no safepoint: T0082 holds every core/rt fn but the two entries to never reach the
-# collector, so the collector gets its own memory from mmap, malloc and calloc.
+# cells. Lowered code calls its entries, `alloc` (or `alloc_slow`, where `alloc` is spliced
+# in) and `collect`. A call between core/rt fns is no safepoint: T0082 holds every core/rt
+# fn but the entries to never reach the collector, so the collector gets its own memory
+# from mmap, malloc and calloc.
 #
 # Every address here is an `int`. None is a reference the collector must keep alive, so no
 # stack map names one.
@@ -30,14 +31,13 @@ extern fn calloc(n: int, size: int) -> int
 extern fn free(p: int)
 
 # A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `container()` or the
-# address of a layout program. The fast path takes a cell of the first four classes, which
-# step by 16 bytes, off its freelist. It calls nothing, so it saves no registers; every
-# other case is `alloc_slow`, called last.
+# address of a layout program. Every caller built with the inliner takes this body spliced
+# in (#211), so the fast path costs no call, and the size and layout it is passed fold: it
+# takes a cell of the first four classes, which step by 16 bytes, off its freelist. Every
+# other case calls `alloc_slow`.
 pub fn alloc(size: int, layout: int) -> rawptr {
-    cb := control_block()
-    rel := layout
-    if layout > container() { rel = program_offset(layout) }
     if size <= 64 && !gc_stress() {
+        cb := control_block()
         class := 0
         if size > 16 { class = (size - 1) / 16 }
         head := freelist(cb, class)
@@ -45,23 +45,28 @@ pub fn alloc(size: int, layout: int) -> rawptr {
         if cell != 0 {
             set_word(head, word(cell))
             set_word(cell, 0)
-            set_word(allocated(cb), word(allocated(cb)) + class * 16 + 16)
-            set_layout(cell, rel)
+            # Grouped so a constant class folds to one add.
+            set_word(allocated(cb), word(allocated(cb)) + (class * 16 + 16))
+            set_layout(cell, relative(layout))
             return offset(cell, 0)
         }
     }
-    return offset(alloc_slow(cb, size, rel, frame_address()), 0)
+    return alloc_slow(size, layout)
 }
 
-# `fp` is the frame record of `alloc`, where a collection's walk starts.
-fn alloc_slow(cb: int, size: int, rel: int, fp: int) -> int {
+# The second collector entry, called from wherever `alloc` was spliced. It reads its own
+# frame record, whose return address is in that caller: the stack walk starts there.
+pub fn alloc_slow(size: int, layout: int) -> rawptr {
+    cb := control_block()
+    fp := frame_address()
+    rel := relative(layout)
     # The collection resets the allocation count, so the budget below never also fires: a
     # stress run collects exactly once per allocation.
     if gc_stress() { collect_from(cb, fp) }
     if size > 8192 {
         obj := alloc_large(cb, size, fp)
         set_word(large_layout(obj - 256), rel)
-        return obj
+        return offset(obj, 0)
     }
     class := size_class(size)
     cell_size := class_size(class)
@@ -78,7 +83,7 @@ fn alloc_slow(cb: int, size: int, rel: int, fp: int) -> int {
     set_word(head, word(cell))
     set_word(cell, 0)
     set_layout(cell, rel)
-    return cell
+    return offset(cell, 0)
 }
 
 # Run a collection now.
@@ -608,11 +613,13 @@ fn set_layout(cell: int, rel: int) {
     set_word(at, (word(at) & -4294967296) | rel)
 }
 
-# A program is kept in the 4-byte entry as its offset from the stack map, which the image
-# lays out after every literal: negative, so its low half is never 0 or `container()`.
-# `stack_map()` is an address the code forms in place, where `text_base()` is a call.
-fn program_offset(prog: int) -> int {
-    return (prog - stack_map()) & 4294967295
+# The 4-byte entry of `layout`. A program is kept as its offset from the stack map, which
+# the image lays out after every literal: negative, so its low half is never 0 or
+# `container()`. `stack_map()` is an address the code forms in place, where `text_base()`
+# is a call.
+fn relative(layout: int) -> int {
+    if layout > container() { return (layout - stack_map()) & 4294967295 }
+    return layout
 }
 
 # The layout of a Vec or Map header, `core/mem`'s `header_layout`.

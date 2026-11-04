@@ -43,6 +43,9 @@ pub fn check(
     for (bodies.items, 0..) |b, bi| {
         const mc = &mods[b.mod];
         if (!StdNames.isRuntimeModule(mc.path)) continue;
+        // An entry is where lowered code reaches the collector, and `alloc` reaches it
+        // through the other entry, `alloc_slow`; a call to either is a safepoint anyway.
+        if (StdNames.RuntimeFn.lookup(b.sig.name)) |f| if (f.collects()) continue;
         const path = try Alloc.pathFrom(gpa, p, &memo, @intCast(bi)) orelse continue;
         defer gpa.free(path);
         // A body that failed to check has holes (an unresolved callee or operator) the walk
@@ -390,6 +393,7 @@ fn expectCollectorAbi(sigs: []const Sig) !void {
     const Want = struct { f: StdNames.RuntimeFn, params: []const Typecheck.Kind, ret: Typecheck.Kind };
     const want = [_]Want{
         .{ .f = .alloc, .params = &.{ .int, .int }, .ret = .rawptr },
+        .{ .f = .alloc_slow, .params = &.{ .int, .int }, .ret = .rawptr },
         .{ .f = .collect, .params = &.{}, .ret = .unit },
         .{ .f = .collections, .params = &.{}, .ret = .int },
         .{ .f = .span_count, .params = &.{}, .ret = .int },

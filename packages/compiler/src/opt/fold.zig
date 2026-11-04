@@ -18,8 +18,8 @@
 //!
 //! CONSERVATIVE: block-param (merge/phi) values are NEVER treated as constant —
 //! they are defined by predecessor stores, not by an `iconst` we can see here.
-//! Only `iconst`/`bconst` instruction results seed the table; everything else is
-//! `.none`. Traversal is strict block-id then instruction order (deterministic,
+//! Only `iconst`/`bconst` results seed constants, and `cstr_ptr` results an
+//! address no zero-page constant equals; everything else is `.none`. Traversal is strict block-id then instruction order (deterministic,
 //! Driver-owned); no hash-map iteration.
 
 const std = @import("std");
@@ -34,7 +34,13 @@ const Known = union(enum) {
     none,
     int: i64,
     bool: bool,
+    /// A `cstr_ptr`: an address in the image, resolved at link time. No image maps its
+    /// zero page, so it compares above any constant in it, which folds the
+    /// `layout > container()` test the spliced `gc.alloc` makes of a constant layout.
+    addr,
 };
+
+const zero_page: i64 = 4096;
 
 pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{OutOfMemory}!bool {
     if (func.values.len == 0) return false;
@@ -57,6 +63,9 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                 },
                 .bconst => |v| {
                     if (res != Ir.none_value) known[res] = .{ .bool = v };
+                },
+                .cstr_ptr => {
+                    if (res != Ir.none_value) known[res] = .addr;
                 },
                 .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .band, .bor, .bxor => |bin| {
                     const l = constInt(known, bin.lhs) orelse continue;
@@ -133,8 +142,8 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                     changed = true;
                 },
                 .icmp => |c| {
-                    const l = constInt(known, c.lhs) orelse continue;
-                    const r = constInt(known, c.rhs) orelse continue;
+                    const l = cmpOperand(known, c.lhs, c.rhs) orelse continue;
+                    const r = cmpOperand(known, c.rhs, c.lhs) orelse continue;
                     const folded = arith.icmp(c.cc, l, r);
                     ins.op = .{ .bconst = folded };
                     if (res != Ir.none_value) known[res] = .{ .bool = folded };
@@ -142,7 +151,7 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                     changed = true;
                 },
                 // Everything else (load/store/copy/call/slot_addr/field_addr/
-                // get_tag/cstr_ptr/unit) is not foldable.
+                // get_tag/unit) is not foldable.
                 else => {},
             }
         }
@@ -167,6 +176,17 @@ fn constInt(known: []const Known, v: Ir.ValueId) ?i64 {
         .int => |x| x,
         else => null,
     };
+}
+
+/// `v` as an icmp against `other` sees it: its constant, or for an image address
+/// compared with a zero-page constant, `zero_page`, which orders against that constant as
+/// the address does under every condition, signed or not.
+fn cmpOperand(known: []const Known, v: Ir.ValueId, other: Ir.ValueId) ?i64 {
+    if (v != Ir.none_value and v < known.len and known[v] == .addr) {
+        const k = constInt(known, other) orelse return null;
+        return if (k >= 0 and k < zero_page) zero_page else null;
+    }
+    return constInt(known, v);
 }
 
 fn constBool(known: []const Known, v: Ir.ValueId) ?bool {
@@ -530,4 +550,26 @@ test "fold udiv is unsigned; unsigned icmp folds via cc" {
     _ = try run(gpa, &func, &st);
     try expectIconst(func.blocks[0].instrs[2], 0x4000000000000000);
     try expectBconst(func.blocks[0].instrs[4], true);
+}
+
+test "fold: an image address compares above any zero-page constant" {
+    const gpa = testing.allocator;
+    const values = [_]Ir.ValueDef{.{ .type = Ir.Type.int }} ** 7;
+    const instrs = [_]Ir.Instr{
+        .{ .result = 0, .op = .{ .cstr_ptr = 0xabc } },
+        .{ .result = 1, .op = .{ .iconst = 1 } },
+        .{ .result = 2, .op = .{ .icmp = .{ .cc = .gt, .lhs = 0, .rhs = 1 } } },
+        .{ .result = 3, .op = .{ .icmp = .{ .cc = .eq, .lhs = 1, .rhs = 0 } } },
+        .{ .result = 4, .op = .{ .iconst = 4096 } },
+        .{ .result = 5, .op = .{ .icmp = .{ .cc = .gt, .lhs = 0, .rhs = 4 } } },
+        .{ .result = 6, .op = .{ .icmp = .{ .cc = .ule, .lhs = 0, .rhs = 1 } } },
+    };
+    var func = try buildFn(gpa, &values, &instrs, .{ .ret = .{ .value = 2 } });
+    defer func.deinit(gpa);
+    var st: Opt.Stats = .{};
+    _ = try run(gpa, &func, &st);
+    try expectBconst(func.blocks[0].instrs[2], true);
+    try expectBconst(func.blocks[0].instrs[3], false);
+    try testing.expect(func.blocks[0].instrs[5].op == .icmp);
+    try expectBconst(func.blocks[0].instrs[6], false);
 }

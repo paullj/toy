@@ -172,7 +172,19 @@ pub fn optimize(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, callees
         _ = try inliner.run(gpa, func, l, inliner.budget, stats);
     };
     if (cfg.mem2reg) _ = try mem2reg.run(gpa, func, stats);
+    try fixpoint(gpa, func, cfg, stats);
 
+    // Last, so a spliced callee's size never decides whether this unit is inlined, and
+    // its args arrive folded.
+    if (cfg.@"inline") if (callees) |l| if (l.spliced()) |sl| {
+        if (!try inliner.splice(gpa, func, sl, stats)) return;
+        if (cfg.mem2reg) _ = try mem2reg.run(gpa, func, stats);
+        try fixpoint(gpa, func, cfg, stats);
+    };
+}
+
+/// The fold, branch, forward and DCE passes `cfg` enables, to a bounded fixpoint.
+fn fixpoint(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, stats: *Stats) error{OutOfMemory}!void {
     var fix = cfg;
     fix.@"inline" = false;
     fix.mem2reg = false;
@@ -193,7 +205,7 @@ pub fn optimize(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, callees
         }
         if (!changed) break;
     }
-    stats.rounds = rounds;
+    stats.rounds += rounds;
 }
 
 test {
