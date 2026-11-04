@@ -33,8 +33,8 @@ pub fn rounded(f: float, n: int) -> Shortest {
 # The digits live in memory `__dtoa` allocated, so they are copied into a gc str before it
 # is freed.
 fn dtoa(f: float, mode: int, n: int) -> Shortest {
-    out := gc_alloc(8)
-    sign := gc_alloc(8)
+    out := gc_alloc(8, 0)
+    sign := gc_alloc(8, 0)
     p := unsafe { __dtoa(f, mode, n, out, sign, offset(0, 0)) }
     digits := os.from_cstr(p)
     unsafe { __freedtoa(p) }
@@ -45,7 +45,7 @@ fn dtoa(f: float, mode: int, n: int) -> Shortest {
 # whitespace, which a whole-string parse must not.
 pub fn parse(s: str) -> Option[float] {
     if s.len() == 0 || s.byte_at(0) <= 32 { return Option[float].none }
-    end := gc_alloc(8)
+    end := gc_alloc(8, 0)
     c := os.to_cstr(s)
     f := unsafe { strtod(c, end) }
     start := addr(c)
@@ -55,7 +55,7 @@ pub fn parse(s: str) -> Option[float] {
 }
 
 fn addr(p: rawptr) -> int {
-    cell := gc_alloc(8)
+    cell := gc_alloc(8, layout_of[rawptr]())
     unsafe { store(cell, p) }
     a: int = unsafe { load(cell) }
     return a

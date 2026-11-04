@@ -319,7 +319,7 @@ pub fn bindBox(b: *Builder, li: u32, ty: Typecheck.Type) error{OutOfMemory}!Loca
         try b.homes.put(b.gpa, li, .{ .cell = s });
         break :blk s;
     };
-    const cell = try L.emitGcAlloc(b, @max(8, Abi.typeSize(ty, b.in.layouts, b.in.enum_layouts)));
+    const cell = try L.emitGcAlloc(b, @max(8, Abi.typeSize(ty, b.in.layouts, b.in.enum_layouts)), try L.emitLayoutOf(b, ty));
     const sa = try b.emit(.{ .slot_addr = sid }, Typecheck.Type.int);
     _ = try b.emit(.{ .store = .{ .addr = sa, .val = cell, .ty = Typecheck.Type.rawptr } }, null);
     return .{ .cell = sid };

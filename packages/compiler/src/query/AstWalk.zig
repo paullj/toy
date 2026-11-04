@@ -378,7 +378,7 @@ pub fn appendTouched(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout, 
     if (ty.kind == .@"struct") {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(gpa);
-        try structLayoutBytes(gpa, layouts, ty.struct_id, &buf);
+        try structLayoutBytes(gpa, layouts, enum_layouts, ty.struct_id, &buf);
         try out.append(gpa, .{ .kind = .@"struct", .layout = try buf.toOwnedSlice(gpa) });
         return;
     }
@@ -481,8 +481,8 @@ pub fn freeConformances(gpa: std.mem.Allocator, items: []const Fingerprint.Resol
 }
 
 /// Index-free struct layout descriptor: name + per-field (name, kind, offset),
-/// recursing nested structs, + size + align. Editing any of these flips the bytes.
-pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout, id: u32, buf: *std.ArrayList(u8)) !void {
+/// recursing nested structs and enums, + size + align. Editing any of these flips the bytes.
+pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout, enum_layouts: []const Typecheck.EnumLayout, id: u32, buf: *std.ArrayList(u8)) error{OutOfMemory}!void {
     const l = layouts[id];
     try buf.appendSlice(gpa, l.name);
     try buf.append(gpa, 0);
@@ -495,7 +495,8 @@ pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layo
         var ob: [4]u8 = undefined;
         std.mem.writeInt(u32, &ob, off, .little);
         try buf.appendSlice(gpa, &ob);
-        if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, fty.struct_id, buf);
+        if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, enum_layouts, fty.struct_id, buf);
+        if (fty.kind == .@"enum") try enumLayoutBytes(gpa, layouts, enum_layouts, fty.enum_id, buf);
     }
     var sz: [8]u8 = undefined;
     std.mem.writeInt(u32, sz[0..4], l.size, .little);
@@ -508,7 +509,7 @@ pub fn structLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layo
 /// (name + form byte + per payload field (name + kind + payload-local offset,
 /// recursing nested struct/enum)) + size + align. Editing any variant/payload
 /// flips the bytes, recompiling every using fn (cache soundness).
-pub fn enumLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout, enum_layouts: []const Typecheck.EnumLayout, id: u32, buf: *std.ArrayList(u8)) !void {
+pub fn enumLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout, enum_layouts: []const Typecheck.EnumLayout, id: u32, buf: *std.ArrayList(u8)) error{OutOfMemory}!void {
     const e = enum_layouts[id];
     try buf.appendSlice(gpa, e.name);
     try buf.append(gpa, 0);
@@ -528,7 +529,7 @@ pub fn enumLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout
                 var ob: [4]u8 = undefined;
                 std.mem.writeInt(u32, &ob, off, .little);
                 try buf.appendSlice(gpa, &ob);
-                if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, fty.struct_id, buf);
+                if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, enum_layouts, fty.struct_id, buf);
                 if (fty.kind == .@"enum") try enumLayoutBytes(gpa, layouts, enum_layouts, fty.enum_id, buf);
             }
         } else {
@@ -537,7 +538,7 @@ pub fn enumLayoutBytes(gpa: std.mem.Allocator, layouts: []const Typecheck.Layout
                 var ob: [4]u8 = undefined;
                 std.mem.writeInt(u32, &ob, off, .little);
                 try buf.appendSlice(gpa, &ob);
-                if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, fty.struct_id, buf);
+                if (fty.kind == .@"struct") try structLayoutBytes(gpa, layouts, enum_layouts, fty.struct_id, buf);
                 if (fty.kind == .@"enum") try enumLayoutBytes(gpa, layouts, enum_layouts, fty.enum_id, buf);
             }
         }
@@ -903,6 +904,45 @@ test "[LEAK GUARD] TouchedVisitor layout slices round-trip through freeTouched" 
     try testing.expect(saw_enum);
 }
 
+test "a struct's layout bytes cover an enum field's payload kinds" {
+    const gpa = testing.allocator;
+    // The heap layout of an Outer cell reads E's payload kinds, so a payload change that
+    // keeps every size must still flip the bytes of a fn touching only Outer.
+    const layouts = [_]Typecheck.Layout{.{
+        .name = "Outer",
+        .field_names = @constCast(&[_][]const u8{ "n", "e" }),
+        .field_types = @constCast(&[_]Typecheck.Type{ Typecheck.Type.int, Typecheck.Type.enumT(0) }),
+        .offsets = @constCast(&[_]u32{ 0, 8 }),
+        .size = 32,
+        .@"align" = 8,
+    }};
+    var bytes: [2]std.ArrayList(u8) = .{ .empty, .empty };
+    defer for (&bytes) |*b| b.deinit(gpa);
+    const payloads = [2][]const Typecheck.Type{
+        &.{ Typecheck.Type.int, Typecheck.Type.int },
+        &.{ Typecheck.Type.int, Typecheck.Type.rawptr },
+    };
+    for (payloads, &bytes) |pl, *out| {
+        const variants = [_]Typecheck.VariantLayout{.{
+            .name = "b",
+            .form = .tuple,
+            .field_names = &.{},
+            .field_types = @constCast(pl),
+            .offsets = @constCast(&[_]u32{ 0, 8 }),
+        }};
+        const enum_layouts = [_]Typecheck.EnumLayout{.{
+            .name = "E",
+            .tag_size = 8,
+            .payload_off = 8,
+            .variants = @constCast(&variants),
+            .size = 24,
+            .@"align" = 8,
+        }};
+        try structLayoutBytes(gpa, &layouts, &enum_layouts, 0, out);
+    }
+    try testing.expect(!std.mem.eql(u8, bytes[0].items, bytes[1].items));
+}
+
 test "[CROSS-MODULE TYPE-REF] threaded fn_sig folds the sig's type, not a bare-name first-match" {
     const gpa = testing.allocator;
     var b = try build(gpa, "fn f(p: int) -> int {\n return p\n}\n");
@@ -933,7 +973,7 @@ test "[CROSS-MODULE TYPE-REF] threaded fn_sig folds the sig's type, not a bare-n
     var expect_buf: std.ArrayList(u8) = .empty;
     defer expect_buf.deinit(gpa);
     const fr = fakeInputs(b.tree, b.tokens, b.source, .{ .layouts = &layouts });
-    try structLayoutBytes(gpa, fr.layouts, 1, &expect_buf);
+    try structLayoutBytes(gpa, fr.layouts, fr.enum_layouts, 1, &expect_buf);
 
     var touched: std.ArrayList(TouchedType) = .empty;
     defer touched.deinit(gpa);

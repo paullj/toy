@@ -14,6 +14,7 @@ const Spec = @import("../symbols/Spec.zig");
 const Link = @import("../link/Link.zig");
 const Ir = @import("../ir/Ir.zig");
 const Abi = @import("../codegen/abi/Abi.zig");
+const GcLayout = @import("../codegen/abi/GcLayout.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const Builder = L.Builder;
 const Inputs = L.Inputs;
@@ -234,7 +235,7 @@ fn lowerEnv(b: *Builder, unit: Closure.LambdaUnit, tok: u32) error{OutOfMemory}!
     const env = if (b.in.closure.frame_envs and unit.frame_env != null)
         try b.emit(.{ .slot_addr = try b.addSlot(Typecheck.Type.structT(unit.frame_env.?)) }, Typecheck.Type.int)
     else
-        try L.emitGcAlloc(b, unit.env_size);
+        try L.emitGcAlloc(b, unit.env_size, try envLayout(b, unit));
     for (unit.env) |es| {
         const home = b.homes.get(es.slot) orelse {
             try b.note(tok, "captured local has no slot in lower");
@@ -261,6 +262,19 @@ fn lowerEnv(b: *Builder, unit: Closure.LambdaUnit, tok: u32) error{OutOfMemory}!
         }
     }
     return env;
+}
+
+/// The layout word of `unit`'s env cell: each copy as its own type, each cell pointer as
+/// a reference, and no address word, which points into a frame.
+fn envLayout(b: *Builder, unit: Closure.LambdaUnit) error{OutOfMemory}!Ir.ValueId {
+    var g = GcLayout.Builder.init(b.gpa);
+    defer g.deinit();
+    for (unit.env) |es| switch (b.in.closure.storage.hold(es.slot)) {
+        .copy => try g.cell(es.ty, es.off, b.in.layouts, b.in.enum_layouts),
+        .cell => try g.ptr(es.off),
+        .param_addr, .frame_addr => {},
+    };
+    return L.emitLayout(b, try g.finish());
 }
 
 /// Store the address of the local at `home` into env slot `es`, typed `int` so the word is
@@ -368,7 +382,7 @@ pub fn lowerBoundValue(b: *Builder, node_idx: Ast.Index, mi: u32, ty: Typecheck.
                 return .none;
             }
             const cell = try places.homeAddr(b, home);
-            const env = try L.emitGcAlloc(b, 8);
+            const env = try L.emitGcAlloc(b, 8, try L.emitLayoutOf(b, Typecheck.Type.rawptr));
             _ = try b.emit(.{ .store = .{ .addr = env, .val = cell, .ty = Typecheck.Type.rawptr } }, null);
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },
@@ -378,12 +392,13 @@ pub fn lowerBoundValue(b: *Builder, node_idx: Ast.Index, mi: u32, ty: Typecheck.
                 try b.note(n.main_token, "bound mut receiver has no place in lower");
                 return .none;
             }
-            const env = try L.emitGcAlloc(b, 8);
+            // The env holds a frame address, which is no reference.
+            const env = try L.emitGcAlloc(b, 8, try L.emitLayoutOf(b, Typecheck.Type.int));
             _ = try b.emit(.{ .store = .{ .addr = env, .val = try places.homeAddr(b, home), .ty = Typecheck.Type.int } }, null);
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },
         .bound_copy => {
-            const env = try L.emitGcAlloc(b, @max(8, Abi.typeSize(recv_ty, b.in.layouts, b.in.enum_layouts)));
+            const env = try L.emitGcAlloc(b, @max(8, Abi.typeSize(recv_ty, b.in.layouts, b.in.enum_layouts)), try L.emitLayoutOf(b, recv_ty));
             try L.lowerExprInto(b, n.lhs, env, recv_ty);
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },

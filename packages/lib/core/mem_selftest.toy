@@ -2,8 +2,10 @@
 # self-checks the integration harness drives (the harness can only observe the child's
 # exit code, so every invariant is proven here and surfaced as a return value).
 
+import core/mem
+
 pub fn selftest() -> int {
-    c := gc_alloc(16)
+    c := gc_alloc(16, 0)
     return unsafe {
         store(c, 42)
         load(c)
@@ -14,8 +16,8 @@ pub fn selftest() -> int {
 # and reading each back proves they do not alias; the pre-write reads prove zero-on-
 # alloc. A no-op readback could not pass this.
 pub fn check_distinct_zeroed() -> int {
-    c1 := gc_alloc(16)
-    c2 := gc_alloc(16)
+    c1 := gc_alloc(16, 0)
+    c2 := gc_alloc(16, 0)
     return unsafe {
         z1 := load(c1)
         z2 := load(c2)
@@ -34,7 +36,7 @@ pub fn check_span_growth() -> int {
     i := 0
     loop {
         if i >= 700 { break }
-        p := gc_alloc(64)
+        p := gc_alloc(64, 0)
         unsafe { store(p, i) }
         i = i + 1
     }
@@ -46,8 +48,8 @@ pub fn check_span_growth() -> int {
 # collects while they are rooted (exercising the cycle trace); back here they are dead, and
 # the churn-driven collection reclaims them. Reaching the return (no hang, no fault) is 1.
 fn cyc() {
-    a := gc_alloc(16)
-    b := gc_alloc(16)
+    a := gc_alloc(16, layout_of[rawptr]())
+    b := gc_alloc(16, layout_of[rawptr]())
     unsafe {
         store(a, b)
         store(b, a)
@@ -60,7 +62,7 @@ pub fn ref_cycle_reclaimed() -> int {
     i := 0
     loop {
         if i >= 20000 { break }
-        junk := gc_alloc(64)
+        junk := gc_alloc(64, 0)
         unsafe { store(junk, i) }
         i = i + 1
     }
@@ -72,12 +74,12 @@ pub fn ref_cycle_reclaimed() -> int {
 # its head; churning smaller cells forces a collection, after which the large span's value
 # must still read back. Reads 9.
 pub fn large_object_survivor() -> int {
-    big := gc_alloc(16384)
+    big := gc_alloc(16384, 0)
     unsafe { store(big, 9) }
     i := 0
     loop {
         if i >= 20000 { break }
-        junk := gc_alloc(64)
+        junk := gc_alloc(64, 0)
         unsafe { store(junk, i) }
         i = i + 1
     }
@@ -91,17 +93,17 @@ pub fn large_object_survivor() -> int {
 # coherent. Reads 42.
 pub fn mark_stack_grow() -> int {
     n := 4200
-    arr := gc_alloc(n * 8)
+    arr := mem.ga_with_cap[rawptr](n)
     i := 0
     loop {
         if i >= n { break }
-        c := gc_alloc(16)
+        c := gc_alloc(16, 0)
         unsafe { store(offset(c, 8), 42) }
-        unsafe { store(offset(arr, i * 8), c) }
+        mem.ga_push[rawptr](arr, c)
         i = i + 1
     }
     gc_collect()
-    c0 := unsafe { load(offset(arr, 0)) }
+    c0 := mem.ga_get[rawptr](arr, 0)
     return unsafe { load(offset(c0, 8)) }
 }
 
@@ -110,12 +112,12 @@ pub fn mark_stack_grow() -> int {
 # dead large span (no leak, no crash) yet never free the rooted one — the rooted value must
 # still read back. Reads 9.
 pub fn large_churn_survivor() -> int {
-    keep := gc_alloc(16384)
+    keep := gc_alloc(16384, 0)
     unsafe { store(keep, 9) }
     i := 0
     loop {
         if i >= 3000 { break }
-        junk := gc_alloc(16384)
+        junk := gc_alloc(16384, 0)
         unsafe { store(junk, i) }
         i = i + 1
     }
@@ -131,12 +133,11 @@ pub fn large_churn_survivor() -> int {
 # 2 when none ran past it.
 pub fn live_paced_collections() -> int {
     n := 32768
-    arr := gc_alloc(n * 8)
+    arr := mem.ga_with_cap[rawptr](n)
     i := 0
     loop {
         if i >= n { break }
-        c := gc_alloc(64)
-        unsafe { store(offset(arr, i * 8), c) }
+        mem.ga_push[rawptr](arr, gc_alloc(64, 0))
         i = i + 1
     }
     gc_collect()
@@ -144,7 +145,7 @@ pub fn live_paced_collections() -> int {
     j := 0
     loop {
         if j >= 16384 { break }
-        junk := gc_alloc(64)
+        junk := gc_alloc(64, 0)
         unsafe { store(junk, j) }
         j = j + 1
     }
@@ -152,13 +153,12 @@ pub fn live_paced_collections() -> int {
     k := 0
     loop {
         if k >= 65536 { break }
-        junk := gc_alloc(64)
+        junk := gc_alloc(64, 0)
         unsafe { store(junk, k) }
         k = k + 1
     }
     s2 := gc_stats()
-    kept := unsafe { load(offset(arr, 8)) }
-    if kept == 0 { return 3 }
+    if mem.ga_len[rawptr](arr) != n { return 3 }
     if s1 != s0 { return 100 + s1 - s0 }
     if s2 == s1 { return 2 }
     return 1
@@ -168,7 +168,7 @@ pub fn live_paced_collections() -> int {
 # collector resolves a word's span by the word's page, so every page of a large object has
 # to resolve to it. A swept object is munmapped and the read faults. Reads 9.
 fn large_interior() -> rawptr {
-    big := gc_alloc(65536)
+    big := gc_alloc(65536, 0)
     mid := offset(big, 40000)
     unsafe { store(mid, 9) }
     return mid
@@ -179,7 +179,7 @@ pub fn large_interior_survivor() -> int {
     i := 0
     loop {
         if i >= 20000 { break }
-        junk := gc_alloc(64)
+        junk := gc_alloc(64, 0)
         unsafe { store(junk, i) }
         i = i + 1
     }

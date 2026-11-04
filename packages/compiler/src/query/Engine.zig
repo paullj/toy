@@ -449,7 +449,7 @@ pub const Body = union(enum) {
     lambda: u32,
     /// A source-less auto-derive unit, cached under its recipe's fingerprint.
     derive: *const Derive.Derive,
-    /// An erased hash/eq/trace unit. Uncached: it is pure over `(ty, kind, layout)` and
+    /// An erased hash/eq unit. Uncached: it is pure over `(ty, kind, layout)` and
     /// enumerated in canonical order, so it is `-jN`-deterministic without a key.
     erased: *const Typecheck.ErasedUnit,
     /// A fn-value thunk: source-less, and uncached like an erased unit unless it wraps a
@@ -743,8 +743,8 @@ fn folds(fr: *const Frozen, sigs: []const Fingerprint.Sig, name: []const u8) boo
     for (fr.conformances) |rc| for (rc.witness_syms) |ws| if (std.mem.eql(u8, ws, name)) return true;
     switch (fr.body) {
         .derive => |d| for (d.field_witnesses) |fw| switch (fw) {
-            .eq_call, .cmp_eq, .cmp_call, .hash_call, .display_call, .trace_call => |n| if (std.mem.eql(u8, n, name)) return true,
-            .inline_kind, .trace_mark => {},
+            .eq_call, .cmp_eq, .cmp_call, .hash_call, .display_call => |n| if (std.mem.eql(u8, n, name)) return true,
+            .inline_kind => {},
         },
         else => {},
     }

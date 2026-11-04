@@ -12,7 +12,7 @@ const buildAndRunWith = heap.buildAndRunWith;
 
 /// Three named fns pushed into a `Vec[fn(int) -> int]`, then a forced collection and a
 /// churn of same-size-class allocations before the elements are read back and called.
-/// The pairs survive only if the Vec's backing is traced through the fn pair's trace unit.
+/// The pairs survive only if the Vec's elements are traced by the fn pair's layout.
 /// triple(2) + double(3) + 6 when the forced collection was the first and the churn
 /// collected again = 18.
 const fn_vec_src =
@@ -183,7 +183,7 @@ test "gc: a closure in a struct in a Vec keeps its env" {
     );
 }
 
-test "gc: a closure captured by another closure is reached through the outer env (word scan)" {
+test "gc: a closure captured by another closure is reached through the outer env's layout" {
     try expectClosureGc(".toy-test-gc-closure-nested",
         \\fn twice(f: Op) -> Op {
         \\    fn(x: int) -> int { f(f(x)) }

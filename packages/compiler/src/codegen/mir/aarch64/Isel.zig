@@ -152,13 +152,6 @@ const S = struct {
     }
 
     fn prologue(s: *S) Error!void {
-        for (s.in.roots, 0..) |r, i| {
-            if (r.tag != .container) continue;
-            const seen = for (s.in.roots[0..i]) |o| {
-                if (o.off == r.off and o.tag == .container) break true;
-            } else false;
-            if (!seen) try s.emit(.{ .store = .{ .rt = Reg.gp(Aarch64.XZR), .mem = Mem.frame(.{ .layout = r.off }, 0) } });
-        }
         if (s.in.fl.sret_save_off != FrameLayout.NO_SRET)
             try s.emit(.{ .store = .{ .rt = Reg.gp(8), .mem = Mem.frame(.sret_save, 0) } });
 
@@ -547,7 +540,7 @@ const S = struct {
             else => {},
         };
         if (facts.keep_ref_args and facts.safepoint) for (c.args) |arg| switch (arg) {
-            .value => |v| if (s.f.vregs.items[v].ref != null) try s.emit(.{ .keep = Reg.virt(v) }),
+            .value => |v| if (s.f.vregs.items[v].ref) try s.emit(.{ .keep = Reg.virt(v) }),
             else => {},
         };
     }

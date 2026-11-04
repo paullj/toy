@@ -1547,7 +1547,7 @@ test "fn-type reification is identical at -j1 and -jN" {
     }.project);
 }
 
-test "Vec[fn(int) -> int] mints a trace unit and no hash/eq unit for the pair" {
+test "Vec[fn(int) -> int] mints no descriptor and no erased unit for the pair" {
     try withCheckedGraph(".toy-test-fn-trace", &.{
         .{ .path = "main.toy", .source =
         \\import std/vec
@@ -1560,19 +1560,9 @@ test "Vec[fn(int) -> int] mints a trace unit and no hash/eq unit for the pair" {
     }, "main.toy", struct {
         fn check(_: *const Graph.Graph, _: *ResolveGraph.GraphResult, tr: *GraphResult) anyerror!void {
             for (tr.diags) |d| try testing.expect(d.severity != .err);
-            var traces: usize = 0;
-            for (tr.erased_units) |u| {
-                if (!@import("layout/Engine.zig").isFnStruct(u.ty, tr.layouts)) continue;
-                try testing.expectEqual(@import("symbols/Derive.zig").ErasedKind.trace, u.kind);
-                traces += 1;
-            }
-            try testing.expectEqual(@as(usize, 1), traces);
-            var descs: usize = 0;
-            for (tr.descriptor_types) |d| if (@import("layout/Engine.zig").isFnStruct(d.ty, tr.layouts)) {
-                try testing.expect(!d.hashable);
-                descs += 1;
-            };
-            try testing.expectEqual(@as(usize, 1), descs);
+            const isFn = @import("layout/Engine.zig").isFnStruct;
+            for (tr.erased_units) |u| try testing.expect(!isFn(u.ty, tr.layouts));
+            for (tr.descriptor_types) |d| try testing.expect(!isFn(d.ty, tr.layouts));
         }
     }.check);
 }

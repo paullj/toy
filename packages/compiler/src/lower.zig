@@ -40,6 +40,7 @@ const LayoutEngine = @import("layout/Engine.zig");
 const Link = @import("link/Link.zig");
 const Ir = @import("ir/Ir.zig");
 const Abi = @import("codegen/abi/Abi.zig");
+const GcLayout = @import("codegen/abi/GcLayout.zig");
 const Sig = @import("symbols/Sig.zig").Sig;
 const Mono = @import("symbols/Mono.zig");
 const Derive = @import("symbols/Derive.zig");
@@ -947,7 +948,7 @@ fn lowerIdentifier(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{O
 /// cell pointer.
 fn lowerRefNew(b: *Builder, operand: Ast.Index, tok: u32) error{OutOfMemory}!Ir.Operand {
     const t = b.in.nodes.typeOf(operand);
-    const cellptr = try emitGcAlloc(b, Abi.typeSize(t, b.in.layouts, b.in.enum_layouts));
+    const cellptr = try emitGcAlloc(b, Abi.typeSize(t, b.in.layouts, b.in.enum_layouts), try emitLayoutOf(b, t));
     switch (passKind(b, t)) {
         .box => {
             const v = try lowerExpr(b, operand);
@@ -1952,16 +1953,32 @@ fn copyStrSlot(b: *Builder, dst: Ir.SlotId, src: Ir.SlotId) error{OutOfMemory}!v
 /// allowlist by construction.
 const gc_alloc_sym: Link.SymName = runtimeSym(.alloc);
 
-/// A fresh zeroed `gc_alloc(size)` cell pointer, typed as a managed box so the precise
-/// root map sees it.
-pub fn emitGcAlloc(b: *Builder, size: u32) error{OutOfMemory}!Ir.ValueId {
+/// A fresh zeroed `gc_alloc(size, layout)` cell pointer, typed as a managed box so the
+/// precise root map sees it. `layout` is what `emitLayout` gives.
+pub fn emitGcAlloc(b: *Builder, size: u32, layout: Ir.ValueId) error{OutOfMemory}!Ir.ValueId {
     const size_v = try b.emit(.{ .iconst = @intCast(size) }, Typecheck.Type.int);
     // Scope the `args` errdefer to the alloc→emit window: once emit succeeds the
     // block instruction owns `args`, so a later OOM must NOT re-free it here.
-    const args = try b.gpa.alloc(Ir.Operand, 1);
+    const args = try b.gpa.alloc(Ir.Operand, 2);
     errdefer b.gpa.free(args);
     args[0] = .{ .value = size_v };
+    args[1] = .{ .value = layout };
     return try b.emit(.{ .call = .{ .callee = gc_alloc_sym, .args = args, .ret_slot = Ir.none_slot } }, box_repr_ty);
+}
+
+/// The layout word the collector traces a heap object by: the address of its `GcLayout`
+/// program, interned with the string literals, or 0 for an object with no reference,
+/// which is then never traced. Takes ownership of `program`.
+pub fn emitLayout(b: *Builder, program: []u8) error{OutOfMemory}!Ir.ValueId {
+    if (program.len == 0) return try b.emit(.{ .iconst = 0 }, Typecheck.Type.int);
+    const h = std.hash.Wyhash.hash(Ir.lit_seed, program);
+    try b.addLiteral(h, program);
+    return try b.emit(.{ .cstr_ptr = h }, Typecheck.Type.int);
+}
+
+/// The layout word of a heap object that is one `ty` cell.
+pub fn emitLayoutOf(b: *Builder, ty: Typecheck.Type) error{OutOfMemory}!Ir.ValueId {
+    return emitLayout(b, try GcLayout.program(b.gpa, ty, b.in.layouts, b.in.enum_layouts));
 }
 
 /// The IR value type a managed-box PRODUCER records. A box is erased to a scalar
@@ -1971,15 +1988,6 @@ pub fn emitGcAlloc(b: *Builder, size: u32) error{OutOfMemory}!Ir.ValueId {
 /// as a reference, so the allocator keeps it in a stack-mapped slot across a safepoint.
 /// Box STORES keep their `.int` store-width (never read by the projector).
 pub const box_repr_ty: Typecheck.Type = Typecheck.Type.rawptr;
-
-/// `core/rt` `mark`: marks one managed cell for scanning. A derived
-/// `trace(obj)` unit `bl`s this per managed field; user source never names it.
-pub const gc_mark_sym: Link.SymName = runtimeSym(.mark);
-
-/// `core/rt` `mark_leaf`: sets one cell's mark bit without
-/// pushing it (the cell survives but is never scanned). An erased `str` trace unit `bl`s it
-/// on the heap buffer; container traces `bl` it on their leaf-marked backings.
-pub const gc_mark_leaf_sym: Link.SymName = runtimeSym(.mark_leaf);
 
 /// Whether `t` is a managed box (`Ref[T]`/`gc_array[T]`): a struct carrying the reified
 /// reference-family marker. A box is an 8-byte cell pointer — lowered as a scalar `int`,
@@ -2177,9 +2185,11 @@ pub fn lowerCharDisplay(b: *Builder, slot: Ir.SlotId) error{OutOfMemory}!Ir.Slot
 
     // join: copy the packed word into a fresh gc cell and build a heap str{cell, len}.
     b.switchTo(join);
-    const alloc_args = try b.gpa.alloc(Ir.Operand, 1);
+    const leaf = try b.emit(.{ .iconst = 0 }, int_ty);
+    const alloc_args = try b.gpa.alloc(Ir.Operand, 2);
     errdefer b.gpa.free(alloc_args);
     alloc_args[0] = .{ .value = len };
+    alloc_args[1] = .{ .value = leaf };
     const cell = try b.emit(.{ .call = .{ .callee = gc_alloc_sym, .args = alloc_args, .ret_slot = Ir.none_slot } }, box_repr_ty);
     const jb = try b.emit(.{ .slot_addr = byte_slot }, int_ty);
     const word = try b.emit(.{ .load = .{ .addr = jb, .ty = int_ty } }, int_ty);
@@ -2338,6 +2348,10 @@ fn lowerTypeIntrinsicCall(b: *Builder, n: Ast.Node) error{OutOfMemory}!Ir.Operan
                 Abi.typeAlign(t, b.in.layouts, b.in.enum_layouts);
             return .{ .value = try b.emit(.{ .iconst = @intCast(c) }, Typecheck.Type.int) };
         },
+        .layout_of => {
+            const tnodes = Ast.rangeSlice(b.in.tree, (callee_node.rhs).int());
+            return .{ .value = try emitLayoutOf(b, b.in.nodes.typeOf(tnodes[0])) };
+        },
         // `gc_array[T](p)` wraps a raw cell pointer into an 8-byte handle: a checker-only
         // type change, so lower yields the pointer operand directly.
         .gc_array => {
@@ -2456,15 +2470,6 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
         .frame_address => return .{ .value = try b.emit(.frame_addr, Typecheck.Type.int) },
         .stack_map => return .{ .value = try b.emit(.{ .cstr_ptr = Link.gc_stackmap_base_hash }, Typecheck.Type.int) },
         .gc_stress => return .{ .value = try b.emit(.{ .bconst = b.in.gc_stress }, Typecheck.Type.bool) },
-        .call_trace => {
-            const a = Ast.rangeSlice(b.in.tree, (n.rhs).int());
-            const fp = operandValue(try lowerExpr(b, a[0]));
-            const p = operandValue(try lowerExpr(b, a[1]));
-            const args = try b.gpa.alloc(Ir.Operand, 1);
-            args[0] = .{ .value = p };
-            _ = try b.emit(.{ .call_indirect = .{ .target = fp, .args = args, .ret_slot = Ir.none_slot } }, null);
-            return .none;
-        },
         .ref_new => return try lowerRefNew(b, Ast.rangeSlice(b.in.tree, (n.rhs).int())[0], n.main_token),
         .ref_get => {
             const a = Ast.rangeSlice(b.in.tree, (n.rhs).int());
@@ -5069,12 +5074,13 @@ test "a '_' capture lowers like the lambda it means; a hole pipe is a direct cal
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
         // An 8-byte env holding `a`, by value.
         try testing.expect(std.mem.indexOf(u8, ir,
-            \\  %4 = iconst 8
-            \\  %5 = call @core/rt/gc.alloc(%4)
-            \\  %6 = field_addr %5, 0 : int
-            \\  %7 = slot_addr s0
-            \\  %8 = load %7 : int
-            \\  store %6, %8 : int
+            \\  %4 = iconst 0
+            \\  %5 = iconst 8
+            \\  %6 = call @core/rt/gc.alloc(%5, %4)
+            \\  %7 = field_addr %6, 0 : int
+            \\  %8 = slot_addr s0
+            \\  %9 = load %8 : int
+            \\  store %7, %9 : int
             \\
         ) != null);
     }
@@ -5162,25 +5168,47 @@ test "a capturing lambda allocates its env once and stores each capture at its o
     , "f", .{});
     defer gpa.free(ir);
     // One 24-byte cell, allocated before it is filled: n at +0 by value, s at +8 by copy;
-    // then the cell is the pair's env word.
+    // then the cell is the pair's env word. Its layout program names s's pointer at +8.
     try testing.expect(std.mem.indexOf(u8, ir,
-        \\  %8 = iconst 24
-        \\  %9 = call @core/rt/gc.alloc(%8)
-        \\  %10 = field_addr %9, 0 : int
-        \\  %11 = slot_addr s0
-        \\  %12 = load %11 : int
-        \\  store %10, %12 : int
-        \\  %13 = field_addr %9, 8 : str
-        \\  %14 = slot_addr s1
-        \\  copy %13 <- %14 : str
-        \\  %15 = slot_addr s3
-        \\  %16 = fn_addr @main.f$l0
-        \\  store %15, %16 : int
-        \\  %17 = field_addr %15, 8 : rawptr
-        \\  store %17, %9 : rawptr
+        \\  %8 = cstr_ptr #ce797f0aca03816a
+        \\  %9 = iconst 24
+        \\  %10 = call @core/rt/gc.alloc(%9, %8)
+        \\  %11 = field_addr %10, 0 : int
+        \\  %12 = slot_addr s0
+        \\  %13 = load %12 : int
+        \\  store %11, %13 : int
+        \\  %14 = field_addr %10, 8 : str
+        \\  %15 = slot_addr s1
+        \\  copy %14 <- %15 : str
+        \\  %16 = slot_addr s3
+        \\  %17 = fn_addr @main.f$l0
+        \\  store %16, %17 : int
+        \\  %18 = field_addr %16, 8 : rawptr
+        \\  store %18, %10 : rawptr
         \\
     ) != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
+}
+
+test "an env capturing an enum switches on its tag, so an int payload is never a reference" {
+    const gpa = testing.allocator;
+    const ir = try renderUnit(gpa,
+        \\enum E { i(int), s(str) }
+        \\fn f() -> int {
+        \\ e := E.i(5)
+        \\ g := fn() -> int { match e { E.i(n) -> n, E.s(t) -> t.len() } }
+        \\ return g()
+        \\}
+        \\
+    , "f", .{});
+    defer gpa.free(ir);
+    // [SWITCH @0, 2 variants, i -> END, s -> 4, PTR @8, JUMP 6, END]
+    const words = [_]u64{ 2, 2, 6, 4, (8 << 2) | 1, (6 << 2) | 3, 0 };
+    var bytes: [words.len * 8]u8 = undefined;
+    for (words, 0..) |w, k| std.mem.writeInt(u64, bytes[k * 8 ..][0..8], w, .little);
+    var want: [64]u8 = undefined;
+    const line = try std.fmt.bufPrint(&want, "cstr_ptr #{x}\n", .{std.hash.Wyhash.hash(Ir.lit_seed, &bytes)});
+    try testing.expect(std.mem.indexOf(u8, ir, line) != null);
 }
 
 test "a debug build tests +, -, * and unary - for overflow before each; +% and release wrap" {
@@ -5317,45 +5345,47 @@ test "a boxed local's reads and writes go through its cell" {
         \\fn main.f() -> int {
         \\  slots: s0:rawptr s1:fn$unit s2:fn$unit
         \\b0:
-        \\  %1 = iconst 8
-        \\  %2 = call @core/rt/gc.alloc(%1)
-        \\  %3 = slot_addr s0
-        \\  store %3, %2 : rawptr
-        \\  %4 = iconst 1
-        \\  %5 = slot_addr s0
-        \\  %6 = load %5 : rawptr
-        \\  store %6, %4 : int
-        \\  %7 = slot_addr s1
-        \\  %8 = iconst 8
-        \\  %9 = call @core/rt/gc.alloc(%8)
-        \\  %10 = field_addr %9, 0 : rawptr
-        \\  %11 = slot_addr s0
-        \\  %12 = load %11 : rawptr
-        \\  store %10, %12 : rawptr
-        \\  %13 = slot_addr s2
-        \\  %14 = fn_addr @main.f$l0
-        \\  store %13, %14 : int
-        \\  %15 = field_addr %13, 8 : rawptr
-        \\  store %15, %9 : rawptr
-        \\  %16 = slot_addr s2
-        \\  copy %7 <- %16 : fn$unit
-        \\  %17 = slot_addr s1
-        \\  %18 = load %17 : int
-        \\  %19 = field_addr %17, 8 : rawptr
-        \\  %20 = load %19 : rawptr
-        \\  call_indirect %18(%20)
-        \\  %21 = slot_addr s0
+        \\  %1 = iconst 0
+        \\  %2 = iconst 8
+        \\  %3 = call @core/rt/gc.alloc(%2, %1)
+        \\  %4 = slot_addr s0
+        \\  store %4, %3 : rawptr
+        \\  %5 = iconst 1
+        \\  %6 = slot_addr s0
+        \\  %7 = load %6 : rawptr
+        \\  store %7, %5 : int
+        \\  %8 = slot_addr s1
+        \\  %9 = cstr_ptr #496b976020353d93
+        \\  %10 = iconst 8
+        \\  %11 = call @core/rt/gc.alloc(%10, %9)
+        \\  %12 = field_addr %11, 0 : rawptr
+        \\  %13 = slot_addr s0
+        \\  %14 = load %13 : rawptr
+        \\  store %12, %14 : rawptr
+        \\  %15 = slot_addr s2
+        \\  %16 = fn_addr @main.f$l0
+        \\  store %15, %16 : int
+        \\  %17 = field_addr %15, 8 : rawptr
+        \\  store %17, %11 : rawptr
+        \\  %18 = slot_addr s2
+        \\  copy %8 <- %18 : fn$unit
+        \\  %19 = slot_addr s1
+        \\  %20 = load %19 : int
+        \\  %21 = field_addr %19, 8 : rawptr
         \\  %22 = load %21 : rawptr
-        \\  %23 = load %22 : int
-        \\  %24 = iconst 10
-        \\  %25 = add %23, %24
-        \\  %26 = slot_addr s0
-        \\  %27 = load %26 : rawptr
-        \\  store %27, %25 : int
+        \\  call_indirect %20(%22)
+        \\  %23 = slot_addr s0
+        \\  %24 = load %23 : rawptr
+        \\  %25 = load %24 : int
+        \\  %26 = iconst 10
+        \\  %27 = add %25, %26
         \\  %28 = slot_addr s0
         \\  %29 = load %28 : rawptr
-        \\  %30 = load %29 : int
-        \\  br b1(%30)
+        \\  store %29, %27 : int
+        \\  %30 = slot_addr s0
+        \\  %31 = load %30 : rawptr
+        \\  %32 = load %31 : int
+        \\  br b1(%32)
         \\b1(%0:int):
         \\  ret %0
         \\}
@@ -5422,30 +5452,31 @@ test "a boxed for variable gets a fresh box per iteration and copies back before
         \\  %8 = icmp ge %7, %5
         \\  cond_br %8, b5, b3
         \\b3:
-        \\  %9 = iconst 8
-        \\  %10 = call @core/rt/gc.alloc(%9)
-        \\  %11 = slot_addr s2
-        \\  store %11, %10 : rawptr
+        \\  %9 = iconst 0
+        \\  %10 = iconst 8
+        \\  %11 = call @core/rt/gc.alloc(%10, %9)
         \\  %12 = slot_addr s2
-        \\  %13 = load %12 : rawptr
-        \\  %14 = slot_addr s1
-        \\  %15 = load %14 : int
-        \\  store %13, %15 : int
+        \\  store %12, %11 : rawptr
+        \\  %13 = slot_addr s2
+        \\  %14 = load %13 : rawptr
+        \\  %15 = slot_addr s1
+        \\  %16 = load %15 : int
+        \\  store %14, %16 : int
         \\
     ) != null);
     // `inc` copies the cell back into the counter before stepping it, so an assignment to
     // `i` in the body still steers the loop.
     try testing.expect(std.mem.indexOf(u8, ir,
         \\b4:
-        \\  %37 = slot_addr s2
-        \\  %38 = load %37 : rawptr
-        \\  %39 = load %38 : int
-        \\  %40 = slot_addr s1
-        \\  store %40, %39 : int
-        \\  %41 = slot_addr s1
-        \\  %42 = load %41 : int
-        \\  %43 = iconst 1
-        \\  %44 = add %42, %43
+        \\  %39 = slot_addr s2
+        \\  %40 = load %39 : rawptr
+        \\  %41 = load %40 : int
+        \\  %42 = slot_addr s1
+        \\  store %42, %41 : int
+        \\  %43 = slot_addr s1
+        \\  %44 = load %43 : int
+        \\  %45 = iconst 1
+        \\  %46 = add %44, %45
         \\
     ) != null);
     // One cell per iteration plus one env per iteration, both in the body.
@@ -5467,10 +5498,10 @@ test "a read-only capture is not boxed" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "call @core/rt/gc.alloc("));
     try testing.expect(std.mem.indexOf(u8, ir, "slots: s0:int ") != null);
     try testing.expect(std.mem.indexOf(u8, ir,
-        \\  %6 = field_addr %5, 0 : int
-        \\  %7 = slot_addr s0
-        \\  %8 = load %7 : int
-        \\  store %6, %8 : int
+        \\  %7 = field_addr %6, 0 : int
+        \\  %8 = slot_addr s0
+        \\  %9 = load %8 : int
+        \\  store %7, %9 : int
         \\
     ) != null);
 }
@@ -5499,67 +5530,69 @@ test "mut self receiver lowering is unchanged" {
         \\fn main.P.step(s0, s1) -> int {
         \\  slots: s0:int s1:int s2:rawptr s3:fn$unit s4:fn$unit s5:P
         \\b0:
-        \\  %1 = iconst 8
-        \\  %2 = call @core/rt/gc.alloc(%1)
-        \\  %3 = slot_addr s2
-        \\  store %3, %2 : rawptr
-        \\  %4 = slot_addr s1
-        \\  %5 = load %4 : int
-        \\  %6 = slot_addr s2
-        \\  %7 = load %6 : rawptr
-        \\  store %7, %5 : int
-        \\  %8 = slot_addr s3
-        \\  %9 = iconst 8
-        \\  %10 = call @core/rt/gc.alloc(%9)
-        \\  %11 = field_addr %10, 0 : rawptr
-        \\  %12 = slot_addr s2
-        \\  %13 = load %12 : rawptr
-        \\  store %11, %13 : rawptr
-        \\  %14 = slot_addr s4
-        \\  %15 = fn_addr @main.P.step$l0
-        \\  store %14, %15 : int
-        \\  %16 = field_addr %14, 8 : rawptr
-        \\  store %16, %10 : rawptr
-        \\  %17 = slot_addr s4
-        \\  copy %8 <- %17 : fn$unit
-        \\  %18 = slot_addr s3
-        \\  %19 = load %18 : int
-        \\  %20 = field_addr %18, 8 : rawptr
-        \\  %21 = load %20 : rawptr
-        \\  call_indirect %19(%21)
-        \\  %22 = slot_addr s0
-        \\  %23 = load %22 : int
-        \\  %24 = field_addr %23, 0 : int
-        \\  %25 = slot_addr s0
-        \\  %26 = load %25 : int
-        \\  %27 = field_addr %26, 0 : int
+        \\  %1 = iconst 0
+        \\  %2 = iconst 8
+        \\  %3 = call @core/rt/gc.alloc(%2, %1)
+        \\  %4 = slot_addr s2
+        \\  store %4, %3 : rawptr
+        \\  %5 = slot_addr s1
+        \\  %6 = load %5 : int
+        \\  %7 = slot_addr s2
+        \\  %8 = load %7 : rawptr
+        \\  store %8, %6 : int
+        \\  %9 = slot_addr s3
+        \\  %10 = cstr_ptr #496b976020353d93
+        \\  %11 = iconst 8
+        \\  %12 = call @core/rt/gc.alloc(%11, %10)
+        \\  %13 = field_addr %12, 0 : rawptr
+        \\  %14 = slot_addr s2
+        \\  %15 = load %14 : rawptr
+        \\  store %13, %15 : rawptr
+        \\  %16 = slot_addr s4
+        \\  %17 = fn_addr @main.P.step$l0
+        \\  store %16, %17 : int
+        \\  %18 = field_addr %16, 8 : rawptr
+        \\  store %18, %12 : rawptr
+        \\  %19 = slot_addr s4
+        \\  copy %9 <- %19 : fn$unit
+        \\  %20 = slot_addr s3
+        \\  %21 = load %20 : int
+        \\  %22 = field_addr %20, 8 : rawptr
+        \\  %23 = load %22 : rawptr
+        \\  call_indirect %21(%23)
+        \\  %24 = slot_addr s0
+        \\  %25 = load %24 : int
+        \\  %26 = field_addr %25, 0 : int
+        \\  %27 = slot_addr s0
         \\  %28 = load %27 : int
-        \\  %29 = slot_addr s2
-        \\  %30 = load %29 : rawptr
-        \\  %31 = load %30 : int
-        \\  %32 = add %28, %31
-        \\  store %24, %32 : int
-        \\  %33 = slot_addr s0
-        \\  %34 = load %33 : int
-        \\  %35 = slot_addr s5
-        \\  %36 = field_addr %35, 0 : int
-        \\  %37 = slot_addr s0
-        \\  %38 = load %37 : int
-        \\  %39 = field_addr %38, 0 : int
+        \\  %29 = field_addr %28, 0 : int
+        \\  %30 = load %29 : int
+        \\  %31 = slot_addr s2
+        \\  %32 = load %31 : rawptr
+        \\  %33 = load %32 : int
+        \\  %34 = add %30, %33
+        \\  store %26, %34 : int
+        \\  %35 = slot_addr s0
+        \\  %36 = load %35 : int
+        \\  %37 = slot_addr s5
+        \\  %38 = field_addr %37, 0 : int
+        \\  %39 = slot_addr s0
         \\  %40 = load %39 : int
-        \\  store %36, %40 : int
-        \\  %41 = field_addr %35, 8 : int
-        \\  %42 = slot_addr s2
-        \\  %43 = load %42 : rawptr
-        \\  %44 = load %43 : int
-        \\  store %41, %44 : int
-        \\  %45 = slot_addr s5
-        \\  copy %34 <- %45 : P
-        \\  %46 = slot_addr s0
-        \\  %47 = load %46 : int
-        \\  %48 = field_addr %47, 8 : int
+        \\  %41 = field_addr %40, 0 : int
+        \\  %42 = load %41 : int
+        \\  store %38, %42 : int
+        \\  %43 = field_addr %37, 8 : int
+        \\  %44 = slot_addr s2
+        \\  %45 = load %44 : rawptr
+        \\  %46 = load %45 : int
+        \\  store %43, %46 : int
+        \\  %47 = slot_addr s5
+        \\  copy %36 <- %47 : P
+        \\  %48 = slot_addr s0
         \\  %49 = load %48 : int
-        \\  br b1(%49)
+        \\  %50 = field_addr %49, 8 : int
+        \\  %51 = load %50 : int
+        \\  br b1(%51)
         \\b1(%0:int):
         \\  ret %0
         \\}
@@ -7146,24 +7179,25 @@ test "a bound method creates {adapter, env} and the adapter calls the witness" {
         \\  %3 = iconst 1
         \\  store %2, %3 : int
         \\  %4 = slot_addr s1
-        \\  %5 = iconst 8
-        \\  %6 = call @core/rt/gc.alloc(%5)
-        \\  %7 = slot_addr s0
-        \\  copy %6 <- %7 : Acc
-        \\  %8 = slot_addr s2
-        \\  %9 = fn_addr @main.Acc.plus$bound
-        \\  store %8, %9 : int
-        \\  %10 = field_addr %8, 8 : rawptr
-        \\  store %10, %6 : rawptr
-        \\  %11 = slot_addr s2
-        \\  copy %4 <- %11 : fn$int$int
-        \\  %12 = slot_addr s1
-        \\  %13 = load %12 : int
-        \\  %14 = field_addr %12, 8 : rawptr
-        \\  %15 = load %14 : rawptr
-        \\  %16 = iconst 2
-        \\  %17 = call_indirect %13(%15, %16)
-        \\  br b1(%17)
+        \\  %5 = iconst 0
+        \\  %6 = iconst 8
+        \\  %7 = call @core/rt/gc.alloc(%6, %5)
+        \\  %8 = slot_addr s0
+        \\  copy %7 <- %8 : Acc
+        \\  %9 = slot_addr s2
+        \\  %10 = fn_addr @main.Acc.plus$bound
+        \\  store %9, %10 : int
+        \\  %11 = field_addr %9, 8 : rawptr
+        \\  store %11, %7 : rawptr
+        \\  %12 = slot_addr s2
+        \\  copy %4 <- %12 : fn$int$int
+        \\  %13 = slot_addr s1
+        \\  %14 = load %13 : int
+        \\  %15 = field_addr %13, 8 : rawptr
+        \\  %16 = load %15 : rawptr
+        \\  %17 = iconst 2
+        \\  %18 = call_indirect %14(%16, %17)
+        \\  br b1(%18)
         \\b1(%0:int):
         \\  ret %0
         \\}
@@ -7192,38 +7226,40 @@ test "a bound mut self method passes the box pointer" {
         \\fn main.f() -> int {
         \\  slots: s0:rawptr s1:fn$unit s2:fn$unit
         \\b0:
-        \\  %1 = iconst 8
-        \\  %2 = call @core/rt/gc.alloc(%1)
-        \\  %3 = slot_addr s0
-        \\  store %3, %2 : rawptr
+        \\  %1 = iconst 0
+        \\  %2 = iconst 8
+        \\  %3 = call @core/rt/gc.alloc(%2, %1)
         \\  %4 = slot_addr s0
-        \\  %5 = load %4 : rawptr
-        \\  %6 = field_addr %5, 0 : int
-        \\  %7 = iconst 0
-        \\  store %6, %7 : int
-        \\  %8 = slot_addr s1
-        \\  %9 = slot_addr s0
-        \\  %10 = load %9 : rawptr
-        \\  %11 = iconst 8
-        \\  %12 = call @core/rt/gc.alloc(%11)
-        \\  store %12, %10 : rawptr
-        \\  %13 = slot_addr s2
-        \\  %14 = fn_addr @main.C.bump$boundbox
-        \\  store %13, %14 : int
-        \\  %15 = field_addr %13, 8 : rawptr
-        \\  store %15, %12 : rawptr
-        \\  %16 = slot_addr s2
-        \\  copy %8 <- %16 : fn$unit
-        \\  %17 = slot_addr s1
-        \\  %18 = load %17 : int
-        \\  %19 = field_addr %17, 8 : rawptr
-        \\  %20 = load %19 : rawptr
-        \\  call_indirect %18(%20)
-        \\  %21 = slot_addr s0
+        \\  store %4, %3 : rawptr
+        \\  %5 = slot_addr s0
+        \\  %6 = load %5 : rawptr
+        \\  %7 = field_addr %6, 0 : int
+        \\  %8 = iconst 0
+        \\  store %7, %8 : int
+        \\  %9 = slot_addr s1
+        \\  %10 = slot_addr s0
+        \\  %11 = load %10 : rawptr
+        \\  %12 = cstr_ptr #496b976020353d93
+        \\  %13 = iconst 8
+        \\  %14 = call @core/rt/gc.alloc(%13, %12)
+        \\  store %14, %11 : rawptr
+        \\  %15 = slot_addr s2
+        \\  %16 = fn_addr @main.C.bump$boundbox
+        \\  store %15, %16 : int
+        \\  %17 = field_addr %15, 8 : rawptr
+        \\  store %17, %14 : rawptr
+        \\  %18 = slot_addr s2
+        \\  copy %9 <- %18 : fn$unit
+        \\  %19 = slot_addr s1
+        \\  %20 = load %19 : int
+        \\  %21 = field_addr %19, 8 : rawptr
         \\  %22 = load %21 : rawptr
-        \\  %23 = field_addr %22, 0 : int
-        \\  %24 = load %23 : int
-        \\  br b1(%24)
+        \\  call_indirect %20(%22)
+        \\  %23 = slot_addr s0
+        \\  %24 = load %23 : rawptr
+        \\  %25 = field_addr %24, 0 : int
+        \\  %26 = load %25 : int
+        \\  br b1(%26)
         \\b1(%0:int):
         \\  ret %0
         \\}
@@ -7439,13 +7475,14 @@ test "a bound value on a mut param stores the place address in an 8-byte heap en
     , "f", .{});
     defer gpa.free(ir);
     try testing.expect(std.mem.indexOf(u8, ir,
-        \\  %2 = iconst 8
-        \\  %3 = call @core/rt/gc.alloc(%2)
-        \\  %4 = slot_addr s0
-        \\  %5 = load %4 : int
-        \\  store %3, %5 : int
-        \\  %6 = slot_addr s2
-        \\  %7 = fn_addr @main.P.get$boundref
+        \\  %2 = iconst 0
+        \\  %3 = iconst 8
+        \\  %4 = call @core/rt/gc.alloc(%3, %2)
+        \\  %5 = slot_addr s0
+        \\  %6 = load %5 : int
+        \\  store %4, %6 : int
+        \\  %7 = slot_addr s2
+        \\  %8 = fn_addr @main.P.get$boundref
         \\
     ) != null);
 }

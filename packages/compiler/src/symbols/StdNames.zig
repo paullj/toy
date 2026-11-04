@@ -59,8 +59,6 @@ pub const RuntimeFn = enum {
     str_eq,
     alloc,
     collect,
-    mark,
-    mark_leaf,
     collections,
     span_count,
     stack_guard,
@@ -70,8 +68,6 @@ pub const RuntimeFn = enum {
             .str_eq => "core/rt/str.str_eq",
             .alloc => "core/rt/gc.alloc",
             .collect => "core/rt/gc.collect",
-            .mark => "core/rt/gc.mark",
-            .mark_leaf => "core/rt/gc.mark_leaf",
             .collections => "core/rt/gc.collections",
             .span_count => "core/rt/gc.span_count",
             .stack_guard => "core/rt/stack.guard",
@@ -105,7 +101,7 @@ test "userCallMayCollect: only the collector's entries among core/rt source fns"
     try std.testing.expect(userCallMayCollect("core/rt/gc.alloc"));
     try std.testing.expect(userCallMayCollect("core/rt/gc.collect"));
     try std.testing.expect(userCallMayCollect("core/rt/str.f$int"));
-    try std.testing.expect(!userCallMayCollect("core/rt/gc.mark"));
+    try std.testing.expect(!userCallMayCollect("core/rt/gc.collections"));
     try std.testing.expect(!userCallMayCollect("core/rt/str.str_eq"));
 }
 

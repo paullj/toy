@@ -79,7 +79,7 @@ pub const ResolvedConformance = struct {
 
 /// Bumped when the in-memory layout encoding of any type changes, so a stale blob
 /// from a prior layout is invalidated.
-const type_layout_version: u8 = 5;
+const type_layout_version: u8 = 6;
 
 const seed: u64 = 0x46_50_52_4e; // "FPRN"
 
@@ -308,8 +308,6 @@ pub fn deriveFingerprint(
             .cmp_call => |n| AstWalk.updateLeaf(&h, n),
             .hash_call => |n| AstWalk.updateLeaf(&h, n),
             .display_call => |n| AstWalk.updateLeaf(&h, n),
-            .trace_mark => {},
-            .trace_call => |n| AstWalk.updateLeaf(&h, n),
         }
     }
     return h.final();

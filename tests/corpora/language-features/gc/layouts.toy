@@ -1,0 +1,241 @@
+# expect: exit 0
+# Feature: every heap object is traced by the layout of its type, so each kind of reference
+# survives a collection however it is held: through nested structs, the live variant of an
+# enum, a closure env, a generic instance, an Option or Result, a Map or Set, a backing over
+# 8 KiB, and an object reached only through a field inside another one. A churn of strings
+# and Vecs between building and reading reuses every cell a missed reference lets go. Each
+# check returns its own code when it fails.
+import std/gc
+import std/map
+import std/ref
+import std/set
+import std/str
+import std/vec
+
+struct Inner { n: int, s: str, r: Ref[int] }
+
+struct Outer { tag: int, inner: Inner, more: Vec[Inner], tail: Option[Ref[Inner]] }
+
+enum Shape { num(int, int), text(int, str), boxed(Ref[Vec[int]]), call(fn() -> int), pair(Inner, int) }
+
+struct Pair[A, B] { a: A, b: B }
+
+struct Acc { name: str, hits: Ref[int] }
+
+impl Acc {
+    fn bump(self, k: int) -> int {
+        self.hits.set(self.hits.get() + k)
+        return self.hits.get() + self.name.len()
+    }
+}
+
+fn label(i: int) -> str {
+    return "k".concat(i.to_string())
+}
+
+fn churn(n: int) {
+    for i in 0..n {
+        junk := [i, i, i]
+        junk.push(i)
+        _s := label(i).concat("-junk")
+    }
+}
+
+fn settle() {
+    churn(1500)
+    gc.collect()
+}
+
+fn inner(i: int) -> Inner {
+    return Inner { n: i, s: label(i), r: Ref.new(i * 2) }
+}
+
+fn outer(i: int) -> Ref[Outer] {
+    more := Vec[Inner].new()
+    for j in 0..3 { more.push(inner(i + j)) }
+    return Ref.new(Outer { tag: i, inner: inner(i), more: more, tail: Option.some(Ref.new(inner(i + 100))) })
+}
+
+fn check_nested() -> int {
+    o := outer(5)
+    settle()
+    v := o.get()
+    if v.inner.s != "k5" || v.inner.r.get() != 10 { return 1 }
+    if v.more[2].s != "k7" || v.more[2].r.get() != 14 { return 2 }
+    match v.tail {
+        Option.some(t) -> { if t.get().s != "k105" { return 3 } },
+        Option.none -> { return 4 },
+    }
+    return 0
+}
+
+fn shapes() -> Vec[Shape] {
+    xs := Vec[Shape].new()
+    for i in 0..40 {
+        k := i % 5
+        if k == 0 { xs.push(Shape.num(i, 9223372036854775807)) }
+        if k == 1 { xs.push(Shape.text(i, label(i))) }
+        if k == 2 { xs.push(Shape.boxed(Ref.new([i, i + 1]))) }
+        if k == 3 {
+            s := label(i)
+            xs.push(Shape.call(fn() -> int { s.len() }))
+        }
+        if k == 4 { xs.push(Shape.pair(inner(i), i)) }
+    }
+    return xs
+}
+
+fn shape_sum(xs: Vec[Shape]) -> int {
+    t := 0
+    for x in xs {
+        t = t + match x {
+            .num(a, _) -> a,
+            .text(_, s) -> s.len(),
+            .boxed(r) -> r.get()[1],
+            .call(f) -> f(),
+            .pair(p, _) -> p.s.len() + p.r.get(),
+        }
+    }
+    return t
+}
+
+fn check_enums() -> int {
+    xs := shapes()
+    want := shape_sum(xs)
+    settle()
+    if shape_sum(xs) != want { return 11 }
+    # A cell that holds an int in one variant and a reference in another, switched both ways.
+    cell := Ref.new(Shape.num(1, 2))
+    cell.set(Shape.text(0, label(77)))
+    settle()
+    match cell.get() {
+        .text(_, s) -> { if s != "k77" { return 12 } },
+        _ -> { return 13 },
+    }
+    cell.set(Shape.num(3, 4))
+    settle()
+    cell.set(Shape.pair(inner(8), 1))
+    settle()
+    match cell.get() {
+        .pair(p, _) -> { if p.s != "k8" || p.r.get() != 16 { return 14 } },
+        _ -> { return 15 },
+    }
+    return 0
+}
+
+fn make_closures() -> Vec[fn(int) -> int] {
+    fs: Vec[fn(int) -> int] = []
+    for i in 0..30 {
+        captured := inner(i)
+        names := [label(i), label(i + 1)]
+        count := 0
+        fs.push(fn(x: int) -> int {
+            count = count + 1
+            x + captured.r.get() + captured.s.len() + names[1].len() + count
+        })
+    }
+    acc := Acc { name: label(4), hits: Ref.new(0) }
+    fs.push(acc.bump)
+    return fs
+}
+
+fn check_closures() -> int {
+    fs := make_closures()
+    settle()
+    # x + 2i + len("k12") + len("k13") + 1 for i = 12.
+    if fs[12](1) != 1 + 24 + 3 + 3 + 1 { return 21 }
+    if fs[12](1) != 1 + 24 + 3 + 3 + 2 { return 22 }
+    if fs[30](5) != 5 + 2 { return 23 }
+    return 0
+}
+
+fn check_generics() -> int {
+    ps := Vec[Pair[str, int]].new()
+    qs := Vec[Pair[int, Ref[Inner]]].new()
+    for i in 0..50 {
+        ps.push(Pair[str, int] { a: label(i), b: i })
+        qs.push(Pair[int, Ref[Inner]] { a: i, b: Ref.new(inner(i)) })
+    }
+    rp := Ref.new(Pair[Inner, Pair[str, str]] { a: inner(3), b: Pair[str, str] { a: label(1), b: label(2) } })
+    settle()
+    if ps[49].a != "k49" { return 31 }
+    if qs[48].b.get().s != "k48" || qs[48].b.get().r.get() != 96 { return 32 }
+    if rp.get().a.s != "k3" || rp.get().b.b != "k2" { return 33 }
+    return 0
+}
+
+fn results() -> Vec[Result[Ref[Inner], str]] {
+    rs := Vec[Result[Ref[Inner], str]].new()
+    for i in 0..20 {
+        if i % 2 == 0 { rs.push(Result.ok(Ref.new(inner(i)))) } else { rs.push(Result.err(label(i))) }
+    }
+    return rs
+}
+
+fn check_option_result() -> int {
+    rs := results()
+    o: Option[Ref[Vec[str]]] = Option.some(Ref.new([label(1), label(2), label(3)]))
+    settle()
+    t := 0
+    for r in rs {
+        t = t + match r {
+            .ok(x) -> x.get().r.get(),
+            .err(e) -> e.len(),
+        }
+    }
+    # oks: 2 * (0 + 2 + .. + 18) = 180; errs: ten 2- or 3-char labels = 2 * 5 + 3 * 5 = 25.
+    if t != 205 { return 41 }
+    match o {
+        Option.some(v) -> { if v.get()[2] != "k3" { return 42 } },
+        Option.none -> { return 43 },
+    }
+    return 0
+}
+
+fn check_maps() -> int {
+    m := Map[str, Vec[Inner]].new()
+    keys := Map[str, Ref[Inner]].new()
+    seen := Set[str].new()
+    for i in 0..120 {
+        m.set(label(i), [inner(i), inner(i + 1)])
+        keys.set(label(i * 3), Ref.new(inner(i)))
+        seen.add(label(i).concat("!"))
+    }
+    settle()
+    if m.get(label(119)).or([])[1].s != "k120" { return 51 }
+    if keys.get(label(300)).or(Ref.new(inner(0))).get().s != "k100" { return 52 }
+    if !seen.contains("k77!") || seen.len() != 120 { return 53 }
+    return 0
+}
+
+fn check_large() -> int {
+    # 2000 strs (32 KiB) and 600 Inners (19 KiB): each backing is a mapping of its own.
+    xs := Vec[str].new()
+    ys := Vec[Inner].new()
+    for i in 0..2000 { xs.push(label(i)) }
+    for i in 0..600 { ys.push(inner(i)) }
+    settle()
+    if xs[1999] != "k1999" || xs[0] != "k0" { return 61 }
+    if ys[599].s != "k599" || ys[599].r.get() != 1198 { return 62 }
+    return 0
+}
+
+fn interior() -> Ref[Outer] {
+    return outer(40)
+}
+
+fn check_interior() -> int {
+    # Only the Outer cell is a root; its Inner's buffer and box, the Vec of Inners and its
+    # backing, and the Option's box are reached through fields inside it.
+    o := interior()
+    for _round in 0..5 { settle() }
+    v := o.get()
+    if v.inner.s != "k40" || v.more[1].r.get() != 82 { return 71 }
+    return 0
+}
+
+fn main() -> int {
+    checks := [check_nested(), check_enums(), check_closures(), check_generics(), check_option_result(), check_maps(), check_large(), check_interior()]
+    for c in checks { if c != 0 { return c } }
+    return 0
+}

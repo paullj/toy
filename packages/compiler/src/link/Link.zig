@@ -58,8 +58,8 @@ pub fn descHash(gpa: std.mem.Allocator, ty: Type) !u64 {
     return desc_table_base_hash | (h & 0x0000_FFFF_FFFF_FFFF);
 }
 
-/// One descriptor-table entry: 6×u64 (48 bytes). `{size, align, size_class, hash_off,
-/// eq_off, trace_off}` where the `*_off`s are `__text` byte OFFSETS of the named erased
+/// One descriptor-table entry: 5×u64 (40 bytes). `{size, align, size_class, hash_off,
+/// eq_off}` where the `*_off`s are `__text` byte OFFSETS of the named erased
 /// units (0 when absent — the runtime resolves offset→address by adding `text_base()`).
 /// The name slices are BORROWED (the caller's `erased_units`), never freed here.
 pub const DescEntry = struct {
@@ -69,7 +69,6 @@ pub const DescEntry = struct {
     size_class: u16,
     hash_name: ?[]const u8 = null,
     eq_name: ?[]const u8 = null,
-    trace_name: ?[]const u8 = null,
 };
 
 /// One decoded string literal a function references, keyed by its content hash
@@ -94,15 +93,13 @@ pub const FnCode = struct {
     code: []u8,
     relocs: []Reloc,
     literals: []Literal,
-    /// The per-fn precise GC root map (`FrameLayout.encodeRoots`): `[u32 n][{u32 sp_off,
-    /// u32 tag} × n]`, where `tag` is 1 for a `gc_array` container header (precise
-    /// container walk) and 0 for everything else (conservative word-scan). Empty for a
-    /// hand-emitted builtin or a fn that failed to lower — the collector reads an empty map
-    /// as "scan this frame conservatively". A pure function of the IR + layouts, so it rides
+    /// The per-fn precise GC root map (`FrameLayout.encodeRoots`): `[u32 n][u32 sp_off × n]`.
+    /// Empty for a hand-emitted builtin or a fn that failed to lower — the collector reads
+    /// an empty map as "scan this frame conservatively". A pure function of the IR + layouts, so it rides
     /// the content-fp cache. Owned like the other regions ("always own").
     root_bitmap: []u8 = &.{},
     /// More rows of the stack map, for a fn whose roots change from call to call (the MIR
-    /// backend's linear scan): `[u32 code_off][u32 n][{u32 sp_off, u32 tag} x n]` each, by
+    /// backend's linear scan): `[u32 code_off][u32 n][u32 sp_off x n]` each, by
     /// ascending code offset of the safepoint call the row starts at. `root_bitmap` is the
     /// row at the fn's start. Owned like the other regions.
     safepoint_maps: []u8 = &.{},
@@ -285,7 +282,7 @@ pub const BuiltinCall = struct { builtin: []const u8, callee: SymName };
 
 /// Which fns and descriptors the image keeps: the fns reachable from `entry` through
 /// `.func` relocs (calls and fn-address pairs alike) and `builtin_calls`, and the descriptors a kept fn
-/// names by a `.cstr` reloc on its `desc_hash`, whose hash/eq/trace units are then
+/// names by a `.cstr` reloc on its `desc_hash`, whose hash/eq units are then
 /// walked like any callee. Codegen lowers every fn and plans a descriptor for every
 /// typechecked heap type, so without this every unused std/core fn, its strings, its
 /// imports and the GC runtime its heap types drag in would ride every binary.
@@ -343,7 +340,7 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
             .cstr => |h| if (desc_at.get(h)) |di| if (!keep_desc[di]) {
                 keep_desc[di] = true;
                 const d = descriptors[di];
-                for ([_]?[]const u8{ d.hash_name, d.eq_name, d.trace_name }) |nm| {
+                for ([_]?[]const u8{ d.hash_name, d.eq_name }) |nm| {
                     if (nm) |n| try m.mark(gpa, .{ .kind = .user_fn, .name = n });
                 }
             },
@@ -372,7 +369,7 @@ pub const Linked = struct {
     /// set (offsets are stable-sort-ranked), so it is `-jN` byte-identical.
     sym_table: []u8 = &.{},
     /// The per-type descriptor table (empty unless `link` was given descriptors):
-    /// `{size, align, size_class, hash_off, eq_off, trace_off}` × N, 48 bytes each, in
+    /// `{size, align, size_class, hash_off, eq_off}` × N, 40 bytes each, in
     /// the caller's canonical order. The `*_off`s are `__text` byte offsets (0 when
     /// absent). A pure function of the fn set (built from the stable `si`/`offsets`), so
     /// it is `-jN` byte-identical. Owned by the caller.
@@ -644,7 +641,7 @@ fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []con
 }
 
 /// The rows of a `FnCode.safepoint_maps`: each row's code offset and its payload, the same
-/// `[u32 n][{u32 sp_off, u32 tag} x n]` shape a `root_bitmap` has.
+/// `[u32 n][u32 sp_off x n]` shape a `root_bitmap` has.
 pub const SafepointRows = struct {
     bytes: []const u8,
 
@@ -652,7 +649,7 @@ pub const SafepointRows = struct {
         if (it.bytes.len == 0) return null;
         const off = std.mem.readInt(u32, it.bytes[0..4], .little);
         const n = std.mem.readInt(u32, it.bytes[4..8], .little);
-        const len = 4 + 8 * @as(usize, n);
+        const len = 4 + 4 * @as(usize, n);
         const payload = it.bytes[4 .. 4 + len];
         it.bytes = it.bytes[4 + len ..];
         return .{ .code_off = off, .payload = payload };
@@ -664,7 +661,7 @@ pub const SafepointRows = struct {
         while (rest.len != 0) {
             if (rest.len < 8) return false;
             const n = std.mem.readInt(u32, rest[4..8], .little);
-            const row_len = 8 + 8 * @as(usize, n);
+            const row_len = 8 + 4 * @as(usize, n);
             if (rest.len < row_len) return false;
             rest = rest[row_len..];
         }
@@ -673,12 +670,12 @@ pub const SafepointRows = struct {
 };
 
 test "SafepointRows.wellFormed: whole rows pass, a row count past the end fails" {
-    const row = [_]u8{ 4, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0 };
+    const row = [_]u8{ 4, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0 };
     try std.testing.expect(SafepointRows.wellFormed(&.{}));
     try std.testing.expect(SafepointRows.wellFormed(&row));
     try std.testing.expect(SafepointRows.wellFormed(&(row ++ row)));
     var bad = row ++ row;
-    bad[20] = 2;
+    bad[16] = 2;
     try std.testing.expect(!SafepointRows.wellFormed(&bad));
     try std.testing.expect(!SafepointRows.wellFormed(row[0..6]));
 }
@@ -694,9 +691,8 @@ pub fn stackMapRows(fns: []const FnCode) usize {
     return n;
 }
 
-/// Build the per-type descriptor table (see `Linked.desc_table`): 48 bytes per entry in
-/// the caller's canonical order, each `{size, align, size_class, hash_off, eq_off,
-/// trace_off}`. A name's `*_off` is the erased unit's `__text` byte offset (resolved from
+/// Build the per-type descriptor table (see `Linked.desc_table`): 40 bytes per entry in
+/// the caller's canonical order, each `{size, align, size_class, hash_off, eq_off}`. A name's `*_off` is the erased unit's `__text` byte offset (resolved from
 /// the interned handle → `offsets`), or 0 when the name is absent.
 fn buildDescTable(gpa: std.mem.Allocator, entries: []const DescEntry, si: *SymInterner, offsets: []const u32) ![]u8 {
     const d = Abi.desc;
@@ -709,7 +705,6 @@ fn buildDescTable(gpa: std.mem.Allocator, entries: []const DescEntry, si: *SymIn
         std.mem.writeInt(u64, buf[pos + d.size_class_off ..][0..8], e.size_class, .little);
         std.mem.writeInt(u64, buf[pos + d.hash_off ..][0..8], try descOffOf(gpa, si, offsets, e.hash_name), .little);
         std.mem.writeInt(u64, buf[pos + d.eq_off ..][0..8], try descOffOf(gpa, si, offsets, e.eq_name), .little);
-        std.mem.writeInt(u64, buf[pos + d.trace_off ..][0..8], try descOffOf(gpa, si, offsets, e.trace_name), .little);
         pos += d.stride;
     }
     return buf;
@@ -1469,9 +1464,9 @@ test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn +
         try makeFn(gpa, 2, 2, &.{}),
     };
     defer freeFns(gpa, &fns);
-    // fn0: one root at sp-off 8, container tag 1. fn1: empty ⇒ conservative marker.
-    // fn2: mapped but root-less. Roots are `{u32 sp_off, u32 tag}` pairs.
-    const rb0 = [_]u8{ 1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0 };
+    // fn0: one root at sp-off 8. fn1: empty ⇒ conservative marker. fn2: mapped but
+    // root-less. Roots are u32 sp offsets.
+    const rb0 = [_]u8{ 1, 0, 0, 0, 8, 0, 0, 0 };
     const rb2 = [_]u8{ 0, 0, 0, 0 };
     fns[0].root_bitmap = @constCast(&rb0);
     fns[1].root_bitmap = &.{};
@@ -1499,7 +1494,6 @@ test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn +
         if (off == 0) {
             try testing.expectEqual(@as(u32, 1), n); // fn0's one root
             try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, tab[poff + 4 ..][0..4], .little)); // sp_off
-            try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, tab[poff + 8 ..][0..4], .little)); // tag
         } else if (off == 12) {
             try testing.expectEqual(@as(u32, 0xFFFFFFFF), n); // fn1 conservative
         } else if (off == 16) {
@@ -1559,7 +1553,7 @@ test "reachable: a descriptor and its units are kept only when kept code names i
             .{ .site = 4, .target = .{ .cstr = d_used }, .kind = .add_lo12 },
         }),
         try makeFn(gpa, 1, 1, &.{}),
-        // The used type's trace unit names its element's descriptor, so that one is kept too.
+        // The used type's eq unit names another descriptor, so that one is kept too.
         try makeFn(gpa, 2, 1, &.{.{ .site = 0, .target = .{ .cstr = d_elem }, .kind = .adrp_page }}),
         try makeFn(gpa, 3, 1, &.{}),
         try makeFn(gpa, 4, 1, &.{.{ .site = 0, .target = .{ .cstr = d_dead }, .kind = .adrp_page }}),
@@ -1567,8 +1561,8 @@ test "reachable: a descriptor and its units are kept only when kept code names i
     };
     defer freeFns(gpa, &fns);
     const descs = [_]DescEntry{
-        .{ .desc_hash = d_dead, .size = 8, .@"align" = 8, .size_class = 0, .trace_name = "f5" },
-        .{ .desc_hash = d_used, .size = 8, .@"align" = 8, .size_class = 0, .hash_name = "f1", .trace_name = "f2" },
+        .{ .desc_hash = d_dead, .size = 8, .@"align" = 8, .size_class = 0, .hash_name = "f5" },
+        .{ .desc_hash = d_used, .size = 8, .@"align" = 8, .size_class = 0, .hash_name = "f1", .eq_name = "f2" },
         .{ .desc_hash = d_elem, .size = 8, .@"align" = 8, .size_class = 0, .eq_name = "f3" },
     };
     const r = try reachable(gpa, &fns, fname(0), &descs, &.{});

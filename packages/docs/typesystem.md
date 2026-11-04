@@ -547,7 +547,7 @@ signature; the pair is deduplicated on the grounded bytes, so `fn(Vec[T])` at
 `T = int` and a written `fn(Vec[int])` are one struct. Past reify only a generic
 template's signature keeps a `.func`. A function type conforms to `Display` only (it
 renders `<fn>`), not to `Eq`/`Hash`/`Ord`; an aggregate holding one derives `Display`
-but not `Eq` or `Hash`. A `Vec` of them gets a trace unit, because the `env` word is a
+but not `Eq` or `Hash`. A `Vec` of them traces each element's `env` word, because it is a
 managed pointer.
 
 ## Function values
@@ -647,8 +647,8 @@ locals on entry, and a nested lambda copies them on from there, so every closure
 boxed local shares its one cell. A lambda that captures nothing (or only zero-sized
 values) has a null env, so two evaluations of it compare equal; two evaluations of a
 capturing lambda do not.
-Env and box cells are word-scanned by the collector, so captured handles, strings,
-boxes and other closures stay alive with them; a function holds each of its boxes in a
+Env and box cells carry a layout built from what they hold, which the collector traces,
+so captured handles, strings, boxes and other closures stay alive with them; a function holds each of its boxes in a
 `rawptr` slot, a precise root.
 
 A `_` that is a whole call argument makes the call a lambda of one parameter, a

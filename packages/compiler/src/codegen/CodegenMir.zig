@@ -133,7 +133,7 @@ fn frameTooLargeMessage(func: *const Ir.Function, layouts: []const types.Layout,
 }
 
 /// The `FnCode.safepoint_maps` rows: per safepoint call at `offs[i]`, the memory roots plus
-/// `maps[i]`'s slots, as `[u32 code_off][u32 n][{u32 sp_off, u32 tag} x n]`. A row equal to
+/// `maps[i]`'s slots, as `[u32 code_off][u32 n][u32 sp_off x n]`. A row equal to
 /// the one before it (the fn-start row of memory roots, first) is left out: the collector
 /// takes the last row at or before a frame's call, which then has the same roots.
 fn encodeSafepoints(
@@ -154,7 +154,7 @@ fn encodeSafepoints(
         prev = m;
         row.clearRetainingCapacity();
         try row.appendSlice(gpa, roots);
-        for (m) |r| try row.append(gpa, .{ .off = frame.spOffset(.{ .spill = r.spill }), .tag = r.tag });
+        for (m) |r| try row.append(gpa, .{ .off = frame.spOffset(.{ .spill = r.spill }) });
         const payload = try FrameLayout.encodeRoots(gpa, row.items);
         defer gpa.free(payload);
         var w: [4]u8 = undefined;
@@ -303,14 +303,14 @@ test "mir: a reference live across a safepoint gets a stack-map row naming its s
     var fc = try lowerOk(gpa, &func);
     defer fc.deinit(gpa);
     // The fn-start row: the rawptr param slot at sp+0.
-    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, fc.root_bitmap);
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, fc.root_bitmap);
     var rows: Link.SafepointRows = .{ .bytes = fc.safepoint_maps };
     const row = rows.next().?;
     try testing.expect(rows.next() == null);
     // The row sits on the bl, and names the param slot and the value's spill slot after it.
     try testing.expectEqual(Aarch64.bl(0), wordsOf(fc)[row.code_off / 4]);
     try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, row.payload[0..4], .little));
-    try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, row.payload[12..16], .little));
+    try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, row.payload[8..12], .little));
 }
 
 test "mir: a call to a core/rt fn is no safepoint and gets no stack-map row" {
@@ -385,31 +385,6 @@ test "mir: a frame that one value nearly fills says so, not too many locals" {
         try testing.expectEqual(@as(usize, 1), diags.items.len);
         try testing.expectEqualStrings(k.message, diags.items[0].message);
     }
-}
-
-test "mir: the prologue zeroes a frame env's container word" {
-    const gpa = testing.allocator;
-    // struct 0 = a gc_array box (a Vec); struct 1 = a frame env { n: int, xs: Vec, s: str }.
-    var env_types = [_]Type{ Type.int, Type.structT(0), Type.str };
-    var env_offs = [_]u32{ 0, 8, 16 };
-    const layouts = [_]types.Layout{
-        .{ .name = "V", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = 8, .@"align" = 8, .native_family = .gc_array },
-        .{ .name = "env$f$l0", .field_names = &.{}, .field_types = &env_types, .offsets = &env_offs, .size = 32, .@"align" = 8 },
-    };
-    var func = try slotsOnlyFn(gpa, &.{ Type.int, Type.structT(1) });
-    defer func.deinit(gpa);
-    var fl = try FrameLayout.compute(gpa, &func, &layouts, &.{});
-    defer fl.deinit(gpa);
-
-    var diags: std.ArrayList(Diagnostic) = .empty;
-    defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, false, &diags);
-    defer fc.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), diags.items.len);
-    const env = fl.slot_off[1];
-    try testing.expect(hasWord(fc, Aarch64.strSp(Aarch64.XZR, env + 8)));
-    try testing.expect(!hasWord(fc, Aarch64.strSp(Aarch64.XZR, env)));
-    try testing.expect(!hasWord(fc, Aarch64.strSp(Aarch64.XZR, env + 16)));
 }
 
 test "mir: a back edge carries the safepoint placeholder and emits no poll" {
