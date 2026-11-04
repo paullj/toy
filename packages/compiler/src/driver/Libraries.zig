@@ -386,9 +386,9 @@ test "a block that binds a symbol the runtime imports is R0018 at the block's ex
     defer pa.deinit();
     const dir = try tmp.dir.realPathFileAlloc(io, ".", pa.allocator());
     var buf: [128]u8 = undefined;
-    try tmp.dir.writeFile(io, .{ .sub_path = "libtoyz.dylib", .data = Dylib.fakeDylibExporting(&buf, "/opt/libtoyz.dylib", 6, &.{"malloc"}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "libtoyz.dylib", .data = Dylib.fakeDylibExporting(&buf, "/opt/libtoyz.dylib", 6, &.{"write"}) });
     const src =
-        \\extern "toyz" { fn malloc(n: int) -> rawptr }
+        \\extern "toyz" { fn write(fd: int, p: rawptr, n: int) -> int }
         \\fn main() -> int { 0 }
         \\
     ;
@@ -398,7 +398,7 @@ test "a block that binds a symbol the runtime imports is R0018 at the block's ex
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diags.len);
     try testing.expectEqual(codes.Code.R0018, r.diags[0].code);
-    try testing.expectEqualStrings("malloc", src[r.diags[0].byte_offset..r.diags[0].end]);
+    try testing.expectEqualStrings("write", src[r.diags[0].byte_offset..r.diags[0].end]);
     try testing.expect(std.mem.indexOf(u8, r.diags[0].message, "toy runtime") != null);
 }
 

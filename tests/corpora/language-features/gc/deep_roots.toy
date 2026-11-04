@@ -1,0 +1,31 @@
+# Feature: a collection far down a deep call chain still finds the roots of the outermost
+# frames. The walk ends where the frame chain does, not after some number of frames, so
+# the Vec and the str main holds survive a collection 5000 calls below it, and the cells
+# allocated after it never land on top of them.
+# expect: exit 0
+# expect: stdout "5000\n14\nkeepme\n"
+import std/io
+import std/gc
+import std/vec
+
+fn deep(n: int) -> int {
+    if n == 0 {
+        gc.collect()
+        for i in 0..2000 {
+            junk := [i, i, i, i, i, i, i, i]
+            junk.push(i)
+        }
+        return 0
+    }
+    return deep(n - 1) + 1
+}
+
+fn main() -> int {
+    keep := [7, 7, 7, 7, 7, 7, 7, 7]
+    keep.push(7)
+    s := "keep".concat("me")
+    io.println(deep(5000))
+    io.println(keep[3] + keep[8])
+    io.println(s)
+    return 0
+}

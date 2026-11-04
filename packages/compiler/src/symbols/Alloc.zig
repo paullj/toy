@@ -28,6 +28,8 @@ pub const Reason = union(enum) {
     /// A builtin fn that allocates or collects (`gc_alloc`, `ref_new`, `gc_collect`), or one
     /// this pass does not know: its global id.
     builtin_fn: u32,
+    /// A call of a collector entry (`StdNames.RuntimeFn.collects`): its global id.
+    collector: u32,
     /// A compiler-provided method that builds a heap value (`to_string`, str `concat`).
     builtin_method: Callee.Builtin,
     /// A derived witness, by its index in the method table: it has no source to walk.
@@ -149,6 +151,9 @@ const Visitor = struct {
 
     /// A call of fn `gid`, or a reference to it.
     fn named(v: *Visitor, idx: Ast.Index, gid: u32) error{OutOfMemory}!void {
+        if (gid < v.p.prog.sigs.len) if (StdNames.RuntimeFn.lookup(v.p.prog.sigs[gid].name)) |f| {
+            if (f.collects()) return v.alloc(idx, .{ .collector = gid });
+        };
         if (v.p.bodies.ofFn(gid)) |to| return v.call(idx, to);
         if (gid >= v.p.prog.sigs.len) return v.alloc(idx, .unknown_call);
         const sig = v.p.prog.sigs[gid];
@@ -314,7 +319,7 @@ pub const Memo = struct {
 /// What an allocating step does, as the end of a path in a diagnostic.
 pub fn describe(w: *std.Io.Writer, p: Program, r: Reason) std.Io.Writer.Error!void {
     switch (r) {
-        .builtin_fn => |gid| try w.print("{s}", .{p.prog.sigs[gid].name}),
+        .builtin_fn, .collector => |gid| try w.print("{s}", .{p.prog.sigs[gid].name}),
         .builtin_method => |k| try w.writeAll(switch (k) {
             .str_concat => "str concat",
             else => "to_string",

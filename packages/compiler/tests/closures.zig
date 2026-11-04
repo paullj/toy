@@ -259,7 +259,7 @@ test "a capturing lambda passed to Vec.each or to a generic fn that only calls i
     }) |o| {
         const owner = o.name;
         const body1 = harness.irBody(o1, owner) orelse return error.TestExpectedOwner;
-        try std.testing.expect(std.mem.indexOf(u8, body1, "call @gc_alloc") == null);
+        try std.testing.expect(std.mem.indexOf(u8, body1, "call @core/rt/gc.alloc") == null);
         var buf: [64]u8 = undefined;
         const env = try std.fmt.bufPrint(&buf, ":env${s}$l0", .{owner});
         try std.testing.expect(std.mem.indexOf(u8, body1, env) != null);
@@ -268,7 +268,7 @@ test "a capturing lambda passed to Vec.each or to a generic fn that only calls i
         try std.testing.expect(std.mem.indexOf(u8, body1d, env) != null);
         // -O0 keeps the box and the env cell, so the check can fail.
         const body0 = harness.irBody(o0, owner) orelse return error.TestExpectedOwner;
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body0, "call @gc_alloc"));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body0, "call @core/rt/gc.alloc"));
     }
 }
 
@@ -294,7 +294,7 @@ test "every std method that takes a closure keeps its caller's env in the frame 
     };
     for (owners) |owner| {
         const body1 = harness.irBody(o1, owner) orelse return error.TestExpectedOwner;
-        if (std.mem.indexOf(u8, body1, "call @gc_alloc") != null) {
+        if (std.mem.indexOf(u8, body1, "call @core/rt/gc.alloc") != null) {
             std.debug.print("{s} allocates at -O1: a std method it calls keeps its closure\n", .{owner});
             return error.TestUnexpectedAlloc;
         }
@@ -304,7 +304,7 @@ test "every std method that takes a closure keeps its caller's env in the frame 
         const body1d = harness.irBody(o1d, owner) orelse return error.TestExpectedOwner;
         try std.testing.expect(std.mem.indexOf(u8, body1d, env) != null);
         const body0 = harness.irBody(o0, owner) orelse return error.TestExpectedOwner;
-        try std.testing.expect(std.mem.count(u8, body0, "call @gc_alloc") >= 2);
+        try std.testing.expect(std.mem.count(u8, body0, "call @core/rt/gc.alloc") >= 2);
     }
 }
 
@@ -382,7 +382,7 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     const ir = try harness.emitIr(gpa, io, path, &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(ir);
     const body = harness.irBody(ir, "main") orelse return error.TestExpectedMain;
-    try std.testing.expect(std.mem.indexOf(u8, body, "call @gc_alloc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "call @core/rt/gc.alloc") != null);
 
     // 120 bytes less, and the frame env fits: the cell above comes from the fallback.
     const lean = try nearCapFrame(gpa, g_bytes - 120);
@@ -392,7 +392,7 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     const lean_ir = try harness.emitIr(gpa, io, lean_path, &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(lean_ir);
     const lean_body = harness.irBody(lean_ir, "main") orelse return error.TestExpectedMain;
-    try std.testing.expect(std.mem.indexOf(u8, lean_body, "call @gc_alloc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, lean_body, "call @core/rt/gc.alloc") == null);
     try std.testing.expect(std.mem.indexOf(u8, lean_body, ":env$main$l0") != null);
 }
 

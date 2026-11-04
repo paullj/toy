@@ -8,6 +8,7 @@
 const std = @import("std");
 const Aarch64 = @import("../Aarch64.zig");
 const Link = @import("../../link/Link.zig");
+const StdNames = @import("../../symbols/StdNames.zig");
 const testing = std.testing;
 
 /// Append one little-endian AArch64 instruction word to a builtin's code buffer.
@@ -175,13 +176,13 @@ pub fn emitFpWalk(
     patchBTo(code.items, b_site, loop_top);
 }
 
-/// Emit `bl <builtin>` with a `.call26` reloc, so one hand-emitted builtin can call
-/// another (here: `gc_alloc`'s alloc-triggered `bl gc_collect`). The link tail resolves
-/// the target like any intra-image `.func` call once both bodies are appended.
-pub fn emitBuiltinCall(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc), gpa: std.mem.Allocator, name_str: []const u8) error{OutOfMemory}!void {
-    const nm = try gpa.dupe(u8, name_str);
+/// Emit `bl` to the `core/rt` fn `f` with a `.call26` reloc, so a hand-emitted builtin
+/// can call the runtime written in toy (here: `alloc`). The builtin's row lists `f` in its
+/// `runtime_calls`, which keeps the fn in the image.
+pub fn emitRuntimeCall(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc), gpa: std.mem.Allocator, f: StdNames.RuntimeFn) error{OutOfMemory}!void {
+    const nm = try gpa.dupe(u8, f.name());
     errdefer gpa.free(nm);
-    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .func = .{ .kind = .builtin, .name = nm } }, .kind = .call26 });
+    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .func = .{ .kind = .user_fn, .name = nm } }, .kind = .call26 });
     try emitWord(code, gpa, Aarch64.bl(0));
 }
 

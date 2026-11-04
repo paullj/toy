@@ -1,0 +1,607 @@
+# The collector: a non-moving, stop-the-world mark-sweep over 16 KiB spans of size-class
+# cells. Lowered code calls its two entries, `alloc` and `collect`, and a type's trace unit
+# calls `mark` and `mark_leaf`. A call between core/rt fns is no safepoint: T0082 holds every
+# core/rt fn but the two entries to never reach the collector, so the collector gets its
+# own memory from mmap, malloc and calloc.
+#
+# Every address here is an `int`. None is a reference the collector must keep alive, so no
+# stack map names one.
+#
+# The roots are in the frames of the stopped program. A toy frame has a precise row in the
+# stack map. A frame no toy fn owns (a hand-written builtin, or C calling back into toy) is
+# scanned word by word. A marked object is traced when it comes off the mark stack: a
+# container header precisely (`trace_vec`, `trace_map`), anything else word by word, until
+# every heap type has a layout (#210).
+#
+# The control block is in the image's zero-fill __bss, so every field starts at 0. A span
+# is a 256-byte header, then cells of one size; a large object (over 8 KiB) has a mapping
+# of its own with the same header shape. The fns at the end name each field's offset.
+
+extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
+extern fn munmap(addr: int, len: int) -> int
+extern fn malloc(n: int) -> int
+extern fn realloc(p: int, n: int) -> int
+extern fn calloc(n: int, size: int) -> int
+extern fn free(p: int)
+
+# A fresh zeroed cell of at least `size` bytes. The fast path takes a cell of the first
+# four classes, which step by 16 bytes, off its freelist. It calls nothing, so it saves no
+# registers; every other case is `alloc_slow`, called last.
+pub fn alloc(size: int) -> rawptr {
+    cb := control_block()
+    if size <= 64 && !gc_stress() {
+        class := 0
+        if size > 16 { class = (size - 1) / 16 }
+        head := freelist(cb, class)
+        cell := word(head)
+        if cell != 0 {
+            set_word(head, word(cell))
+            set_word(cell, 0)
+            set_word(allocated(cb), word(allocated(cb)) + class * 16 + 16)
+            return offset(cell, 0)
+        }
+    }
+    return offset(alloc_slow(cb, size, frame_address()), 0)
+}
+
+# `fp` is the frame record of `alloc`, where a collection's walk starts.
+fn alloc_slow(cb: int, size: int, fp: int) -> int {
+    # The collection resets the allocation count, so the budget below never also fires: a
+    # stress run collects exactly once per allocation.
+    if gc_stress() { collect_from(cb, fp) }
+    if size > 8192 { return alloc_large(cb, size, fp) }
+    class := size_class(size)
+    cell_size := class_size(class)
+    set_word(allocated(cb), word(allocated(cb)) + cell_size)
+    head := freelist(cb, class)
+    cell := word(head)
+    if cell == 0 {
+        if over_budget(cb) {
+            collect_from(cb, fp)
+            cell = word(head)
+        }
+        if cell == 0 { cell = refill(cb, class, cell_size) }
+    }
+    set_word(head, word(cell))
+    set_word(cell, 0)
+    return cell
+}
+
+# Run a collection now.
+pub fn collect() {
+    collect_from(control_block(), frame_address())
+}
+
+# Mark the object `w` points into, to be traced.
+pub fn mark(w: int) {
+    mark_word(w, word_scan())
+}
+
+# Mark the object `w` points into without tracing it: it survives the sweep, and what it
+# holds is reached only through its owner's trace.
+pub fn mark_leaf(w: int) {
+    mark_word(w, leaf())
+}
+
+pub fn collections() -> int {
+    return word(collections_run(control_block()))
+}
+
+pub fn span_count() -> int {
+    return word(spans_mapped(control_block()))
+}
+
+# The size classes, as `Abi.size_classes` lists them: the first that holds `size`.
+fn size_class(size: int) -> int {
+    if size <= 16 { return 0 }
+    if size <= 32 { return 1 }
+    if size <= 48 { return 2 }
+    if size <= 64 { return 3 }
+    if size <= 96 { return 4 }
+    if size <= 128 { return 5 }
+    if size <= 192 { return 6 }
+    if size <= 256 { return 7 }
+    if size <= 512 { return 8 }
+    if size <= 1024 { return 9 }
+    if size <= 2048 { return 10 }
+    if size <= 4096 { return 11 }
+    return 12
+}
+
+fn class_size(class: int) -> int {
+    if class < 4 { return (class + 1) * 16 }
+    if class == 4 { return 96 }
+    if class == 5 { return 128 }
+    if class == 6 { return 192 }
+    return 256 << (class - 7)
+}
+
+# Go's GOGC=100 pacing: collect once the program has allocated as much as the last sweep
+# kept, but never before 256 KiB. A fixed budget would make a growing live set pay a
+# whole-heap trace every 256 KiB.
+fn over_budget(cb: int) -> bool {
+    budget := word(kept(cb))
+    if budget < 262144 { budget = 262144 }
+    return word(allocated(cb)) >= budget
+}
+
+fn map_pages(len: int) -> int {
+    return unsafe { mmap(0, len, 3, 4098, -1, 0) }
+}
+
+# Map a span for size class `class` and put its cells on the class's freelist. Returns the
+# freelist head.
+fn refill(cb: int, class: int, cell_size: int) -> int {
+    span := map_pages(16384)
+    set_word(span, word(span_list(cb)))
+    set_word(span_list(cb), span)
+    count := 16128 / cell_size
+    set_word(span_cell_size(span), cell_size)
+    set_word(span_cell_count(span), count)
+    set_word(span_cells(span), span + 256)
+    set_word(span_class(span), class)
+    set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
+    head := freelist(cb, class)
+    i := 0
+    while i < count {
+        cell := span + 256 + i * cell_size
+        set_word(cell, word(head))
+        set_word(head, cell)
+        i += 1
+    }
+    return word(head)
+}
+
+# A large object has no freelist to run dry, so the allocation budget is its only trigger.
+# The collection runs before the mapping, so the new object is never at risk.
+fn alloc_large(cb: int, size: int, fp: int) -> int {
+    if over_budget(cb) { collect_from(cb, fp) }
+    len := (size + 256 + 16383) / 16384 * 16384
+    obj := map_pages(len)
+    set_word(obj, word(large_list(cb)))
+    set_word(large_list(cb), obj)
+    set_word(large_size(obj), size)
+    set_word(span_cells(obj), obj + 256)
+    set_word(large_len(obj), len)
+    set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
+    set_word(allocated(cb), word(allocated(cb)) + size)
+    return obj + 256
+}
+
+# One collection. `fp` is the frame record of the entry the program called, so the walk
+# starts at the program's frame: the collector's own frames hold no roots.
+fn collect_from(cb: int, fp: int) {
+    if word(mark_cap(cb)) == 0 {
+        set_word(mark_stack(cb), unsafe { malloc(4096 * 16) })
+        set_word(mark_cap(cb), 4096)
+    }
+    set_word(mark_len(cb), 0)
+    # The sweep rebuilds every freelist.
+    class := 0
+    while class < 13 {
+        set_word(freelist(cb, class), 0)
+        class += 1
+    }
+    build_span_table(cb)
+    scan_stack(fp)
+    drain(cb)
+    unsafe { free(word(span_table(cb))) }
+    set_word(span_table(cb), 0)
+    live := sweep_spans(cb) + sweep_large(cb)
+    set_word(collections_run(cb), word(collections_run(cb)) + 1)
+    set_word(allocated(cb), 0)
+    set_word(kept(cb), live)
+}
+
+# Hash every heap page to its span or large object, so a marked word finds its object in
+# about one probe. Walking the span list per word made a collection cost O(live words x
+# spans). The table is at most half full, and it lives only for the collection, so no
+# allocation or unmap has to keep it current.
+fn build_span_table(cb: int) {
+    pages := 0
+    span := word(span_list(cb))
+    while span != 0 {
+        pages += 1
+        span = word(span)
+    }
+    obj := word(large_list(cb))
+    while obj != 0 {
+        pages += word(large_len(obj)) / 16384
+        obj = word(obj)
+    }
+    cap := 16
+    shift := 60
+    while cap < pages * 2 {
+        cap *= 2
+        shift -= 1
+    }
+    set_word(span_table(cb), unsafe { calloc(cap, 16) })
+    set_word(table_mask(cb), cap - 1)
+    set_word(table_shift(cb), shift)
+    low := 9223372036854775807
+    high := 0
+    span = word(span_list(cb))
+    while span != 0 {
+        add_page(cb, span, span)
+        if span < low { low = span }
+        if span + 16384 > high { high = span + 16384 }
+        span = word(span)
+    }
+    obj = word(large_list(cb))
+    while obj != 0 {
+        len := word(large_len(obj))
+        page := 0
+        while page < len {
+            add_page(cb, obj + page, obj)
+            page += 16384
+        }
+        if obj < low { low = obj }
+        if obj + len > high { high = obj + len }
+        obj = word(obj)
+    }
+    set_word(heap_low(cb), low)
+    set_word(heap_high(cb), high)
+}
+
+# Fibonacci hashing of the page: kernel-chosen span addresses come in runs that an identity
+# hash would pile into one probe chain. A page's low 14 bits are 0, so this is the page
+# number's product shifted up 14 bits, and the shift keeps well-mixed bits from just below
+# that product's top. Its sign fill lands above the mask.
+fn page_slot(cb: int, page: int) -> int {
+    return (page *% -7046029254386353131) >> word(table_shift(cb))
+}
+
+fn add_page(cb: int, page: int, owner: int) {
+    table := word(span_table(cb))
+    mask := word(table_mask(cb))
+    i := page_slot(cb, page)
+    loop {
+        slot := table + (i & mask) * 16
+        if word(slot) == 0 {
+            set_word(slot, page)
+            set_word(slot + 8, owner)
+            return
+        }
+        i += 1
+    }
+}
+
+# The span or large object that holds heap address `w`, or 0.
+fn owner_of(cb: int, w: int) -> int {
+    page := w - (w & 16383)
+    table := word(span_table(cb))
+    mask := word(table_mask(cb))
+    i := page_slot(cb, page)
+    loop {
+        slot := table + (i & mask) * 16
+        p := word(slot)
+        if p == page { return word(slot + 8) }
+        if p == 0 { return 0 }
+        i += 1
+    }
+}
+
+# Mark the object `w` points into, if it is a heap object. A newly marked object is pushed
+# with descriptor `desc` (`container` or `word_scan`) to be traced, unless it is a `leaf`:
+# a leaf survives the sweep but is never traced. Any word may come here, so `w` is checked
+# against the heap before anything reads through it: a word that only looks like a pointer
+# keeps an object alive, and nothing worse. Each pointer an object holds comes through
+# here, so the span table probe and the push are written out in place, and the one call
+# left, to grow the mark stack, comes last: nothing is live across a call, so no register
+# is saved.
+fn mark_word(w: int, desc: int) {
+    cb := control_block()
+    if w < word(heap_low(cb)) || w >= word(heap_high(cb)) { return }
+    page := w - (w & 16383)
+    table := word(span_table(cb))
+    mask := word(table_mask(cb))
+    i := page_slot(cb, page)
+    span := 0
+    loop {
+        slot := table + (i & mask) * 16
+        p := word(slot)
+        if p == page {
+            span = word(slot + 8)
+            break
+        }
+        if p == 0 { return }
+        i += 1
+    }
+    obj := word(span_cells(span))
+    size := word(span_cell_size(span))
+    if size == 0 {
+        if w < obj || w >= obj + word(large_size(span)) || word(large_mark(span)) != 0 { return }
+        set_word(large_mark(span), 1)
+    } else {
+        if w < obj { return }
+        cell := (w - obj) / size
+        if cell >= word(span_cell_count(span)) { return }
+        at := span_marks(span) + cell / 8
+        bit := 1 << (cell & 7)
+        bits := byte(at)
+        if (bits & bit) != 0 { return }
+        set_byte(at, bits | bit)
+        obj = obj + cell * size
+    }
+    if is_leaf(desc) { return }
+    n := word(mark_len(cb))
+    if n == word(mark_cap(cb)) {
+        grow_and_push(obj, desc)
+        return
+    }
+    entry := word(mark_stack(cb)) + n * 16
+    set_word(entry, obj)
+    set_word(entry + 8, desc)
+    set_word(mark_len(cb), n + 1)
+}
+
+fn grow_and_push(obj: int, desc: int) {
+    cb := control_block()
+    n := word(mark_len(cb))
+    set_word(mark_stack(cb), unsafe { realloc(word(mark_stack(cb)), n * 32) })
+    set_word(mark_cap(cb), n * 2)
+    entry := word(mark_stack(cb)) + n * 16
+    set_word(entry, obj)
+    set_word(entry + 8, desc)
+    set_word(mark_len(cb), n + 1)
+}
+
+# Walk the frame chain from the entry's frame `fp` out to the first frame. The return
+# address a frame saved names its caller's fn, whose stack-map row names the caller's roots
+# at that call.
+fn scan_stack(fp: int) {
+    text := text_base()
+    map := stack_map()
+    rows := word(map)
+    frame := fp
+    loop {
+        caller := word(frame)
+        # A caller's frame is above its callee's, so this, unlike a frame count, ends a
+        # corrupt chain without cutting off a deep live one.
+        if caller <= frame { return }
+        roots := frame_roots(map, rows, word(frame + 8) - 4 - text)
+        # The count is 4 bytes; the load's other half is the next 4 bytes of the table.
+        n := low_half(word(roots))
+        sp := frame + 16
+        if n == unmapped_frame() {
+            scan_words(sp, caller)
+        } else {
+            scan_roots(roots + 4, n, sp)
+        }
+        frame = caller
+    }
+}
+
+# The stack-map payload for code at text offset `at`: that of the last row at or before
+# it. The table is `[count][{off, payload offset} x count][payloads]`, rows ascending, the
+# first at 0 and the last a sentinel at the end of __text that marks a frame for a word
+# scan. Code outside __text (C) gets the sentinel.
+fn frame_roots(map: int, rows: int, at: int) -> int {
+    if at < 0 { return map + word(map + rows * 16) }
+    low := 0
+    high := rows
+    while high - low > 1 {
+        mid := (low + high) / 2
+        if word(map + 8 + mid * 16) <= at { low = mid } else { high = mid }
+    }
+    return map + word(map + 16 + low * 16)
+}
+
+# Each root of a precise row is `{u32 sp offset, u32 descriptor}`.
+fn scan_roots(at: int, n: int, sp: int) {
+    i := 0
+    while i < n {
+        root := word(at + i * 8)
+        mark_word(word(sp + low_half(root)), root >> 32)
+        i += 1
+    }
+}
+
+# Most words of an object are no pointer, so each is checked against the heap's bounds
+# before the call that would look it up.
+fn scan_words(from: int, to: int) {
+    cb := control_block()
+    low := word(heap_low(cb))
+    high := word(heap_high(cb))
+    at := from
+    while at < to {
+        w := word(at)
+        if w >= low && w < high { mark_word(w, word_scan()) }
+        at += 8
+    }
+}
+
+# Trace every marked object to a fixpoint.
+fn drain(cb: int) {
+    loop {
+        n := word(mark_len(cb))
+        if n == 0 { return }
+        n -= 1
+        set_word(mark_len(cb), n)
+        entry := word(mark_stack(cb)) + n * 16
+        obj := word(entry)
+        if word(entry + 8) == container() {
+            # A container header says which container it is: 0 at +32 for a Vec.
+            if word(obj + 32) == 0 { trace_vec(obj) } else { trace_map(obj) }
+        } else {
+            scan_object(cb, obj)
+        }
+    }
+}
+
+fn scan_object(cb: int, obj: int) {
+    span := owner_of(cb, obj)
+    if span == 0 { return }
+    size := word(span_cell_size(span))
+    if size == 0 { size = word(large_size(span)) }
+    scan_words(obj, obj + size)
+}
+
+# A Vec header: {len@0, elems@16, elem_desc@40, elem_size@48}. The backing is kept but not
+# scanned: only its first `len` elements are live, and each goes through its type's trace
+# unit, if the type holds references.
+fn trace_vec(header: int) {
+    elems := word(header + 16)
+    mark_word(elems, leaf())
+    tracer := trace_unit(word(header + 40))
+    if tracer == 0 { return }
+    len := word(header)
+    size := word(header + 48)
+    i := 0
+    while i < len {
+        unsafe { call_trace(tracer, elems + i * size) }
+        i += 1
+    }
+}
+
+# A Map or Set header: {buckets@0, entries@8, len@24, key_desc@40, val_desc@48,
+# key_size@56, stride@64}. Both backings are kept but not scanned. The entries are dense in
+# insertion order, so the walk sees every live entry wherever its bucket probed to, and a
+# key's buffer is reached only through it.
+fn trace_map(header: int) {
+    mark_word(word(header), leaf())
+    entries := word(header + 8)
+    mark_word(entries, leaf())
+    keys := trace_unit(word(header + 40))
+    values := trace_unit(word(header + 48))
+    len := word(header + 24)
+    stride := word(header + 64)
+    key_size := word(header + 56)
+    i := 0
+    while i < len {
+        entry := entries + i * stride
+        if keys != 0 { unsafe { call_trace(keys, entry) } }
+        if values != 0 { unsafe { call_trace(values, entry + key_size) } }
+        i += 1
+    }
+}
+
+# The code address of the trace unit type descriptor `desc` names, or 0 for a type that
+# holds no references.
+fn trace_unit(desc: int) -> int {
+    if desc == 0 { return 0 }
+    off := word(desc + 40)
+    if off == 0 { return 0 }
+    return text_base() + off
+}
+
+# Free every unmarked cell onto its class's freelist, zeroed for the next `alloc`, and clear
+# the marks. Returns the bytes kept.
+fn sweep_spans(cb: int) -> int {
+    live := 0
+    span := word(span_list(cb))
+    while span != 0 {
+        size := word(span_cell_size(span))
+        count := word(span_cell_count(span))
+        cells := word(span_cells(span))
+        head := freelist(cb, word(span_class(span)))
+        # A byte of mark bits at a time: its 8 cells, then the byte cleared whole.
+        at := span_marks(span)
+        i := 0
+        while i < count {
+            bits := byte(at)
+            bit := 1
+            while bit < 256 && i < count {
+                if (bits & bit) != 0 {
+                    live += size
+                } else {
+                    cell := cells + i * size
+                    # Word 0 becomes the freelist link.
+                    k := 8
+                    while k < size {
+                        set_word(cell + k, 0)
+                        k += 8
+                    }
+                    set_word(cell, word(head))
+                    set_word(head, cell)
+                }
+                bit += bit
+                i += 1
+            }
+            set_byte(at, 0)
+            at += 1
+        }
+        span = word(span)
+    }
+    return live
+}
+
+# Unmap every unmarked large object and clear the marks. Returns the bytes kept.
+fn sweep_large(cb: int) -> int {
+    live := 0
+    # The word that points at `obj`: the list head, or the previous object's next field.
+    link := large_list(cb)
+    obj := word(link)
+    while obj != 0 {
+        next := word(obj)
+        if word(large_mark(obj)) != 0 {
+            set_word(large_mark(obj), 0)
+            live += word(large_size(obj))
+            link = obj
+        } else {
+            set_word(link, next)
+            unsafe { munmap(obj, word(large_len(obj))) }
+        }
+        obj = next
+    }
+    return live
+}
+
+# Control block fields. Release inlines each, so a name costs no call.
+fn spans_mapped(cb: int) -> int { return cb }
+fn collections_run(cb: int) -> int { return cb + 8 }
+# Bytes allocated since the last collection.
+fn allocated(cb: int) -> int { return cb + 16 }
+fn span_list(cb: int) -> int { return cb + 24 }
+fn large_list(cb: int) -> int { return cb + 32 }
+# {object, descriptor} entries of 16 bytes.
+fn mark_stack(cb: int) -> int { return cb + 40 }
+fn mark_len(cb: int) -> int { return cb + 48 }
+fn mark_cap(cb: int) -> int { return cb + 56 }
+# 13 heads, one per size class.
+fn freelist(cb: int, class: int) -> int { return cb + 64 + class * 8 }
+# Bytes the last sweep kept, which pace the next collection.
+fn kept(cb: int) -> int { return cb + 184 }
+fn span_table(cb: int) -> int { return cb + 192 }
+fn table_mask(cb: int) -> int { return cb + 200 }
+fn table_shift(cb: int) -> int { return cb + 208 }
+fn heap_low(cb: int) -> int { return cb + 216 }
+fn heap_high(cb: int) -> int { return cb + 224 }
+
+# Span header fields; word 0 links the next span. A large object's header has a cell size
+# of 0, and its own fields at 16, 32 and 40.
+fn span_cell_size(span: int) -> int { return span + 8 }
+fn span_cell_count(span: int) -> int { return span + 16 }
+fn span_cells(span: int) -> int { return span + 24 }
+fn span_class(span: int) -> int { return span + 32 }
+fn span_marks(span: int) -> int { return span + 40 }
+fn large_size(obj: int) -> int { return obj + 16 }
+fn large_len(obj: int) -> int { return obj + 32 }
+fn large_mark(obj: int) -> int { return obj + 40 }
+
+# How a marked object is traced.
+fn leaf() -> int { return -1 }
+fn is_leaf(desc: int) -> bool { return desc < 0 }
+fn word_scan() -> int { return 0 }
+fn container() -> int { return 1 }
+
+# A stack-map count or root packs a u32 in a word's low half. The sentinel row's count
+# marks a frame no toy fn owns.
+fn low_half(w: int) -> int { return w & 4294967295 }
+fn unmapped_frame() -> int { return 4294967295 }
+
+fn word(at: int) -> int {
+    return unsafe { load(at) }
+}
+
+fn set_word(at: int, v: int) {
+    unsafe { store(at, v) }
+}
+
+fn byte(at: int) -> int {
+    return unsafe { load_byte(at) }
+}
+
+fn set_byte(at: int, v: int) {
+    unsafe { store_byte(at, v) }
+}

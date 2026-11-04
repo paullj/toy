@@ -34,6 +34,8 @@ pub const SymTarget = union(enum) {
     cstr: u64,
     /// Borrowed from the IR, which outlives the MIR.
     func: Ir.SymName,
+    /// A byte offset into the image's zero-fill `__bss`.
+    data: u32,
 };
 
 pub const Callee = union(enum) {
@@ -74,15 +76,13 @@ pub const Op = union(enum) {
     copy: struct { dst: Mem, src: Mem, size: u32 },
     sym_addr: struct { rd: Reg, target: SymTarget },
     /// Reads the physical registers in `uses`, writes those in `defs`, clobbers every
-    /// caller-saved register and `extra_clobbers`. A safepoint unless the callee is known
-    /// never to reach the collector.
+    /// caller-saved register. A safepoint unless the callee is known never to reach the
+    /// collector.
     call: struct {
         callee: Callee,
         uses: Mir.RegSet = 0,
         defs: Mir.RegSet = 0,
         safepoint: bool = true,
-        /// Callee-saved registers a hand-emitted runtime callee overwrites anyway.
-        extra_clobbers: Mir.RegSet = 0,
     },
     /// Holds a value live to here without reading it (`Operand.Kind.keep`). Encodes to
     /// nothing; the allocator drops it.
@@ -110,7 +110,7 @@ pub const caller_saved: Mir.RegSet = blk: {
 
 pub fn callRegs(inst: Inst) ?Mir.CallRegs {
     return switch (inst.op) {
-        .call => |c| .{ .uses = c.uses, .defs = c.defs, .clobbers = caller_saved | c.extra_clobbers, .safepoint = c.safepoint },
+        .call => |c| .{ .uses = c.uses, .defs = c.defs, .clobbers = caller_saved, .safepoint = c.safepoint },
         else => null,
     };
 }

@@ -905,7 +905,7 @@ pub fn lowerErased(
     };
 }
 
-/// Emit `gc_mark(cell)` / `gc_mark_leaf(cell)` for a value already in `cell`.
+/// Emit `mark(cell)` / `mark_leaf(cell)` for a value already in `cell`.
 fn emitMarkCall(b: *L.Builder, callee: Link.SymName, cell: Ir.ValueId) error{OutOfMemory}!void {
     const args = try b.gpa.alloc(Ir.Operand, 1);
     errdefer b.gpa.free(args);
@@ -916,15 +916,15 @@ fn emitMarkCall(b: *L.Builder, callee: Link.SymName, cell: Ir.ValueId) error{Out
 /// Lower an ERASED trace unit `descriptor$trace$<ty>(self: rawptr) -> ()`: called by the
 /// collector (and by a container walk) with `self` = the byte address of a `ty`-typed cell,
 /// it marks the managed heap object(s) that cell references. Three shapes:
-///  * `str`/`cstr` — the cell holds a buffer pointer at offset 0 → `gc_mark_leaf` it (a leaf:
+///  * `str`/`cstr` — the cell holds a buffer pointer at offset 0 → `mark_leaf` it (a leaf:
 ///    the buffer holds no further managed pointers, so the bit alone keeps it, no scan). A
 ///    `cstr` may point into C memory or into the middle of a buffer; the conservative mark
 ///    ignores the first and resolves the second to its cell.
 ///  * a managed box (`Ref`/`gc_array`) — the cell holds a pointee/header pointer at offset 0
-///    → `gc_mark` it (conservative: the pointee may itself hold managed pointers, so it is
+///    → `mark` it (conservative: the pointee may itself hold managed pointers, so it is
 ///    pushed and scanned; a leaf pointee like `Ref[int]`'s int cell scans to a no-op).
 ///  * a managed by-value aggregate (a struct/enum transitively holding a box) — conservatively
-///    `gc_mark` each 8-byte word of the in-place cell; every genuine managed pointer within
+///    `mark` each 8-byte word of the in-place cell; every genuine managed pointer within
 ///    (in any field / any enum variant) is thereby pushed + scanned, a sound superset that
 ///    needs no per-field layout walk. Uncached and pure of `(ty, kind, layout)`, so a
 ///    double-lower is byte-identical.
@@ -1258,7 +1258,7 @@ fn lowerDeriveDisplay(
 /// Trace one component field per its RESOLVED `FieldWitness` (the recipe carries the
 /// managed-vs-by-value decision, so the emitter reads no method table — the same purity the
 /// other derive emitters hold). A `.trace_mark` (managed) field loads the 8-byte cell
-/// pointer and `bl gc_mark`s it — the trace BOUNDARY, never recursing into the pointee. A
+/// pointer and calls `mark` on it — the trace BOUNDARY, never recursing into the pointee. A
 /// `.trace_call` by-value aggregate is copied into a fresh slot then routed to its sibling
 /// `trace` witness (mirrors `deriveFieldHash`'s aggregate path). Everything else
 /// (`.inline_kind`: scalar/str/unmanaged aggregate) is a no-op — not managed.
@@ -1305,7 +1305,7 @@ fn emitVariantTrace(b: *L.Builder, e: Typecheck.EnumLayout, vi: usize, self_base
 /// Lower a SOURCE-LESS auto-derive `Trace` unit: a unit-returning, layout-walking emitter
 /// that marks each MANAGED field of the receiver. ONE param (the receiver, by slot). A
 /// struct walks its fields in layout order; a payload enum does a `get_tag` dispatch ladder
-/// over each variant's payload. Every managed field emits a `bl gc_mark` (the trace
+/// over each variant's payload. Every managed field emits a call to `mark` (the trace
 /// boundary); by-value aggregates that hold managed fields call their sibling trace witness;
 /// scalar/str/unmanaged fields are no-ops. VESTIGIAL: this typed unit is emitted but never
 /// called. Descriptor-driven tracing dispatches per object through the ERASED per-type trace
@@ -1486,7 +1486,7 @@ test "erased hash on an int key returns the loaded value; byte-identical across 
     try testing.expectEqualStrings(t1, t2);
 }
 
-test "erased str trace leaf-marks the buffer once (gc_mark_leaf over load[self,0]); byte-identical" {
+test "erased str trace leaf-marks the buffer once (mark_leaf over load[self,0]); byte-identical" {
     const gpa = testing.allocator;
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
@@ -1499,7 +1499,7 @@ test "erased str trace leaf-marks the buffer once (gc_mark_leaf over load[self,0
     defer f2.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items.len);
 
-    // Exactly one leaf-mark of the heap buffer (the str's ptr half), and NOT a full gc_mark
+    // Exactly one leaf-mark of the heap buffer (the str's ptr half), and NOT a full mark
     // (the buffer holds no further managed pointers). The single `.call` arg is the value
     // loaded from the passed pointer at offset 0.
     var leaf_calls: usize = 0;
@@ -1507,12 +1507,12 @@ test "erased str trace leaf-marks the buffer once (gc_mark_leaf over load[self,0
     var loaded_cell: ?Ir.ValueId = null;
     for (f1.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
         .call => |c| {
-            if (c.callee.kind == .builtin and std.mem.eql(u8, c.callee.name, "gc_mark_leaf")) {
+            if (c.callee.eql(L.gc_mark_leaf_sym)) {
                 leaf_calls += 1;
                 try testing.expectEqual(@as(usize, 1), c.args.len);
                 loaded_cell = c.args[0].value;
             }
-            if (c.callee.kind == .builtin and std.mem.eql(u8, c.callee.name, "gc_mark")) full_calls += 1;
+            if (c.callee.eql(L.gc_mark_sym)) full_calls += 1;
         },
         else => {},
     };
@@ -1723,12 +1723,12 @@ test "derive Eq on a Ref field compares by pointer identity (icmp eq, no witness
     try testing.expectEqual(@as(usize, 0), calls);
 }
 
-/// Count the `bl gc_mark` sites in an emitted trace body: every `.call` whose callee is
-/// the `gc_mark` builtin.
+/// Count the `bl mark` sites in an emitted trace body: every `.call` whose callee is
+/// `core/rt` `mark`.
 fn gcMarkCallSites(func: *const Ir.Function) usize {
     var n: usize = 0;
     for (func.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
-        .call => |c| if (c.callee.kind == .builtin and std.mem.eql(u8, c.callee.name, "gc_mark")) {
+        .call => |c| if (c.callee.eql(L.gc_mark_sym)) {
             n += 1;
         },
         else => {},
@@ -1737,12 +1737,12 @@ fn gcMarkCallSites(func: *const Ir.Function) usize {
 }
 
 /// Count the sibling-`trace` recursion sites in an emitted trace body: every `.call` to a
-/// named `user_fn` (the by-value-aggregate `.trace_call` witness), excluding the `gc_mark`
-/// builtin boundary.
+/// named `user_fn` (the by-value-aggregate `.trace_call` witness), excluding the
+/// collector's mark fns.
 fn userFnCallSites(func: *const Ir.Function) usize {
     var n: usize = 0;
     for (func.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
-        .call => |c| if (c.callee.kind == .user_fn) {
+        .call => |c| if (c.callee.kind == .user_fn and !c.callee.eql(L.gc_mark_sym) and !c.callee.eql(L.gc_mark_leaf_sym)) {
             n += 1;
         },
         else => {},
@@ -1776,7 +1776,7 @@ test "derive Trace marks exactly the managed fields; a scalar struct traces to a
         defer func.deinit(gpa);
         try testing.expectEqual(@as(usize, 0), diags.items.len);
 
-        // One `bl gc_mark` per managed field (2), and the scalar field is NOT marked.
+        // One call to `mark` per managed field (2), and the scalar field is NOT marked.
         try testing.expectEqual(@as(usize, 2), gcMarkCallSites(&func));
         // The two marked offsets are the managed fields' offsets (0 and 16), in layout order.
         const offs = try selfFieldOffsets(gpa, &func);
@@ -1808,7 +1808,7 @@ test "derive Trace recurses into a by-value aggregate field, marks nothing itsel
     // struct Outer { i: Inner, n: int } where Inner { r: Ref[int] } holds the managed field.
     // Outer's own trace does NOT mark: field `i` is a by-value aggregate that itself derives
     // Trace, so Outer routes it to Inner's sibling witness (`.trace_call`); `n` is a no-op.
-    // The `gc_mark` boundary lives one level down, in Inner's body — this is the spike-core
+    // The `mark` boundary lives one level down, in Inner's body — this is the spike-core
     // by-value recursion path.
     var outer_fnames = [_][]const u8{ "i", "n" };
     var outer_ftys = [_]Typecheck.Type{ Typecheck.Type.structT(1), Typecheck.Type.int };
@@ -1853,7 +1853,7 @@ test "derive Trace on a payload enum marks the managed field of the active varia
 
     // enum E { Empty, Boxed(Ref[int]) } — the flattened field-witness list is the variants'
     // payloads concatenated in decl order: Empty contributes none, Boxed contributes one
-    // `.trace_mark`. The get_tag dispatch ladder emits ONE `gc_mark` (on the Boxed arm); the
+    // `.trace_mark`. The get_tag dispatch ladder emits ONE `mark` (on the Boxed arm); the
     // base-offset arithmetic must land it on the right slice of the flat witness list.
     var ref_fnames = [_][]const u8{"0"};
     var ref_ftys = [_]Typecheck.Type{Typecheck.Type.int};

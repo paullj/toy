@@ -372,6 +372,14 @@ const S = struct {
             .copy => |c| try s.emit(.{ .copy = .{ .dst = Mem.reg(try s.val(c.dst), 0), .src = Mem.reg(try s.val(c.src), 0), .size = s.typeSize(c.ty) } }),
             .cstr_ptr => |h| try s.emit(.{ .sym_addr = .{ .rd = try s.def(res), .target = .{ .cstr = h } } }),
             .fn_addr => |sym| try s.emit(.{ .sym_addr = .{ .rd = try s.def(res), .target = .{ .func = sym } } }),
+            .data_addr => |off| try s.emit(.{ .sym_addr = .{ .rd = try s.def(res), .target = .{ .data = off } } }),
+            // x29 is the incoming-args base less the 16 bytes of the saved x29/x30, so the
+            // frame record needs no physical register in the allocator's view.
+            .frame_addr => {
+                const rd = try s.def(res);
+                try s.emit(.{ .addr = .{ .rd = rd, .mem = Mem.frame(.incoming, 0) } });
+                try s.emit(.{ .sub_imm = .{ .rd = rd, .rn = rd, .imm = 16 } });
+            },
             .shl, .lshr, .ashr => |b| try s.shift(res, b, ins.op),
             .fconst => |v| {
                 const bits: i64 = if (s.valueType(res).isFloat32()) @as(u32, @bitCast(@as(f32, @floatCast(v)))) else @bitCast(v);
@@ -512,9 +520,7 @@ const S = struct {
         const callee: Inst.Callee = if (conv == .c) .{ .import = c.callee.name } else .{ .func = c.callee };
         const defs = if (c_ret) |rt| cRetDefs(rt, s.in.layouts) else s.retDefs(ret_ty);
         const facts = GcFacts.callFacts(c.callee);
-        var extra: Mir.RegSet = 0;
-        for (facts.clobbered_gprs) |n| extra |= Mir.regBit(Reg.gp(n));
-        try s.emit(.{ .call = .{ .callee = callee, .uses = uses, .defs = defs, .safepoint = facts.safepoint, .extra_clobbers = extra } });
+        try s.emit(.{ .call = .{ .callee = callee, .uses = uses, .defs = defs, .safepoint = facts.safepoint } });
         // A C callee leaves the bits above its result's width unspecified, and toy keeps
         // every value canonical.
         if (conv == .c and res != Ir.none_value) {

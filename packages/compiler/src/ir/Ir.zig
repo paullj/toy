@@ -225,6 +225,12 @@ pub const Op = union(enum) {
     /// The code address of a function → int value. The name is borrowed (like
     /// `Call.callee`); codegen dupes it into the reloc. Pure, no operands.
     fn_addr: SymName,
+    /// The address of this byte offset in the image's zero-fill `__bss` (the collector's
+    /// control block) → int value. Pure, no operands.
+    data_addr: u32,
+    /// The current fn's frame record address (its x29) → int value. Pure, no operands; a
+    /// fn that reads it is never inlined, as its frame would vanish.
+    frame_addr,
 
     /// A debug build's overflow test before a `+`/`-`/`*`, which branches to a panic. Pure.
     overflow: Overflow,
@@ -605,6 +611,8 @@ fn renderInstr(
             try out.writeAll(")\n");
         },
         .fn_addr => |f| try out.print("fn_addr @{s}\n", .{f.name}),
+        .data_addr => |off| try out.print("data_addr +{d}\n", .{off}),
+        .frame_addr => try out.writeAll("frame_addr\n"),
         .overflow => |o| {
             try out.print("overflow {t} %{d}, %{d} : ", .{ o.kind, o.lhs, o.rhs });
             try renderType(out, o.ty, layouts, enum_layouts);

@@ -27,7 +27,7 @@ const Ir = @import("../ir/Ir.zig");
 /// compile here rather than silently escaping the walk.
 fn eachInstrUseOperand(op: *Ir.Op, ctx: anytype, comptime each: anytype) void {
     switch (op.*) {
-        .iconst, .bconst, .unit, .slot_addr, .cstr_ptr, .fconst, .fn_addr => {},
+        .iconst, .bconst, .unit, .slot_addr, .cstr_ptr, .fconst, .fn_addr, .data_addr, .frame_addr => {},
         .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .band, .bor, .bxor, .shl, .lshr, .ashr, .fadd, .fsub, .fmul, .fdiv => |*bin| {
             each(ctx, &bin.lhs);
             each(ctx, &bin.rhs);
@@ -179,7 +179,7 @@ pub fn remapBlockSlots(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx
             ops.args(ctx, c.args);
             c.ret_slot = map(ctx, c.ret_slot);
         },
-        .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_byte, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .overflow => {},
+        .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_byte, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .data_addr, .frame_addr, .overflow => {},
     };
     switch (b.term) {
         .br => |*br| ops.args(ctx, br.args),

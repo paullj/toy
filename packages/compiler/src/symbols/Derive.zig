@@ -71,7 +71,7 @@ pub const FieldWitness = union(enum) {
     /// accumulator str. Append-only (ordinal 5).
     display_call: []const u8,
     /// A MANAGED (reference) field of a `Trace` derive: the trace boundary. The emitter
-    /// loads the 8-byte cell pointer and `bl gc_mark`s it — it does NOT recurse into the
+    /// loads the 8-byte cell pointer and calls `mark` on it — it does NOT recurse into the
     /// pointee's descriptor. Append-only (ordinal 6).
     trace_mark,
     /// A by-value aggregate (struct / enum) field of a `Trace` derive that itself holds a

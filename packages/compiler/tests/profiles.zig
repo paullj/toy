@@ -156,6 +156,10 @@ test "profiles: debug and release never reuse each other's cache entries or outp
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = root ++ "/main.toy", .data = prog });
     const cwd = try Io.Dir.cwd().realPathFileAlloc(io, root, gpa);
     defer gpa.free(cwd);
+    try Io.Dir.cwd().createDirPath(io, root ++ "/only_main");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = root ++ "/only_main/main.toy", .data = "fn main() -> int {\n    return 0\n}\n" });
+    const cwd_main = try Io.Dir.cwd().realPathFileAlloc(io, root ++ "/only_main", gpa);
+    defer gpa.free(cwd_main);
 
     const cold = try codegenStats(gpa, io, cwd, &.{});
     try testing.expect(cold[0] > 0);
@@ -166,8 +170,10 @@ test "profiles: debug and release never reuse each other's cache entries or outp
     try testing.expectEqual([2]usize{ 0, n }, try codegenStats(gpa, io, cwd, &.{}));
     try testing.expectEqual([2]usize{ 0, n }, try codegenStats(gpa, io, cwd, &.{ "--profile", "release" }));
     // A debug build with release's passes still differs in what the profile decides beyond
-    // the passes, so it must not reuse release's code.
-    try testing.expectEqual([2]usize{ n, 0 }, try codegenStats(gpa, io, cwd, &.{"-O1"}));
+    // the passes, so it must not reuse release's code. The runtime's units build as release
+    // with debug's line tables under either, so the debug build's copies serve it.
+    const runtime_units = (try codegenStats(gpa, io, cwd_main, &.{}))[0] - 1;
+    try testing.expectEqual([2]usize{ n - runtime_units, runtime_units }, try codegenStats(gpa, io, cwd, &.{"-O1"}));
 
     // The default output sits in a folder per profile, as `.toy/<stamp>/<profile>/main`.
     var toy_dir = try Io.Dir.cwd().openDir(io, root ++ "/.toy", .{ .iterate = true });

@@ -279,13 +279,17 @@ const SymNameCtx = struct {
     }
 };
 
+/// A call from a hand-emitted builtin body, which is appended after `reachable` runs, to
+/// a fn that body needs kept.
+pub const BuiltinCall = struct { builtin: []const u8, callee: SymName };
+
 /// Which fns and descriptors the image keeps: the fns reachable from `entry` through
-/// `.func` relocs (calls and fn-address pairs alike), and the descriptors a kept fn
+/// `.func` relocs (calls and fn-address pairs alike) and `builtin_calls`, and the descriptors a kept fn
 /// names by a `.cstr` reloc on its `desc_hash`, whose hash/eq/trace units are then
 /// walked like any callee. Codegen lowers every fn and plans a descriptor for every
 /// typechecked heap type, so without this every unused std/core fn, its strings, its
 /// imports and the GC runtime its heap types drag in would ride every binary.
-pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, descriptors: []const DescEntry) !Reach {
+pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, descriptors: []const DescEntry, builtin_calls: []const BuiltinCall) !Reach {
     const none = std.math.maxInt(u32);
     var heads: std.HashMapUnmanaged(SymName, u32, SymNameCtx, std.hash_map.default_max_load_percentage) = .empty;
     defer heads.deinit(gpa);
@@ -318,7 +322,11 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
         next: []const u32,
         keep: []bool,
         work: *std.ArrayList(u32),
+        builtin_calls: []const BuiltinCall,
         fn mark(m: @This(), a: std.mem.Allocator, s: SymName) !void {
+            if (s.kind == .builtin) for (m.builtin_calls) |bc| {
+                if (std.mem.eql(u8, bc.builtin, s.name)) try m.mark(a, bc.callee);
+            };
             var at = m.heads.get(s) orelse return;
             while (at != none) : (at = m.next[at]) {
                 if (m.keep[at]) continue;
@@ -327,7 +335,7 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
             }
         }
     };
-    const m: Marker = .{ .heads = &heads, .next = next, .keep = keep, .work = &work };
+    const m: Marker = .{ .heads = &heads, .next = next, .keep = keep, .work = &work, .builtin_calls = builtin_calls };
     try m.mark(gpa, entry);
     while (work.pop()) |at| {
         for (fns[at].relocs) |rl| switch (rl.target) {
@@ -1535,7 +1543,7 @@ test "reachable: keeps the entry's transitive callees and drops the rest" {
         try makeFn(gpa, 4, 1, &.{.{ .site = 0, .target = .{ .func = fname(9) }, .kind = .call26 }}),
     };
     defer freeFns(gpa, &fns);
-    const r = try reachable(gpa, &fns, fname(0), &.{});
+    const r = try reachable(gpa, &fns, fname(0), &.{}, &.{});
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{ true, false, true, true, false }, r.fns);
 }
@@ -1563,17 +1571,36 @@ test "reachable: a descriptor and its units are kept only when kept code names i
         .{ .desc_hash = d_used, .size = 8, .@"align" = 8, .size_class = 0, .hash_name = "f1", .trace_name = "f2" },
         .{ .desc_hash = d_elem, .size = 8, .@"align" = 8, .size_class = 0, .eq_name = "f3" },
     };
-    const r = try reachable(gpa, &fns, fname(0), &descs);
+    const r = try reachable(gpa, &fns, fname(0), &descs, &.{});
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{ true, true, true, true, false, false }, r.fns);
     try testing.expectEqualSlices(bool, &.{ false, true, true }, r.descs);
+}
+
+test "reachable: a kept call to a builtin keeps the fns that builtin's body calls" {
+    const gpa = testing.allocator;
+    const concat: SymName = .{ .kind = .builtin, .name = "__str_concat" };
+    var fns = [_]FnCode{
+        try makeFn(gpa, 0, 1, &.{.{ .site = 0, .target = .{ .func = concat }, .kind = .call26 }}),
+        try makeFn(gpa, 1, 1, &.{.{ .site = 0, .target = .{ .func = fname(2) }, .kind = .call26 }}),
+        try makeFn(gpa, 2, 1, &.{}),
+        try makeFn(gpa, 3, 1, &.{}),
+    };
+    defer freeFns(gpa, &fns);
+    const calls = [_]BuiltinCall{
+        .{ .builtin = "__str_concat", .callee = fname(1) },
+        .{ .builtin = "__int_to_str", .callee = fname(3) },
+    };
+    const r = try reachable(gpa, &fns, fname(0), &.{}, &calls);
+    defer r.deinit(gpa);
+    try testing.expectEqualSlices(bool, &.{ true, true, true, false }, r.fns);
 }
 
 test "reachable: a missing entry keeps nothing" {
     const gpa = testing.allocator;
     var fns = [_]FnCode{try makeFn(gpa, 0, 1, &.{})};
     defer freeFns(gpa, &fns);
-    const r = try reachable(gpa, &fns, fname(7), &.{});
+    const r = try reachable(gpa, &fns, fname(7), &.{}, &.{});
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{false}, r.fns);
 }

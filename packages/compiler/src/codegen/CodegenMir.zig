@@ -323,7 +323,7 @@ test "mir: a call to a core/rt fn is no safepoint and gets no stack-map row" {
 
 test "mir: a call to a builtin that never collects is no safepoint and keeps the reference in a register" {
     const gpa = testing.allocator;
-    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "gc_span_count" });
+    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "text_base" });
     defer func.deinit(gpa);
     var fc = try lowerOk(gpa, &func);
     defer fc.deinit(gpa);
