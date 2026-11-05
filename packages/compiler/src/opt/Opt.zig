@@ -167,6 +167,7 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, stats: *Stat
 pub fn optimize(gpa: std.mem.Allocator, func: *Ir.Function, cfg: Config, callees: ?inliner.Lookup, stats: *Stats) error{OutOfMemory}!void {
     stats.ir_instrs_before = Ir.instrCount(func);
     defer stats.ir_instrs_after = Ir.instrCount(func);
+    defer std.debug.assert(func.exit == Ir.none_block or func.exit < func.blocks.len);
 
     if (cfg.@"inline") if (callees) |l| {
         _ = try inliner.run(gpa, func, l, inliner.budget, stats);

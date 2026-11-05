@@ -375,6 +375,25 @@ pub fn collectRoots(
     return roots.toOwnedSlice(gpa);
 }
 
+/// Which of `func`'s slots hold a GC reference anywhere in them. Caller owns the result.
+pub fn rootedSlots(
+    gpa: std.mem.Allocator,
+    func: *const Ir.Function,
+    layouts: []const Layout,
+    enum_layouts: []const EnumLayout,
+) error{OutOfMemory}![]bool {
+    const rooted = try gpa.alloc(bool, func.slots.len);
+    errdefer gpa.free(rooted);
+    var offs: std.ArrayList(u32) = .empty;
+    defer offs.deinit(gpa);
+    for (func.slots, rooted) |slot, *r| {
+        offs.clearRetainingCapacity();
+        try GcLayout.appendRefOffsets(gpa, slot.type, 0, layouts, enum_layouts, &offs);
+        r.* = offs.items.len != 0;
+    }
+    return rooted;
+}
+
 /// Whether a one-word value of type `ty` (a box handle, a raw pointer) is a GC reference.
 pub fn isWordRef(
     gpa: std.mem.Allocator,

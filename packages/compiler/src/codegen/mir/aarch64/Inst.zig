@@ -58,6 +58,8 @@ pub const Op = union(enum) {
     /// rd = rn op (rm shifted by `amt`).
     alu_sh: struct { op: ShiftedOp, rd: Reg, rn: Reg, rm: Reg, shift: Shift, amt: u6 },
     shift_imm: struct { op: Shift, rd: Reg, rn: Reg, amt: u6 },
+    /// `imm` is a bitmask immediate (`Aarch64.bitmaskImm`).
+    logic_imm: struct { op: Aarch64.LogicOp, rd: Reg, rn: Reg, imm: u64 },
     unary: struct { op: UnaryOp, rd: Reg, rn: Reg },
     cmp: struct { rn: Reg, rm: Reg },
     cmp_imm: struct { rn: Reg, imm: u12 },
@@ -188,6 +190,10 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
             B.add(buf, &n, &o.rd, .def);
         },
         .shift_imm => |*o| {
+            B.add(buf, &n, &o.rn, .use);
+            B.add(buf, &n, &o.rd, .def);
+        },
+        .logic_imm => |*o| {
             B.add(buf, &n, &o.rn, .use);
             B.add(buf, &n, &o.rd, .def);
         },

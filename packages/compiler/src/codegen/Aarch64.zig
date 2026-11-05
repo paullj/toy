@@ -159,6 +159,47 @@ pub fn andLowBits(rd: u32, rn: u32, imms: u6) u32 {
     return 0x92400000 | (@as(u32, imms) << 10) | (rn << 5) | rd;
 }
 
+/// The N:immr:imms field of a logical immediate for `x`, or null when `x` is no bitmask
+/// immediate: a run of ones, rotated, repeated in elements of 2 to 64 bits. 0 and ~0 are
+/// none.
+pub fn bitmaskImm(x: u64) ?u13 {
+    if (x == 0 or x == ~@as(u64, 0)) return null;
+    var size: u7 = 64;
+    while (size > 2) {
+        const half: u6 = @intCast(size / 2);
+        const mask = (@as(u64, 1) << half) - 1;
+        if (x & mask != (x >> half) & mask) break;
+        size = half;
+    }
+    const mask: u64 = if (size == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(size)) - 1;
+    const elem = x & mask;
+    const ones: u7 = @popCount(elem);
+    const run: u64 = if (ones == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(ones)) - 1;
+    var r: u7 = 0;
+    while (r < size) : (r += 1) {
+        const rot = if (r == 0) elem else ((elem >> @intCast(r)) | (elem << @intCast(size - r))) & mask;
+        if (rot == run) break;
+    } else return null;
+    const immr: u13 = (size - r) % size;
+    const n: u13 = @intFromBool(size == 64);
+    const imms: u13 = ((~(@as(u13, size) * 2) + 1) & 0x3F) | (ones - 1);
+    return (n << 12) | (immr << 6) | imms;
+}
+
+pub const LogicOp = enum { @"and", orr, eor };
+
+/// and/orr/eor rd, rn, #imm, with `imm` encoded by `bitmaskImm`. rd 31 would be sp.
+/// and x1,x2,#0x3fff → 0x92403441; orr x1,x2,#0x1000 → 0xB2740041.
+pub fn logicImm(op: LogicOp, rd: u32, rn: u32, enc: u13) u32 {
+    std.debug.assert(rd != SP);
+    const base: u32 = switch (op) {
+        .@"and" => 0x92000000,
+        .orr => 0xB2000000,
+        .eor => 0xD2000000,
+    };
+    return base | (@as(u32, enc) << 10) | (rn << 5) | rd;
+}
+
 /// and rd, rn, rm — bitwise AND (logical-shifted-reg, LSL#0). and x0,x0,x1 → 0x8A010000.
 pub fn andReg(rd: u32, rn: u32, rm: u32) u32 {
     return 0x8A000000 | (rm << 16) | (rn << 5) | rd;
@@ -577,23 +618,32 @@ pub const brk0: u32 = 0xD4200000;
 /// panic exit path issues `movz x0,#1; movz x16,#1 (SYS_exit); svc #0x80`.
 pub const svc0x80: u32 = 0xD4001001;
 
-/// Materialize an arbitrary i64 `value` into register `rd` using the minimal
-/// movz + movk sequence, writing the words (little-endian) into `out` starting
-/// at `*len` and advancing it. At most 4 words. value 0 → a single
-/// `movz rd, #0`. Negative values work via their two's-complement lanes (e.g.
-/// -1 = 0xFFFF_FFFF_FFFF_FFFF → movz #0xffff then movk #0xffff in lanes 1..3).
+/// Materialize an arbitrary i64 `value` into register `rd` in the fewest words: one
+/// `orr rd, xzr, #imm` for a bitmask immediate, else `movz` at the first nonzero lane or,
+/// when more lanes are 0xFFFF than 0, `movn` at the first lane that is not, then a `movk`
+/// per remaining lane that differs from the fill. At most 4 words; 0 is `movz rd, #0`.
 pub fn movImm64(out: []u8, len: *usize, rd: u32, value: i64) void {
     const u: u64 = @bitCast(value);
-
-    // First lane via movz (zeroes the upper lanes), then movk the rest.
-    const lane0: u16 = @truncate(u);
-    writeWord(out, len, movz(rd, lane0, 0));
-
-    var hw: u2 = 1;
-    while (true) : (hw += 1) {
-        const lane: u16 = @truncate(u >> (@as(u6, hw) * 16));
-        if (lane != 0) writeWord(out, len, movk(rd, lane, hw));
-        if (hw == 3) break;
+    var zeros: u3 = 0;
+    var ones: u3 = 0;
+    for (0..4) |k| switch (@as(u16, @truncate(u >> @intCast(k * 16)))) {
+        0 => zeros += 1,
+        0xFFFF => ones += 1,
+        else => {},
+    };
+    if (zeros < 3 and ones < 3) if (bitmaskImm(u)) |enc| return writeWord(out, len, logicImm(.orr, rd, XZR, enc));
+    const inverted = ones > zeros;
+    const fill: u16 = if (inverted) 0xFFFF else 0;
+    if (u == 0 or u == ~@as(u64, 0)) return writeWord(out, len, if (inverted) movn(rd, 0, 0) else movz(rd, 0, 0));
+    var first = true;
+    for (0..4) |k| {
+        const hw: u2 = @intCast(k);
+        const lane: u16 = @truncate(u >> @intCast(k * 16));
+        if (lane == fill) continue;
+        if (first) {
+            writeWord(out, len, if (inverted) movn(rd, ~lane, hw) else movz(rd, lane, hw));
+            first = false;
+        } else writeWord(out, len, movk(rd, lane, hw));
     }
 }
 
@@ -870,6 +920,71 @@ test "width-correct encoders (udiv + sign-extend + low-bits mask)" {
     try testing.expectEqual(@as(u32, 0x92407C00), andLowBits(0, 0, 31)); // and x0,x0,#0xffffffff
 }
 
+test "logical immediates (assembler-verified)" {
+    const Case = struct { op: LogicOp, imm: u64, word: u32 };
+    for ([_]Case{
+        .{ .op = .@"and", .imm = 0xff, .word = 0x92401c41 },
+        .{ .op = .@"and", .imm = 0x3fff, .word = 0x92403441 },
+        .{ .op = .orr, .imm = 0x1000, .word = 0xb2740041 },
+        .{ .op = .eor, .imm = 0x5555555555555555, .word = 0xd200f041 },
+        .{ .op = .@"and", .imm = 0xfffffffffffffff0, .word = 0x927cec41 },
+        .{ .op = .@"and", .imm = 0x8000000000000000, .word = 0x92410041 },
+        .{ .op = .eor, .imm = 0x7fffffffffffffff, .word = 0xd240f841 },
+        .{ .op = .@"and", .imm = 0xff00ff00ff00ff00, .word = 0x92089c41 },
+        .{ .op = .orr, .imm = 3, .word = 0xb2400441 },
+        .{ .op = .@"and", .imm = 0x7ffffffffffffffe, .word = 0x927ff441 },
+    }) |c| try testing.expectEqual(c.word, logicImm(c.op, 1, 2, bitmaskImm(c.imm).?));
+    try testing.expectEqual(@as(u32, 0xb2407fe3), logicImm(.orr, 3, XZR, bitmaskImm(0xffffffff).?));
+    for ([_]u64{ 0, ~@as(u64, 0), 5, 0x1234, 0xff00ff00ff00ff01, 0x8000000000000005 }) |x|
+        try testing.expectEqual(@as(?u13, null), bitmaskImm(x));
+}
+
+test "logical immediates decode back to their value" {
+    var prng = std.Random.DefaultPrng.init(1);
+    const rand = prng.random();
+    var n: usize = 0;
+    while (n < 20000) : (n += 1) {
+        const x = switch (n % 3) {
+            0 => rand.int(u64),
+            1 => blk: {
+                const size: u7 = @as(u7, 2) << rand.uintLessThan(u3, 6);
+                const ones = rand.uintLessThan(u7, size - 1) + 1;
+                var e: u64 = if (ones == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(ones)) - 1;
+                const r = rand.uintLessThan(u7, size);
+                const m: u64 = if (size == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(size)) - 1;
+                if (r != 0) e = ((e << @intCast(r)) | (e >> @intCast(size - r))) & m;
+                var v: u64 = 0;
+                var k: u7 = 0;
+                while (k < 64) : (k += size) v |= e << @intCast(k);
+                break :blk v;
+            },
+            else => rand.int(u64) & rand.int(u64) & rand.int(u64),
+        };
+        const enc = bitmaskImm(x) orelse continue;
+        try testing.expectEqual(x, decodeBitmask(enc));
+    }
+}
+
+/// The ARM DecodeBitMasks pseudocode, as the oracle for `bitmaskImm`.
+fn decodeBitmask(enc: u13) u64 {
+    const n = enc >> 12;
+    const immr: u6 = @intCast((enc >> 6) & 0x3F);
+    const imms: u6 = @intCast(enc & 0x3F);
+    const combined: u7 = (@as(u7, @intCast(n)) << 6) | (~imms & 0x3F);
+    const len: u3 = @intCast(6 - @clz(combined));
+    const size: u7 = @as(u7, 1) << len;
+    const levels: u6 = @intCast(size - 1);
+    const s = imms & levels;
+    const r = immr & levels;
+    const m: u64 = if (size == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(size)) - 1;
+    const welem: u64 = if (s + 1 == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(@as(u7, s) + 1)) - 1;
+    const elem = if (r == 0) welem else ((welem >> r) | (welem << @intCast(size - r))) & m;
+    var v: u64 = 0;
+    var k: u7 = 0;
+    while (k < 64) : (k += size) v |= elem << @intCast(k);
+    return v;
+}
+
 test "bitwise, shift, and select encoders" {
     try testing.expectEqual(@as(u32, 0x8A010000), andReg(0, 0, 1)); // and x0,x0,x1
     try testing.expectEqual(@as(u32, 0xAA010000), orrReg(0, 0, 1)); // orr x0,x0,x1
@@ -1032,16 +1147,30 @@ test "branch patchers preserve opcode + identity" {
     try testing.expectEqual(@as(u32, 0x14000004), patchB(b(0), 4)); // b +4
 }
 
-test "movImm64 round-trips" {
-    const cases = [_]i64{ 0, 40, -1, std.math.minInt(i64), @bitCast(@as(u64, 0xFFFFFFFFFFFFFFFF)) };
-    for (cases) |value| {
+test "movImm64 round-trips in the fewest words" {
+    const Case = struct { value: i64, words: usize };
+    const cases = [_]Case{
+        .{ .value = 0, .words = 1 },
+        .{ .value = 40, .words = 1 },
+        .{ .value = -1, .words = 1 },
+        .{ .value = std.math.minInt(i64), .words = 1 },
+        .{ .value = std.math.maxInt(i64), .words = 1 },
+        .{ .value = 0x10000, .words = 1 },
+        .{ .value = 0xFFFFFFFF, .words = 1 },
+        .{ .value = 0x12345678, .words = 2 },
+        .{ .value = -2, .words = 1 },
+        .{ .value = -0x12340001, .words = 1 },
+        .{ .value = 0x1234_0000_5678, .words = 2 },
+        .{ .value = @bitCast(@as(u64, 0x1234_5678_9ABC_DEF0)), .words = 4 },
+        .{ .value = @bitCast(@as(u64, 0xFFFF_1234_FFFF_5678)), .words = 2 },
+        .{ .value = @bitCast(@as(u64, 0x0000_FFFF_0000_1234)), .words = 2 },
+    };
+    for (cases) |c| {
         var buf: [16]u8 = undefined;
         var len: usize = 0;
-        movImm64(&buf, &len, 3, value);
-        try testing.expect(len % 4 == 0);
-        try testing.expect(len >= 4 and len <= 16);
+        movImm64(&buf, &len, 3, c.value);
+        try testing.expectEqual(c.words * 4, len);
 
-        // Decode the emitted movz/movk lanes back into a u64 and compare.
         var reg: u64 = 0;
         var i: usize = 0;
         while (i < len) : (i += 4) {
@@ -1049,11 +1178,17 @@ test "movImm64 round-trips" {
             try testing.expectEqual(@as(u32, 3), w & 0x1F); // rd == x3
             const hw: u6 = @intCast((w >> 21) & 0x3);
             const imm16: u64 = (w >> 5) & 0xFFFF;
-            const is_movz = (w & 0xFF800000) == 0xD2800000;
-            const is_movk = (w & 0xFF800000) == 0xF2800000;
-            try testing.expect(is_movz or is_movk);
-            reg |= imm16 << (hw * 16);
+            const lane_mask = @as(u64, 0xFFFF) << (hw * 16);
+            switch (w & 0xFF800000) {
+                0xD2800000 => reg = imm16 << (hw * 16),
+                0x92800000 => reg = ~(imm16 << (hw * 16)),
+                0xF2800000 => reg = (reg & ~lane_mask) | (imm16 << (hw * 16)),
+                else => {
+                    try testing.expectEqual(@as(u32, 0xB2000000 | (XZR << 5) | 3), w & 0xFF8003FF);
+                    reg = decodeBitmask(@intCast((w >> 10) & 0x1FFF));
+                },
+            }
         }
-        try testing.expectEqual(@as(u64, @bitCast(value)), reg);
+        try testing.expectEqual(@as(u64, @bitCast(c.value)), reg);
     }
 }

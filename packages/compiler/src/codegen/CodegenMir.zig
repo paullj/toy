@@ -64,7 +64,9 @@ pub fn lowerMir(
         error.OutOfMemory => return error.OutOfMemory,
         error.Unsupported => return fail(gpa, func, diags, "internal compiler error: codegen met a value shape it does not cover"),
     };
-    try Peephole.run(gpa, &mf);
+    const rooted_slots = try FrameLayout.rootedSlots(gpa, func, layouts, enum_layouts);
+    defer gpa.free(rooted_slots);
+    try Peephole.run(gpa, &mf, .{ .rooted_slots = rooted_slots });
     if (std.debug.runtime_safety) {
         std.debug.assert(try mf.tempsStayLocal(gpa));
         std.debug.assert(!mf.namesAny(Target.reserved));
@@ -231,7 +233,7 @@ fn addFn(gpa: std.mem.Allocator) !Ir.Function {
     };
 }
 
-test "mir: a fn lowers through MIR with the x29 frame, its params stored to their slots, its lines kept" {
+test "mir: a fn lowers through MIR with the x29 frame, its int params kept in their registers, its lines kept" {
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
@@ -243,8 +245,9 @@ test "mir: a fn lowers through MIR with the x29 frame, its params stored to thei
     try testing.expectEqual(Aarch64.stpFpLrPre, wordsOf(fc)[0]);
     try testing.expectEqual(Aarch64.movFpSp, wordsOf(fc)[1]);
     try testing.expectEqual(Aarch64.ret, wordsOf(fc)[wordsOf(fc).len - 1]);
-    try testing.expect(hasWord(fc, Aarch64.strRegUoff(0, Aarch64.SP, fl.slot_off[0])));
-    try testing.expect(hasWord(fc, Aarch64.strRegUoff(1, Aarch64.SP, fl.slot_off[1])));
+    // No param slot holds a reference, so neither is written or read.
+    try testing.expect(!hasWord(fc, Aarch64.strRegUoff(0, Aarch64.SP, fl.slot_off[0])));
+    try testing.expect(!hasWord(fc, Aarch64.strRegUoff(1, Aarch64.SP, fl.slot_off[1])));
     try testing.expectEqual(@as(u32, 0), fc.lines[0].line);
     try testing.expectEqual(@as(u32, 2), fc.lines[fc.lines.len - 1].line);
 }
@@ -257,9 +260,9 @@ test "mir: linear scan keeps the values in registers: no value cells, the sum st
     defer fc.deinit(gpa);
     // Two param slots only: 16 bytes, and no cell for any of the five values.
     try testing.expect(hasWord(fc, Aarch64.subImm(Aarch64.SP, Aarch64.SP, 16)));
-    try testing.expect(hasWord(fc, Aarch64.addReg(0, 10, 11)));
-    // prologue (3) + 2 param stores + 2 slot addresses and loads + add + epilogue (3)
-    try testing.expect(wordsOf(fc).len <= 13);
+    try testing.expect(hasWord(fc, Aarch64.addReg(0, 0, 1)));
+    // prologue (3) + add + epilogue (3)
+    try testing.expectEqual(@as(usize, 7), wordsOf(fc).len);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, fc.root_bitmap);
     try testing.expectEqual(@as(usize, 0), fc.safepoint_maps.len);
 }
@@ -311,6 +314,85 @@ test "mir: a reference live across a safepoint gets a stack-map row naming its s
     try testing.expectEqual(Aarch64.bl(0), wordsOf(fc)[row.code_off / 4]);
     try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, row.payload[0..4], .little));
     try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, row.payload[8..12], .little));
+}
+
+test "mir: a reference param keeps its store, the collector's root, and is not reloaded" {
+    const gpa = testing.allocator;
+    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "text_base" });
+    defer func.deinit(gpa);
+    var fc = try lowerOk(gpa, &func);
+    defer fc.deinit(gpa);
+    var stores: usize = 0;
+    for (wordsOf(fc)) |w| {
+        if (w & ~@as(u32, 0x1F) == Aarch64.strRegUoff(0, Aarch64.SP, 0)) stores += 1;
+        try testing.expect(w & ~@as(u32, 0x1F) != Aarch64.ldrRegUoff(0, Aarch64.SP, 0));
+    }
+    try testing.expectEqual(@as(usize, 1), stores);
+}
+
+/// `fn f(x: T) -> T { ret x <op> k }` for the shift `op` and a constant amount `k`.
+fn shiftFn(gpa: std.mem.Allocator, ty: Type, op: std.meta.Tag(Ir.Op), k: i64) !Ir.Function {
+    const values = try gpa.alloc(Ir.ValueDef, 4);
+    values[0] = .{ .type = Type.int };
+    for (values[1..]) |*v| v.* = .{ .type = ty };
+    const slots = try gpa.alloc(Ir.Slot, 1);
+    slots[0] = .{ .type = ty };
+    const instrs = try gpa.alloc(Ir.Instr, 4);
+    instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
+    instrs[1] = .{ .result = 1, .op = .{ .load = .{ .addr = 0, .ty = ty } } };
+    instrs[2] = .{ .result = 2, .op = .{ .iconst = k } };
+    const bin: Ir.Bin = .{ .lhs = 1, .rhs = 2 };
+    instrs[3] = .{ .result = 3, .op = switch (op) {
+        .shl => .{ .shl = bin },
+        .lshr => .{ .lshr = bin },
+        else => .{ .ashr = bin },
+    } };
+    const blocks = try gpa.alloc(Ir.Block, 1);
+    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = instrs, .term = .{ .ret = .{ .value = 3 } } };
+    const params = try gpa.alloc(Ir.SlotId, 1);
+    params[0] = 0;
+    return .{
+        .name = .{ .kind = .user_fn, .name = "f" },
+        .params = params,
+        .ret_type = ty,
+        .slots = slots,
+        .values = values,
+        .blocks = blocks,
+        .entry = 0,
+        .exit = 0,
+    };
+}
+
+test "mir: a shift by a constant is one immediate shift, or the 0 or sign fill past the width" {
+    const gpa = testing.allocator;
+    const Case = struct { ty: Type, op: std.meta.Tag(Ir.Op), k: i64, word: ?u32 };
+    const int32 = Type.int32;
+    for ([_]Case{
+        .{ .ty = Type.int, .op = .ashr, .k = 14, .word = Aarch64.shiftImm(.asr, 0, 0, 14) },
+        .{ .ty = Type.int, .op = .lshr, .k = 63, .word = Aarch64.shiftImm(.lsr, 0, 0, 63) },
+        .{ .ty = Type.int, .op = .shl, .k = 1, .word = Aarch64.shiftImm(.lsl, 0, 0, 1) },
+        .{ .ty = Type.int, .op = .shl, .k = 0, .word = null },
+        .{ .ty = Type.int, .op = .shl, .k = 64, .word = Aarch64.movz(0, 0, 0) },
+        .{ .ty = Type.int, .op = .lshr, .k = -1, .word = Aarch64.movz(0, 0, 0) },
+        .{ .ty = Type.int, .op = .ashr, .k = 64, .word = Aarch64.asrImm(0, 0, 63) },
+        .{ .ty = Type.int, .op = .ashr, .k = std.math.minInt(i64), .word = Aarch64.asrImm(0, 0, 63) },
+        .{ .ty = int32, .op = .ashr, .k = 32, .word = Aarch64.asrImm(0, 0, 63) },
+        .{ .ty = int32, .op = .shl, .k = 31, .word = Aarch64.sxtw(0, 0) },
+    }) |c| {
+        var func = try shiftFn(gpa, c.ty, c.op, c.k);
+        defer func.deinit(gpa);
+        var fc = try lowerOk(gpa, &func);
+        defer fc.deinit(gpa);
+        // No guard: no compare, no select, no register-amount shift.
+        for (wordsOf(fc)) |w| {
+            try testing.expect(w & 0xFF20001F != 0xEB00001F and w & 0xFF00001F != 0xF100001F);
+            try testing.expect(w & 0xFFE00C00 != 0x9A800000);
+            try testing.expect(w & 0xFFE0F000 != 0x9AC02000);
+        }
+        if (c.word) |w| try testing.expect(hasWord(fc, w));
+        // prologue (3) + at most a shift and a re-normalize + epilogue (3)
+        try testing.expect(wordsOf(fc).len <= 8);
+    }
 }
 
 test "mir: a call to a core/rt fn is no safepoint and gets no stack-map row" {

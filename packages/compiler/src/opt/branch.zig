@@ -250,7 +250,8 @@ pub fn elimUnreachable(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.S
         }.each);
     }
     if (func.entry < n) func.entry = remap[func.entry];
-    if (func.exit < n and remap[func.exit] != Ir.none_block) func.exit = remap[func.exit];
+    // A fn that never returns loses its exit block: `exit` then names no block.
+    if (func.exit < n) func.exit = remap[func.exit];
 
     stats.blocks_removed += (n - kept);
     return true;
@@ -427,6 +428,32 @@ test "merge: not into a block with a second predecessor, nor across a slot arg" 
         try testing.expect(func.blocks[0].term == .br);
         try testing.expectEqual(@as(usize, 1), func.blocks[0].instrs.len);
     }
+}
+
+test "unreachable-elim: dropping the exit block of a fn that never returns leaves exit naming no block" {
+    const gpa = testing.allocator;
+    // b0: %0=bconst false; cond_br %0,b1,b2   b1 (exit): ret   b2: panic
+    var b0_instrs = try gpa.alloc(Ir.Instr, 1);
+    b0_instrs[0] = .{ .result = 0, .op = .{ .bconst = false } };
+    var blocks = try gpa.alloc(Ir.Block, 3);
+    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = b0_instrs, .term = .{ .cond_br = .{ .cond = 0, .t = 1, .f = 2 } } };
+    blocks[1] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = try gpa.alloc(Ir.Instr, 0), .term = .{ .ret = .none } };
+    blocks[2] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = try gpa.alloc(Ir.Instr, 0), .term = .{ .panic = .div_by_zero } };
+    var func = Ir.Function{
+        .name = .{ .kind = .user_fn, .name = "t" },
+        .params = try gpa.alloc(Ir.SlotId, 0),
+        .ret_type = Ir.Type.unit,
+        .slots = try gpa.alloc(Ir.Slot, 0),
+        .values = try intVals(gpa, 1),
+        .blocks = blocks,
+        .entry = 0,
+        .exit = 1,
+    };
+    defer func.deinit(gpa);
+    var st: Opt.Stats = .{};
+    try testing.expect(try run(gpa, &func, &st));
+    try testing.expectEqual(@as(usize, 1), func.blocks.len);
+    try testing.expectEqual(Ir.none_block, func.exit);
 }
 
 test "no-op when cond is not a constant" {

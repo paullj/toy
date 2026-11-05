@@ -64,6 +64,8 @@ const S = struct {
     line: u32 = Ir.no_line,
     /// An aggregate value the current instruction writes as a scalar (`def`).
     pending: ?struct { t: Reg, v: Ir.ValueId } = null,
+    /// Per IR value, its constant when an `iconst` defines it.
+    consts: []?i64 = &.{},
 
     fn emit(s: *S, op: Inst.Op) error{OutOfMemory}!void {
         try s.f.blocks[s.block].insts.append(s.gpa, .{ .op = op, .line = s.line });
@@ -129,6 +131,15 @@ const S = struct {
         std.debug.assert(s.ir.entry == 0);
         const refs = try GcFacts.valueRefs(s.gpa, s.ir, s.in.layouts, s.in.enum_layouts);
         defer s.gpa.free(refs);
+        s.consts = try s.gpa.alloc(?i64, s.ir.values.len);
+        defer s.gpa.free(s.consts);
+        @memset(s.consts, null);
+        for (s.ir.blocks) |blk| for (blk.instrs) |ins| switch (ins.op) {
+            .iconst => |k| if (ins.result != Ir.none_value) {
+                s.consts[ins.result] = k;
+            },
+            else => {},
+        };
         for (s.ir.values, refs, 0..) |vd, ref, i| {
             const class: Mir.RegClass = if (vd.type.kind == .float) .fpr else .gpr;
             const r = try s.f.newVReg(s.gpa, class, .{ .value = @intCast(i) });
@@ -405,12 +416,28 @@ const S = struct {
     }
 
     /// Go semantics: an amount of the width or more gives 0 (or the sign fill), which the
-    /// register-amount shifts, masking the amount mod 64, would not.
+    /// register-amount shifts, masking the amount mod 64, would not. A constant amount
+    /// needs no guard: it is one immediate shift, or the 0 or sign fill outright.
     fn shift(s: *S, res: Ir.ValueId, b: Ir.Bin, op: std.meta.Tag(Ir.Op)) Error!void {
         const ty = s.valueType(res);
         const width: u12 = @intCast(ty.intBits());
         const d = try s.def(res);
         const lhs = try s.val(b.lhs);
+        if (s.consts[b.rhs]) |k| {
+            const amt: u64 = @bitCast(k);
+            const sh: Inst.Shift = switch (op) {
+                .shl => .lsl,
+                .lshr => .lsr,
+                else => .asr,
+            };
+            try s.emit(if (amt >= width)
+                if (op == .ashr) .{ .unary = .{ .op = .asr63, .rd = d, .rn = lhs } } else .{ .mov_imm = .{ .rd = d, .imm = 0 } }
+            else if (amt == 0)
+                .{ .mov = .{ .rd = d, .rn = lhs } }
+            else
+                .{ .shift_imm = .{ .op = sh, .rd = d, .rn = lhs, .amt = @intCast(amt) } });
+            return s.normalize(d, ty);
+        }
         const amt = try s.val(b.rhs);
         const zr = Reg.gp(Aarch64.XZR);
         if (op == .ashr) {

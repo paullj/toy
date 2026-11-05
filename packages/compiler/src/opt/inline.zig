@@ -136,7 +136,7 @@ pub fn fits(callee: *const Ir.Function, max: usize) bool {
     if (callee.c_abi or Ir.instrCount(callee) > max or calls(callee, callee.name.name)) return false;
     if (hasCycle(callee) or readsFrame(callee)) return false;
     // A callee that never returns had its exit block dropped as unreachable, leaving
-    // `exit` naming no block or one that does not `ret`.
+    // `exit` naming no block.
     return callee.exit < callee.blocks.len and callee.blocks[callee.exit].term == .ret;
 }
 
