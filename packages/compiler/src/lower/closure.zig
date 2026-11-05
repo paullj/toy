@@ -59,8 +59,8 @@ pub fn lowerLambda(
 /// A lambda unit's prologue: copy each capture out of the env into a local slot of its
 /// own and bind the owner's slot to it, so the body (and any lambda nested in it, which
 /// copies from these slots in turn) reads captures like any local. A capture held in a cell
-/// lives at the cell pointer instead, shared with the owner; one held by address (a `mut`
-/// param, or a local this lowering keeps in the owner's frame) at that address.
+/// lives at the cell pointer instead, shared with the owner, as does a local this lowering
+/// keeps in the owner's frame; a `mut` param at the address its env word holds.
 fn bindCaptures(b: *Builder, unit: Closure.LambdaUnit, env_slot: Ir.SlotId) error{OutOfMemory}!void {
     if (unit.env_size == 0) return;
     const tok = b.in.tree.nodes[unit.node.int()].main_token;
@@ -69,8 +69,10 @@ fn bindCaptures(b: *Builder, unit: Closure.LambdaUnit, env_slot: Ir.SlotId) erro
     for (unit.env) |es| switch (b.in.closure.storage.hold(es.slot)) {
         // A non-self `mut` param's stores are staged in its owner, so they are here too.
         .param_addr => try bindAddressCapture(b, es, env, !isSelfParam(b, unit.fn_node, es.slot)),
-        .frame_addr => try bindAddressCapture(b, es, env, false),
-        .cell => {
+        // Bound like a cell, as a root: when the owner's frame overflows, its lowering
+        // keeps the local in a cell after all (`Engine.lowerFitted`), which this unit
+        // cannot see, and the collector skips a word that points into a frame.
+        .frame_addr, .cell => {
             const sid = try b.addSlot(Typecheck.Type.rawptr);
             try b.homes.put(b.gpa, es.slot, .{ .cell = sid });
             const src = try b.emit(.{ .field_addr = .{ .base = env, .off = es.off, .ty = Typecheck.Type.rawptr } }, Typecheck.Type.int);

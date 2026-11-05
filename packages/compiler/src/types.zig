@@ -2574,7 +2574,7 @@ pub fn checkGraph(
     const lambda_units = try ClosureTables.buildLambdaUnits(gpa, t.graph, bodies, layouts, enum_layouts);
     errdefer Closure.freeLambdaUnits(gpa, lambda_units);
     adapters = try ClosureTables.appendCallbackAdapters(gpa, t.graph, bodies, instances, fns, sigs, methods, derives, lambda_units, layouts, adapters);
-    var esc = try ClosureTables.analyzeEscapes(&t, fns, sigs, node_types, callees, bodies, instances, methods, lambda_units, layouts, enum_layouts);
+    var esc = try ClosureTables.analyzeEscapes(&t, fns, sigs, node_types, callees, bodies, instances, methods, lambda_units, layouts);
     defer esc.deinit(gpa);
     try runtime_rule.check(&t, bodies, sigs, methods, instances, derives, layouts);
     const owner_closures = try ClosureTables.buildOwnerClosures(gpa, bodies, esc.unboxable);
@@ -14307,7 +14307,7 @@ test "a field wins over a method in value position" {
     }
 }
 
-test "past the owner's frame-env budget a non-escaping closure keeps a heap env" {
+test "a non-escaping closure keeps a frame env whatever its size or its owner's other envs" {
     const gpa = testing.allocator;
     var c = try checkSource(
         \\struct Big { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int, p: int, q: int, r: int, s: int, t: int }
@@ -14323,11 +14323,10 @@ test "past the owner's frame-env budget a non-escaping closure keeps a heap env"
     try testing.expectEqual(@as(usize, 0), c.result.diags.len);
     var got: [3]bool = undefined;
     for (c.result.lambda_units, &got) |u, *g| g.* = u.frame_env != null;
-    // 160 + 160 > 256: the second goes to the heap; the 8-byte third still fits.
-    try testing.expectEqualSlices(bool, &.{ true, false, true }, &got);
+    try testing.expectEqualSlices(bool, &.{ true, true, true }, &got);
 }
 
-test "a captured-and-mutated local over 16 bytes stays boxed" {
+test "a captured-and-mutated local of any size that only non-escaping closures capture is unboxed" {
     const gpa = testing.allocator;
     var c = try checkSource(
         \\struct Acc { a: int, b: int, n: int }
@@ -14347,9 +14346,53 @@ test "a captured-and-mutated local over 16 bytes stays boxed" {
     try testing.expectEqual(@as(usize, 0), c.result.diags.len);
     const oc = c.result.owner_closures[0];
     try testing.expectEqualSlices(u32, &.{ 0, 1 }, boxedOf(&c, oc));
-    try testing.expectEqualSlices(u32, &.{1}, oc.unboxable);
-    try testing.expectEqual(Closure.Hold.cell, Closure.ownerStorage(c.result.bodies, c.result.owner_closures, oc.owner, true).hold(0));
+    try testing.expectEqualSlices(u32, &.{ 0, 1 }, oc.unboxable);
+    try testing.expectEqual(Closure.Hold.frame_addr, Closure.ownerStorage(c.result.bodies, c.result.owner_closures, oc.owner, true).hold(0));
     try testing.expect(c.result.lambda_units[0].frame_env != null);
+}
+
+test "a closure captured by a non-escaping closure that only calls it keeps a frame env; by an escaping one, a heap env" {
+    const gpa = testing.allocator;
+    var c = try checkSource(
+        \\fn run(f: fn() -> int) -> int { f() }
+        \\fn keep(f: fn() -> int) -> fn() -> int { f }
+        \\fn inner(mut n: int) -> int {
+        \\ k := 5
+        \\ g := fn(x: int) -> int { n = n + x
+        \\  x + k }
+        \\ h := fn() -> int { g(1) }
+        \\ return h() + run(fn() -> int { g(2) })
+        \\}
+        \\fn outer() -> fn() -> int {
+        \\ k := 5
+        \\ g := fn(x: int) -> int { x + k }
+        \\ keep(fn() -> int { g(1) })
+        \\}
+        \\fn main() -> int {
+        \\ a := 1
+        \\ return inner(a) + outer()()
+        \\}
+        \\
+    );
+    defer c.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), c.result.diags.len);
+    var where: std.ArrayList(u8) = .empty;
+    defer where.deinit(gpa);
+    for (c.result.lambda_units) |u| try where.print(gpa, "{s}:{c} ", .{ u.name, @as(u8, if (u.frame_env != null) 'f' else 'h') });
+    try testing.expectEqualStrings("main.inner$l0:f main.inner$l1:f main.inner$l2:f main.outer$l0:h main.outer$l1:h ", where.items);
+    // The escaping capture of `g` still makes a `mut` param it captures an error.
+    try expectOnlyDiag(
+        \\fn keep(f: fn() -> int) -> fn() -> int { f }
+        \\fn f(mut n: int) -> fn() -> int {
+        \\ g := fn() -> int { n }
+        \\ keep(fn() -> int { g() })
+        \\}
+        \\fn main() -> int {
+        \\ a := 1
+        \\ return f(a)()
+        \\}
+        \\
+    , .T0052);
 }
 
 test "a bound method on a mut param gets the $boundref adapter; on a boxed local still $boundbox" {

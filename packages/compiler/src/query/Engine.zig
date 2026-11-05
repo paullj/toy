@@ -502,18 +502,23 @@ pub const Fitted = union(enum) {
     }
 };
 
-/// Lower one body and run the opt stage on it in place. When the body's owner keeps a
-/// frame env and the optimized fixed frame would overflow codegen's budget, the body is
-/// lowered again with every env in a GC cell, so a frame env alone does not fail an -O1
-/// build that builds at -O0. A lambda unit reads its env the same way wherever it lives,
-/// so the fallback stays local to this body, and it is a pure function of the body's
-/// inputs. Register allocation keeps scalar values out of the frame, but one local struct
-/// or enum can still fill most of the 16 MiB frame, so the check stays until env storage
-/// has one owner (#205). Only the fixed layout is measured, since the allocator's spill
-/// slots are known only after codegen: a frame-env body within a few spill slots of the
-/// cap can still fail -O1 with codegen's frame diagnostic where its -O0 build fits. A
-/// lowering that reports a diagnostic is returned before the opt stage sees it, for the
-/// caller to fail on. `stats` are the final lowering's.
+/// Lower one body and run the opt stage on it in place. This is the one place that decides
+/// where an env, or a boxed local the escape pass unboxes, lives: the escape pass marks
+/// every closure that never outlives its maker as one whose env may live in a frame, and
+/// every local only such closures capture as one that may leave its cell, with no budget,
+/// since only the lowering knows the frame. When the optimized fixed frame of a body that
+/// keeps either in its frame would overflow codegen's cap (`FrameLayout.MAX_FRAME`), the
+/// body is lowered again with every env and every box in a GC cell, as at -O0, so frame
+/// storage alone does not fail an -O1 build that builds at -O0. A lambda unit reads its env
+/// the same way wherever it lives, and reads an unboxed local through the address its env
+/// holds as it reads a cell (the cell stays rooted by its owner's frame and the env), so
+/// the fallback stays local to this body, and it is a pure function of the body's inputs.
+/// A lambda unit's own fallback keeps its owner's storage, which decides what its env
+/// words hold. Only the fixed layout is measured, since the allocator's spill slots are
+/// known only after codegen: a body within a few spill slots of the cap can still fail -O1
+/// with codegen's frame diagnostic where its -O0 build fits. A lowering that reports a
+/// diagnostic is returned before the opt stage sees it, for the caller to fail on. `stats`
+/// are the final lowering's.
 pub fn lowerFitted(
     gpa: std.mem.Allocator,
     in: lower.Inputs,
@@ -533,12 +538,15 @@ pub fn lowerFitted(
         try Opt.optimize(gpa, &irf, cfg, callees, stats);
         const c = in.closure;
         const owner = c.owner orelse return irf;
-        if (!c.frame_envs or !Closure.ownerHasFrameEnv(c.lambda_units, owner)) return irf;
+        const frame_env = c.frame_envs and Closure.ownerHasFrameEnv(c.lambda_units, owner);
+        const unboxed = body == .source and c.storage.frame_addrs.len != 0;
+        if (!frame_env and !unboxed) return irf;
         if (try FrameLayout.fits(gpa, &irf, in.layouts, in.enum_layouts)) return irf;
         irf.deinit(gpa);
     }
     var heap = in;
     heap.closure.frame_envs = false;
+    if (body == .source) heap.closure.storage.frame_addrs = &.{};
     var irf = try body.run(gpa, heap, sym, diags);
     errdefer irf.deinit(gpa);
     stats.* = .{};

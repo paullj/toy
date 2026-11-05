@@ -4,10 +4,12 @@
 //! body is checked, at every opt level, because it decides T0052; codegen reads only the
 //! storage it allows, through the closure tables.
 //!
-//! A value escapes unless each use of it is a call of it, or passes it whole to a by-value
-//! param of a known body whose summary says that param does not escape. Summaries are
-//! solved bottom-up over the call graph's strongly connected components; an argument to a
-//! body in the caller's own component escapes, so recursion never needs a fixpoint.
+//! A value escapes unless each use of it is a call of it, passes it whole to a by-value
+//! param of a known body whose summary says that param does not escape, or captures it in
+//! a closure that does not escape. A closure's body is walked as part of its owner's, so
+//! what the closure does with a capture counts as a use in the owner. Summaries are solved
+//! bottom-up over the call graph's strongly connected components; an argument to a body in
+//! the caller's own component escapes, so recursion never needs a fixpoint.
 
 const std = @import("std");
 const Ast = @import("../ast/Ast.zig");
@@ -17,15 +19,6 @@ const Closure = @import("Closure.zig");
 const Modes = @import("Modes.zig");
 const LayoutEngine = @import("../layout/Engine.zig");
 const Body = @import("Body.zig");
-
-/// The env bytes one owner may keep in frames, over all its lambdas; a unit past it keeps a
-/// GC cell, so frame envs grow a frame by at most this much.
-pub const frame_budget: u32 = 256;
-
-/// The largest captured local (`roundUp8` of its size; a `str` is 16) that a lowering may
-/// keep unboxed: no bigger than the cell pointer and box setup it replaces, so unboxing
-/// never grows a frame.
-pub const unbox_max: u32 = 16;
 
 /// The body a call runs, by its index in the body list (its escape unit), and how many
 /// params precede its first argument (1 for a method's receiver). A generic template read
@@ -87,15 +80,20 @@ pub const Site = struct {
 
 pub const SlotDep = struct { slot: u32, dep: Dep };
 
+/// Local `slot` is captured by the closure made at `site` (each fn of a linked group lists
+/// the group's captures, so the slot escapes when any of them does).
+pub const SlotCapture = struct { slot: u32, site: Ast.Index };
+
 /// What one walk of a body records.
 pub const Facts = struct {
     /// The body's own params: resolver slots `0..nparams`.
     nparams: u32 = 0,
-    /// Bit `s`: local `s` is used where a value outlives the call (or is captured), whatever
-    /// its callees do.
+    /// Bit `s`: local `s` is used where a value outlives the call, whatever its callees do.
     escapes: std.DynamicBitSetUnmanaged = .{},
     /// Every whole-argument use of a local by a known body, sorted by slot.
     deps: []SlotDep = &.{},
+    /// Every capture of a local by a closure site of this body.
+    captures: []SlotCapture = &.{},
     /// Every known body this one passes a function value to, in walk order (repeats
     /// allowed): the only call edges a closure can travel.
     calls: []u32 = &.{},
@@ -107,6 +105,7 @@ pub const Facts = struct {
     pub fn deinit(f: *Facts, gpa: std.mem.Allocator) void {
         f.escapes.deinit(gpa);
         gpa.free(f.deps);
+        gpa.free(f.captures);
         gpa.free(f.calls);
         gpa.free(f.sites);
         gpa.free(f.bound_recv);
@@ -121,17 +120,6 @@ pub const Facts = struct {
             }
         }.order) orelse return null;
         return f.sites[i].use;
-    }
-
-    fn depsOf(f: Facts, slot: u32) []const SlotDep {
-        const lo = std.sort.lowerBound(SlotDep, f.deps, slot, struct {
-            fn order(key: u32, d: SlotDep) std.math.Order {
-                return std.math.order(key, d.slot);
-            }
-        }.order);
-        var hi = lo;
-        while (hi < f.deps.len and f.deps[hi].slot == slot) hi += 1;
-        return f.deps[lo..hi];
     }
 };
 
@@ -276,8 +264,9 @@ pub fn factsOf(
         v.bound_recv.deinit(gpa);
     }
     try Walk.walk(src, decl, &v);
-    // A captured local is copied or shared into a closure the walk does not follow.
-    if (closures) |fc| for (fc.boundaries) |b| for (b.captures) |c| try v.escape(c.slot);
+    var captures: std.ArrayList(SlotCapture) = .empty;
+    defer captures.deinit(gpa);
+    if (closures) |fc| for (fc.boundaries) |b| for (b.captures) |c| try captures.append(gpa, .{ .slot = c.slot, .site = b.node });
 
     std.mem.sort(SlotDep, v.deps.items, {}, struct {
         fn lt(_: void, a: SlotDep, b: SlotDep) bool {
@@ -294,6 +283,7 @@ pub fn factsOf(
     v.escapes = .{};
     errdefer f.escapes.deinit(gpa);
     f.deps = try v.deps.toOwnedSlice(gpa);
+    f.captures = try captures.toOwnedSlice(gpa);
     f.calls = try v.calls.toOwnedSlice(gpa);
     f.sites = try v.sites.toOwnedSlice(gpa);
     f.bound_recv = try v.bound_recv.toOwnedSlice(gpa);
@@ -305,10 +295,14 @@ pub const Solution = struct {
     summary: []u64,
     /// The strongly connected component of each body.
     scc: []u32,
+    /// Bit `s` of `escaping[u]`: local `s` of body `u` may escape, its captures followed.
+    escaping: []std.DynamicBitSetUnmanaged,
 
     pub fn deinit(s: *Solution, gpa: std.mem.Allocator) void {
         gpa.free(s.summary);
         gpa.free(s.scc);
+        for (s.escaping) |*e| e.deinit(gpa);
+        gpa.free(s.escaping);
         s.* = undefined;
     }
 
@@ -319,22 +313,55 @@ pub const Solution = struct {
     }
 
     /// Whether the value in local `slot` of body `u` may escape.
-    pub fn slotEscapes(s: Solution, f: Facts, u: u32, slot: u32) bool {
-        if (slot < f.escapes.bit_length and f.escapes.isSet(slot)) return true;
-        for (f.depsOf(slot)) |d| if (s.depEscapes(u, d.dep)) return true;
-        return false;
+    pub fn slotEscapes(s: Solution, u: u32, slot: u32) bool {
+        return isSet(s.escaping[u], slot);
     }
 
     /// Whether the closure a site of body `u` makes may outlive it.
-    pub fn siteEscapes(s: Solution, f: Facts, u: u32, use: SiteUse) bool {
+    pub fn siteEscapes(s: Solution, u: u32, use: SiteUse) bool {
+        return useEscapes(s, u, s.escaping[u], use);
+    }
+
+    fn useEscapes(s: Solution, u: u32, escaping: std.DynamicBitSetUnmanaged, use: SiteUse) bool {
         return switch (use) {
             .called => false,
             .escapes => true,
             .arg => |d| s.depEscapes(u, d),
-            .local => |t| s.slotEscapes(f, u, t),
+            .local => |t| isSet(escaping, t),
         };
     }
+
+    /// Body `u`'s escaping locals: those its walk saw escape or pass to an escaping param,
+    /// then, until nothing changes, those a closure that escapes captures. The least such
+    /// set, so closures that only capture each other do not escape.
+    fn close(s: Solution, gpa: std.mem.Allocator, f: Facts, u: u32) error{OutOfMemory}!std.DynamicBitSetUnmanaged {
+        var n: usize = f.escapes.bit_length;
+        for (f.deps) |d| n = @max(n, d.slot + 1);
+        for (f.captures) |c| n = @max(n, c.slot + 1);
+        for (f.sites) |site| if (site.use == .local) {
+            n = @max(n, site.use.local + 1);
+        };
+        var set = try f.escapes.clone(gpa);
+        errdefer set.deinit(gpa);
+        try set.resize(gpa, n, false);
+        for (f.deps) |d| if (s.depEscapes(u, d.dep)) set.set(d.slot);
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (f.captures) |c| {
+                if (set.isSet(c.slot)) continue;
+                if (!s.useEscapes(u, set, f.siteUse(c.site) orelse .escapes)) continue;
+                set.set(c.slot);
+                changed = true;
+            }
+        }
+        return set;
+    }
 };
+
+fn isSet(set: std.DynamicBitSetUnmanaged, slot: u32) bool {
+    return slot < set.bit_length and set.isSet(slot);
+}
 
 /// Solve every body's summary. `facts[u]` is null for a number that is no lowered body.
 /// Tarjan's algorithm visits bodies in index order and calls in walk order, and finishes a
@@ -347,6 +374,12 @@ pub fn solve(gpa: std.mem.Allocator, facts: []const ?Facts) error{OutOfMemory}!S
     const scc = try gpa.alloc(u32, facts.len);
     errdefer gpa.free(scc);
     @memset(scc, none);
+    const escaping = try gpa.alloc(std.DynamicBitSetUnmanaged, facts.len);
+    @memset(escaping, .{});
+    errdefer {
+        for (escaping) |*e| e.deinit(gpa);
+        gpa.free(escaping);
+    }
     const index = try gpa.alloc(u32, facts.len);
     defer gpa.free(index);
     @memset(index, none);
@@ -361,7 +394,7 @@ pub fn solve(gpa: std.mem.Allocator, facts: []const ?Facts) error{OutOfMemory}!S
     defer members.deinit(gpa);
     var counter: u32 = 0;
     var comps: u32 = 0;
-    const sol: Solution = .{ .summary = summary, .scc = scc };
+    const sol: Solution = .{ .summary = summary, .scc = scc, .escaping = escaping };
 
     for (facts, 0..) |root_f, root| {
         if (root_f == null or index[root] != none) continue;
@@ -405,9 +438,10 @@ pub fn solve(gpa: std.mem.Allocator, facts: []const ?Facts) error{OutOfMemory}!S
             comps += 1;
             for (members.items) |w| {
                 const f = facts[w].?;
+                escaping[w] = try sol.close(gpa, f, w);
                 var bits: u64 = 0;
                 for (0..@min(f.nparams, 64)) |p| {
-                    if (sol.slotEscapes(f, w, @intCast(p))) bits |= @as(u64, 1) << @intCast(p);
+                    if (sol.slotEscapes(w, @intCast(p))) bits |= @as(u64, 1) << @intCast(p);
                 }
                 summary[w] = bits;
             }
@@ -473,14 +507,47 @@ test "a site escapes by its use: called, a non-escaping arg, a local" {
     defer for (&fs) |*f| f.*.?.deinit(gpa);
     var s = try solve(gpa, &fs);
     defer s.deinit(gpa);
-    const f = fs[1].?;
-    try testing.expect(!s.siteEscapes(f, 1, .called));
-    try testing.expect(s.siteEscapes(f, 1, .escapes));
-    try testing.expect(!s.siteEscapes(f, 1, .{ .arg = .{ .unit = 0, .param = 0 } }));
-    try testing.expect(s.siteEscapes(f, 1, .{ .arg = .{ .unit = 0, .param = 64 } }));
-    try testing.expect(!s.siteEscapes(f, 1, .{ .local = 3 }));
-    try testing.expect(s.siteEscapes(f, 1, .{ .local = 4 }));
-    try testing.expect(!s.siteEscapes(f, 1, .{ .local = 5 }));
+    try testing.expect(!s.siteEscapes(1, .called));
+    try testing.expect(s.siteEscapes(1, .escapes));
+    try testing.expect(!s.siteEscapes(1, .{ .arg = .{ .unit = 0, .param = 0 } }));
+    try testing.expect(s.siteEscapes(1, .{ .arg = .{ .unit = 0, .param = 64 } }));
+    try testing.expect(!s.siteEscapes(1, .{ .local = 3 }));
+    try testing.expect(s.siteEscapes(1, .{ .local = 4 }));
+    try testing.expect(!s.siteEscapes(1, .{ .local = 5 }));
+}
+
+test "a capture escapes only through a closure that escapes, followed to a fixpoint" {
+    const gpa = testing.allocator;
+    const site = Ast.Index.from;
+    // Param 0 is captured by a closure called where it is made; 2 by the closure in 3, which
+    // nothing lets out; 4 by the closure in 5, which escapes; 6 and 7 by each other's
+    // closures alone; 8 by a site the walk never saw.
+    var f = try testFacts(gpa, 1, &.{5}, &.{}, &.{});
+    var sites = [_]Site{
+        .{ .node = site(10), .use = .called, .kind = .lambda },
+        .{ .node = site(11), .use = .{ .local = 3 }, .kind = .lambda },
+        .{ .node = site(12), .use = .{ .local = 5 }, .kind = .lambda },
+        .{ .node = site(13), .use = .{ .local = 6 }, .kind = .lambda },
+        .{ .node = site(14), .use = .{ .local = 7 }, .kind = .lambda },
+    };
+    f.sites = try gpa.dupe(Site, &sites);
+    f.captures = try gpa.dupe(SlotCapture, &.{
+        .{ .slot = 0, .site = site(10) },
+        .{ .slot = 2, .site = site(11) },
+        .{ .slot = 4, .site = site(12) },
+        .{ .slot = 7, .site = site(13) },
+        .{ .slot = 6, .site = site(14) },
+        .{ .slot = 8, .site = site(15) },
+    });
+    var fs = [_]?Facts{f};
+    defer fs[0].?.deinit(gpa);
+    var s = try solve(gpa, &fs);
+    defer s.deinit(gpa);
+    try testing.expectEqual(@as(u64, 0), s.summary[0]);
+    for ([_]u32{ 0, 2, 3, 6, 7 }) |sl| try testing.expect(!s.slotEscapes(0, sl));
+    for ([_]u32{ 4, 5, 8 }) |sl| try testing.expect(s.slotEscapes(0, sl));
+    try testing.expect(!s.siteEscapes(0, .{ .local = 3 }));
+    try testing.expect(s.siteEscapes(0, .{ .local = 5 }));
 }
 
 test "a bound method site takes its use from its position, like a lambda in that position" {

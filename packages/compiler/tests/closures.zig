@@ -308,6 +308,52 @@ test "every std method that takes a closure keeps its caller's env in the frame 
     }
 }
 
+test "#40's table makes no heap allocation at -O1: a 24-byte boxed local, a 320-byte env, a closure a non-escaping closure calls" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    // Inlining off: a spliced callee's own allocation is no env or box.
+    const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_table.toy", &.{ "-O1", "--no-opt=inline" });
+    defer gpa.free(o1);
+    const o0 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_table.toy", &.{"-O0"});
+    defer gpa.free(o0);
+    for ([_][]const u8{ "hole_capture", "mut16", "mut24", "nested", "env256", "env320" }) |name| {
+        var buf: [64]u8 = undefined;
+        const owner = try std.fmt.bufPrint(&buf, "escape_table.{s}", .{name});
+        const body1 = harness.irBody(o1, owner) orelse return error.TestExpectedOwner;
+        if (std.mem.indexOf(u8, body1, "call @core/rt/gc.alloc") != null) {
+            std.debug.print("{s} allocates at -O1\n", .{owner});
+            return error.TestUnexpectedAlloc;
+        }
+        // -O0 keeps every env and box in the heap, so the check can fail.
+        const body0 = harness.irBody(o0, owner) orelse return error.TestExpectedOwner;
+        try std.testing.expect(std.mem.indexOf(u8, body0, "call @core/rt/gc.alloc") != null);
+    }
+}
+
+test "a closure a non-escaping closure leaks (returns, stores, pushes, passes to an id fn) keeps a heap env at -O1" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const ir = try harness.emitIr(gpa, io, cases_dir ++ "/escape_chain.toy", &.{ "-O1", "--no-opt=inline" });
+    defer gpa.free(ir);
+    for ([_][]const u8{ "leak_ret", "leak_struct", "leak_vec", "leak_id" }) |name| {
+        var buf: [64]u8 = undefined;
+        const owner = try std.fmt.bufPrint(&buf, "escape_chain.{s}", .{name});
+        const body = harness.irBody(ir, owner) orelse return error.TestExpectedOwner;
+        if (std.mem.count(u8, body, "call @core/rt/gc.alloc") != 1) {
+            std.debug.print("{s} does not allocate exactly g's env at -O1\n", .{owner});
+            return error.TestExpectedOneAlloc;
+        }
+    }
+}
+
 /// A `main` whose frame holds an `H.Small`, `H`'s other variant carrying `g_bytes` of
 /// nested structs, beside a 240-byte struct a lambda captures: the lambda's env is a frame
 /// env at -O1 when it fits. Nothing copies the big payload, so the frame costs no code.
@@ -394,6 +440,63 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     const lean_body = harness.irBody(lean_ir, "main") orelse return error.TestExpectedMain;
     try std.testing.expect(std.mem.indexOf(u8, lean_body, "call @core/rt/gc.alloc") == null);
     try std.testing.expect(std.mem.indexOf(u8, lean_body, ":env$main$l0") != null);
+}
+
+/// A `big` with `k` 1 MiB locals that one non-escaping lambda assigns, so the escape pass
+/// unboxes them all; `main` returns `big()`, the sum `0 + 1 + ... + k-1`.
+fn unboxedFrame(gpa: std.mem.Allocator, k: u32) ![]u8 {
+    var src: std.Io.Writer.Allocating = .init(gpa);
+    errdefer src.deinit();
+    const w = &src.writer;
+    const depth = 16;
+    try w.writeAll("struct S0 { a: int, b: int }\nfn mk0() -> S0 { S0 { a: 1, b: 2 } }\n");
+    for (1..depth + 1) |i| try w.print("struct S{d} {{ a: S{d}, b: S{d} }}\nfn mk{d}() -> S{d} {{ S{d} {{ a: mk{d}(), b: mk{d}() }} }}\n", .{ i, i - 1, i - 1, i, i, i, i - 1, i - 1 });
+    const path = ".a" ** (depth + 1);
+    try w.writeAll("fn big() -> int {\n");
+    for (0..k) |i| try w.print(" x{d} := mk{d}()\n", .{ i, depth });
+    try w.writeAll(" f := fn() {\n");
+    for (0..k) |i| try w.print("  x{d}{s} = {d}\n", .{ i, path, i });
+    try w.writeAll(" }\n f()\n return 0");
+    for (0..k) |i| try w.print(" + x{d}{s}", .{ i, path });
+    try w.writeAll("\n}\nfn main() -> int { big() }\n");
+    return src.toOwnedSlice();
+}
+
+test "a body whose -O1 frame would overflow with unboxed locals falls back to their cells" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const tmp = ".toy-test-closures-unboxed";
+    Io.Dir.cwd().deleteTree(io, tmp) catch {};
+    defer Io.Dir.cwd().deleteTree(io, tmp) catch {};
+    try Io.Dir.cwd().createDirPath(io, tmp);
+    const src = try unboxedFrame(gpa, 8);
+    defer gpa.free(src);
+    const p0 = try harness.compile(gpa, io, tmp ++ "/o0", src, &.{ "--no-cache", "-O0" });
+    defer gpa.free(p0);
+    const p1 = try harness.compile(gpa, io, tmp ++ "/o1", src, &.{ "--no-cache", "-O1", "--gc-stress" });
+    defer gpa.free(p1);
+    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(io, p0));
+    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(io, p1));
+    const path = tmp ++ "/big.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
+    const ir = try harness.emitIr(gpa, io, path, &.{ "-O1", "--no-opt=inline" });
+    defer gpa.free(ir);
+    const body = harness.irBody(ir, "big.big") orelse return error.TestExpectedBig;
+    try std.testing.expect(std.mem.indexOf(u8, body, "call @core/rt/gc.alloc") != null);
+
+    // One such local fits, and stays out of its cell: the cells above come from the fallback.
+    const lean = try unboxedFrame(gpa, 1);
+    defer gpa.free(lean);
+    const lean_path = tmp ++ "/lean.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = lean_path, .data = lean });
+    const lean_ir = try harness.emitIr(gpa, io, lean_path, &.{ "-O1", "--no-opt=inline" });
+    defer gpa.free(lean_ir);
+    const lean_body = harness.irBody(lean_ir, "lean.big") orelse return error.TestExpectedBig;
+    try std.testing.expect(std.mem.indexOf(u8, lean_body, "call @core/rt/gc.alloc") == null);
 }
 
 test "a capturing lambda passed to Vec.each in a loop triggers no collection at -O1" {

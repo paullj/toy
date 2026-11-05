@@ -99,7 +99,7 @@ fn main() -> int {
   - "Assigned" includes `x = ..`, field stores `x.f = ..`, and `mut self` method calls on `x`.
   - Parameters and loop variables follow the same rule, except a `mut` parameter: closures hold its address and it is never boxed.
   - Every use of a boxed local, in the outer function too, goes through the box.
-  - With the opt passes on (`-O1`), a local of 16 B or less that only closures that do not escape capture is not boxed: they hold its address (see Escape analysis).
+  - With the opt passes on (`-O1`), a local of any size that only closures that do not escape capture is not boxed: they hold its address (see Escape analysis).
 - **Read-only captures** are copied into the environment. With no assignments, a copy and a share are indistinguishable.
 - **Values keep today's rules:** `y := x` copies a struct and shares a `Vec` / `Map` / `Ref` handle.
 - **Loop variables:** each iteration has a fresh binding. `for i in 0..3 { fs.push(fn() { i }) }` gives closures that return 0, 1 and 2.
@@ -237,14 +237,15 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 
 ## Escape analysis
 
-- **Does not escape:** a closure each use of which is a call of it, or passes it whole to a by-value parameter that does not escape. A `:=`-bound closure is judged by its local's uses, and a local fn by its name's uses (its own body included).
-- **Escapes:** returning it, storing it (a field, a struct, enum or list literal, a `Vec`), comparing it, capturing it in another closure, assigning the local, passing it at a `mut` position, or passing it through a fn value or to a builtin, an extern or an intrinsic.
+- **Does not escape:** a closure each use of which is a call of it, passes it whole to a by-value parameter that does not escape, or captures it in another closure that does not escape. A `:=`-bound closure is judged by its local's uses, and a local fn by its name's uses (its own body included). A closure's body counts as part of the function that makes it, so what a capturing closure does with the captured one is judged there too: `h := fn() { g(1) }` only calls `g`, so `g` escapes only if `h` does.
+- **Escapes:** returning it, storing it (a field, a struct, enum or list literal, a `Vec`), comparing it, capturing it in a closure that escapes, assigning the local, passing it at a `mut` position, or passing it through a fn value or to a builtin, an extern or an intrinsic.
 - **Summaries:** which parameters of a function may escape, per function and per generic instance, computed bottom-up over the call graph. A call back into the caller's own cycle of calls that pass functions (recursion) escapes.
 - **Legality is the same at every level:** `toy check`, `-O0` and `-O1` agree on T0052. It can depend on another module's body: a callee that starts keeping its fn param makes a `mut`-param capture passed to it an error.
-- **`-O1` storage:** any one opt pass turns it on, not the level as such: `-O1` with every pass off (`--no-opt` for each) stores closures as `-O0` does, and `-O0 --opt=dce` stores them as `-O1` does. [#40](https://github.com/paullj/toy-compiler/issues/40) would lift the size limits below and give bound method values frame envs.
-  - a non-escaping env goes in the frame of the body that makes it, up to 256 B per function;
-  - past that, or when the frame would exceed codegen's limit (16 MiB), it goes in a GC cell;
-  - a captured-and-mutated local of 16 B or less that only non-escaping closures capture is not boxed: those closures hold its address;
+- **`-O1` storage:** any one opt pass turns it on, not the level as such: `-O1` with every pass off (`--no-opt` for each) stores closures as `-O0` does, and `-O0 --opt=dce` stores them as `-O1` does. [#206](https://github.com/paullj/toy-compiler/issues/206) would give bound method values frame envs.
+  - a non-escaping env goes in the frame of the body that makes it, whatever its size;
+  - a captured-and-mutated local of any size that only non-escaping closures capture is not boxed: those closures hold its address;
+  - when that frame would exceed codegen's limit (16 MiB), every env that body makes and every local it would unbox goes in a GC cell instead, as at `-O0`. The lowering decides this, the one place that knows the frame;
+  - a frame env makes the frame bigger by its size, so a recursive function that makes one reaches the stack limit at a smaller depth than at `-O0`;
   - a bound method value always gets a heap env, even when it does not escape, and its receiver stays boxed. This is the chosen default, not a limit of the analysis.
 - **`-O0`:** every env and box is on the heap. A captured `mut` param's address is a plain word in the env cell.
 - **Gate:** an `-O0` against `-O1` differential run of the corpus (same exit code and stdout).
@@ -254,7 +255,7 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 - **Tree-sitter:** lambdas, function types, nested functions, `_` capture and method pipes are in the grammar. Each lands with the syntax that introduces it. A `_` capture and a method pipe parse with the existing call, identifier and variant rules, so highlight queries alone tell them apart.
 - **LSP captures:**
   - Hover on a captured name (inside the closure that captures it, or the receiver of a bound method value) adds "captured: copied (N bytes)" for a read-only capture, N being what the copy takes in the env, or "captured: shared" for one that is captured and assigned.
-    - The LSP does not know the opt level, so it adds a storage word only where every build agrees: "shared (boxed)" when the local keeps its GC cell even with frame storage (a closure that captures it escapes, a bound method value holds it, or it is over 16 B), and "shared (by address)" for a captured `mut` parameter.
+    - The LSP does not know the opt level, so it adds a storage word only where every build agrees: "shared (boxed)" when the local keeps its GC cell even with frame storage (a closure that captures it escapes, or a bound method value holds it), and "shared (by address)" for a captured `mut` parameter.
   - An inlay hint before the body of a lambda or a local fn lists its captures, `captures base (copied), total (shared)`, with each one's detail in its tooltip. A `_` capture and a bound method value get none: every local they capture is spelled in the one expression that makes them.
   - A `mut` argument shows "mutated by f" on hover, and a `mut` inlay hint before it, since the call site has no marker. A `mut self` receiver gets the hover only: a receiver stays unmarked, as in Rust and Swift.
 - **LSP function values:**
@@ -268,7 +269,7 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 Open issues that touch this page. Each has a repro.
 
 - **Uncached closure units** ([#39](https://github.com/paullj/toy-compiler/issues/39)): lambda units, specialized copies and adapters are lowered again on every build (see Representation).
-- **Escape analysis limits** ([#40](https://github.com/paullj/toy-compiler/issues/40)): a captured and assigned local over 16 B stays boxed, frame envs share a 256 B budget per function, and a bound method value always gets a heap env (see Escape analysis).
+- **Bound method values** ([#206](https://github.com/paullj/toy-compiler/issues/206)): a bound method value always gets a heap env, and its receiver stays boxed (see Escape analysis).
 - **Local fns that call each other** ([#47](https://github.com/paullj/toy-compiler/issues/47)): the earlier one's use of the later one is R0001 (see Local named functions).
 - **Constructors in a `then` lambda** ([#49](https://github.com/paullj/toy-compiler/issues/49)): a bare `Option.none` or `Result.ok(v)` there is T0016 unless the lambda's return is annotated (see Standard library).
 - **LSP in a generic body that no instance reaches** ([#52](https://github.com/paullj/toy-compiler/issues/52)): no hover, definition or signature help on a method call there until something instantiates the body.

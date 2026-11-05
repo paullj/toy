@@ -78,8 +78,9 @@ pub const Owner = Body.Index;
 pub const OwnerClosure = struct {
     owner: Owner,
     /// The boxed slots that frame storage takes out of their cells: only closures which
-    /// never outlive their maker capture them, no bound method value holds them, and they
-    /// are at most `Escape.unbox_max` bytes. Ascending; owned.
+    /// never outlive their maker capture them and no bound method value holds them, whatever
+    /// their size. The lowering keeps them in their cells after all when the frame would not
+    /// fit (`Engine.lowerFitted`). Ascending; owned.
     unboxable: []const u32 = &.{},
 };
 
@@ -189,8 +190,9 @@ pub const LambdaUnit = struct {
     /// The env cell's byte size; 0 means the lambda's value carries a null env.
     env_size: u32 = 0,
     /// The struct id of this env laid out as a frame slot (`envStruct`), when the closure
-    /// never outlives the body that makes it and its env fits that body's budget; null
-    /// keeps the env in a GC cell. Lowering uses it only with `frame_envs` on.
+    /// never outlives the body that makes it; null keeps the env in a GC cell. Lowering uses
+    /// it only with `frame_envs` on, and drops it when the frame would not fit
+    /// (`Engine.lowerFitted`).
     frame_env: ?u32 = null,
 };
 

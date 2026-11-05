@@ -341,9 +341,10 @@ const EscapeUnit = struct {
 /// `-j`) and run at every opt level, since it decides legality: a closure that escapes
 /// cannot capture a `mut` param or `mut self` (T0052, at the first such capture in rank
 /// order), and a bound method value on one cannot escape either. It also finds the boxed
-/// slots that only non-escaping closures capture and the lambdas whose env may live in a
-/// frame (non-escaping, within the owner's budget). Units `[0, bodies)` are the bodies;
-/// the templates follow, and no call targets one.
+/// slots that only non-escaping closures capture, whatever their size, and the lambdas
+/// whose env may live in a frame: every non-escaping one. Whether either does live in the
+/// frame is the lowering's to decide (`Engine.lowerFitted`), where the frame is known.
+/// Units `[0, bodies)` are the bodies; the templates follow, and no call targets one.
 pub fn analyzeEscapes(
     t: *Typecheck,
     fns: []const Typecheck.GraphFnInput,
@@ -355,7 +356,6 @@ pub fn analyzeEscapes(
     methods: []const Typecheck.Method,
     lambda_units: []const Closure.LambdaUnit,
     layouts: []const Layout,
-    enum_layouts: []const EnumLayout,
 ) !EscapeTables {
     const gpa = t.gpa;
     var units: std.ArrayList(EscapeUnit) = .empty;
@@ -423,7 +423,7 @@ pub fn analyzeEscapes(
         for (by_rank) |bi| {
             const b = fc.?.boundaries[bi];
             const use = f.siteUse(b.node) orelse .escapes;
-            if (!sol.siteEscapes(f, @intCast(u), use)) continue;
+            if (!sol.siteEscapes(@intCast(u), use)) continue;
             for (b.captures) |c| {
                 try escaping_slots.append(gpa, c.slot);
                 if (!Modes.isMut(eu.modes, c.slot) or std.mem.indexOfScalar(u32, reported.items, c.slot) != null) continue;
@@ -436,7 +436,7 @@ pub fn analyzeEscapes(
         for (f.sites) |site| {
             const p = site.recv orelse continue;
             if (site.kind != .bound or !Modes.isMut(eu.modes, p) or std.mem.indexOfScalar(u32, reported.items, p) != null) continue;
-            if (!sol.siteEscapes(f, @intCast(u), site.use)) continue;
+            if (!sol.siteEscapes(@intCast(u), site.use)) continue;
             try reported.append(gpa, p);
             try reportEscapingCapture(t, mc, eu.mod, mc.tree.nodes[site.node.int()].lhs);
         }
@@ -458,29 +458,20 @@ pub fn analyzeEscapes(
             // A bound method value's receiver keeps its cell: its adapter (`boundKind`) is
             // minted once from the heap storage, for every opt level.
             if (Closure.contains(f.bound_recv, sl)) continue;
-            // A slot of 16 B or less never makes the frame bigger than at -O0: it adds at
-            // most 8 slot bytes and drops the 16 bytes of values its box costs, so only
-            // frame envs can overflow a frame, and the fallback reverts exactly those.
-            const ty = find: for (run) |lu| {
-                for (lu.env) |es| if (es.slot == sl) break :find es.ty;
-            } else continue;
-            if (std.mem.alignForward(u32, Abi.typeSize(ty, layouts, enum_layouts), 8) > Escape.unbox_max) continue;
             try ub.append(gpa, sl);
         }
         unboxable[u] = try ub.toOwnedSlice(gpa);
 
-        var budget: u32 = Escape.frame_budget;
         for (by_rank) |bi| {
             const b = fcl.boundaries[bi];
             // Linked local fns share one env, made at their leader, so its unit decides for all.
             if (b.self_slot) |ss| if (ss != b.group.leader) continue;
             const k = Closure.findUnit(run, owner, b.node) orelse continue;
             const lu = run[k];
-            if (lu.env_size == 0 or lu.env_size > budget) continue;
-            const escapes = if (b.self_slot != null) groupEscapes(sol, f, @intCast(u), fcl, b.group) else sol.siteEscapes(f, @intCast(u), f.siteUse(b.node) orelse .escapes);
+            if (lu.env_size == 0) continue;
+            const escapes = if (b.self_slot != null) groupEscapes(sol, f, @intCast(u), fcl, b.group) else sol.siteEscapes(@intCast(u), f.siteUse(b.node) orelse .escapes);
             if (escapes) continue;
             frame[lo + k] = true;
-            budget -= lu.env_size;
         }
     }
     t.sink.sort();
@@ -491,7 +482,7 @@ pub fn analyzeEscapes(
 fn groupEscapes(sol: Escape.Solution, f: Escape.Facts, u: u32, fc: *const Closure.FnClosures, g: Closure.Group) bool {
     return for (fc.boundaries) |b| {
         if (b.self_slot == null) continue;
-        if (std.meta.eql(b.group, g) and sol.siteEscapes(f, u, f.siteUse(b.node) orelse .escapes)) break true;
+        if (std.meta.eql(b.group, g) and sol.siteEscapes(u, f.siteUse(b.node) orelse .escapes)) break true;
     } else false;
 }
 
