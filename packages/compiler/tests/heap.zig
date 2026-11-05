@@ -406,6 +406,39 @@ test "gc: a rooted Vec survives churning ~100000 unreachable Vecs (collect.toy s
     try std.testing.expectEqual(@as(u8, 15), code);
 }
 
+test "gc: an empty Vec has no backing until its first push; a sized one has exact room" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const code = try buildAndRunWith(gpa, io, ".toy-test-gc-vec-shape",
+        \\import core/mem_selftest
+        \\fn main() -> int { return mem_selftest.vec_shape() }
+        \\
+    , &.{harness.dev_core_imports});
+    try std.testing.expectEqual(@as(u8, 1), code);
+}
+
+test "gc: a list literal has exactly its length in capacity, a short one inline" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    inline for (.{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-literal-shape" ++ opt,
+            \\import core/mem_selftest
+            \\import std/vec
+            \\fn main() -> int {
+            \\    small := [1, 2, 3]
+            \\    big := [1, 2, 3, 4, 5, 6]
+            \\    return mem_selftest.literal_shape(small, big)
+            \\}
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
+}
+
 test "gc: a >4096-wide object forces the mark stack to realloc-grow; all children survive" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});

@@ -24,6 +24,7 @@ pub const iter_protocol = "Iterator";
 /// Associated / instance method names the surface sugar desugars to.
 pub const method_new = "new";
 pub const method_push = "push";
+pub const method_with_capacity = "with_capacity";
 pub const method_iter = "iter";
 pub const method_next = "next";
 
@@ -137,7 +138,7 @@ pub fn desugarMethods(tag: Ast.Node.Tag) []const DesugarMethod {
     return switch (tag) {
         .empty_list => &.{.{ .recv = .node, .name = method_new }},
         .list_literal => &.{
-            .{ .recv = .node, .name = method_new },
+            .{ .recv = .node, .name = method_with_capacity },
             .{ .recv = .node, .name = method_push },
         },
         .for_in_stmt => &.{
@@ -334,7 +335,7 @@ test "desugarMethods enumerates each sugar's receiver methods in expansion order
 
     const list = desugarMethods(.list_literal);
     try std.testing.expectEqual(@as(usize, 2), list.len);
-    try std.testing.expect(std.mem.eql(u8, list[0].name, method_new) and list[0].recv == .node);
+    try std.testing.expect(std.mem.eql(u8, list[0].name, method_with_capacity) and list[0].recv == .node);
     try std.testing.expect(std.mem.eql(u8, list[1].name, method_push) and list[1].recv == .node);
 
     const fin = desugarMethods(.for_in_stmt);

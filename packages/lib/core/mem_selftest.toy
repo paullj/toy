@@ -254,3 +254,63 @@ pub fn store_u32_narrow() -> int {
     }
     return 1
 }
+
+# The Vec shape: an empty array has no backing until its first push, and a sized one has
+# exactly the room it asked for. Returns 1, or the number of the first check that failed.
+pub fn vec_shape() -> int {
+    a := mem.ga_new[int]()
+    if cap_of(a) != 0 || backing_of(a) != 0 { return 2 }
+    z := mem.ga_with_cap[int](0)
+    if cap_of(z) != 0 || backing_of(z) != 0 { return 3 }
+    neg := mem.ga_with_cap[int](-2)
+    if cap_of(neg) != 0 || backing_of(neg) != 0 { return 8 }
+    gc_collect()
+    mem.ga_push[int](a, 7)
+    if cap_of(a) != 4 || mem.ga_len[int](a) != 1 || mem.ga_get[int](a, 0) != 7 { return 4 }
+    b := mem.ga_with_cap[int](3)
+    if cap_of(b) != 3 || !inline(b) { return 5 }
+    if inline(mem.ga_with_cap[int](6)) { return 7 }
+    i := 0
+    while i < 4 {
+        mem.ga_push[int](b, i)
+        i = i + 1
+    }
+    if cap_of(b) != 6 || mem.ga_get[int](b, 3) != 3 { return 6 }
+    return 1
+}
+
+# A list literal's Vec, built through the sugar: exactly its length in capacity, with a
+# short one's elements inline. `small_vec` is [1, 2, 3], `big_vec` six elements. Returns
+# 1, or the number of the first check that failed.
+pub fn literal_shape[V](small_vec: V, big_vec: V) -> int {
+    small := handle_of[V](small_vec)
+    big := handle_of[V](big_vec)
+    if cap_of(small) != 3 || mem.ga_len[int](small) != 3 || !inline(small) { return 2 }
+    if mem.ga_get[int](small, 2) != 3 { return 3 }
+    if cap_of(big) != 6 || mem.ga_len[int](big) != 6 || inline(big) { return 4 }
+    return 1
+}
+
+# The handle inside a `Vec[int]`, whose one field is private to std/vec.
+fn handle_of[V](v: V) -> gc_array[int] {
+    if size_of[V]() != 8 { panic("a Vec is not one handle") }
+    at := gc_alloc(8, 0)
+    unsafe { store(at, v) }
+    return unsafe { load(at) }
+}
+
+fn cap_of(a: gc_array[int]) -> int {
+    return unsafe { load(offset(a, 8)) }
+}
+
+# Whether the elements sit in the header's own cell, just past its three words. A rawptr
+# has no `==` and no cast to int, so the address goes through memory to be read as an int.
+fn inline(a: gc_array[int]) -> bool {
+    at := gc_alloc(8, 0)
+    unsafe { store(at, offset(a, 24)) }
+    return backing_of(a) == unsafe { load(at) }
+}
+
+fn backing_of(a: gc_array[int]) -> int {
+    return unsafe { load(offset(a, 16)) }
+}

@@ -1469,6 +1469,14 @@ pub const BodyChecker = struct {
                     try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0066 }, "a list literal needs 'Vec' in scope; " ++ StdNames.add_import, .{"vec"});
                     break :blk Type.invalid;
                 };
+                // Lower calls exactly these, so a `Vec` that lacks one is caught here.
+                for (StdNames.desugarMethods(.list_literal)) |dm| {
+                    if (Typecheck.findGenericMethod(bc.model.templates, vec_ctor, false, dm.name, .program) == null) {
+                        for (elems) |ei| _ = try bc.typeOf(ei);
+                        try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0065 }, "a list literal cannot build 'Vec[{f}]': it has no '{s}' method", .{ bc.fmtType(bc.node_types[elems[0].int()]), dm.name });
+                        break :blk Type.invalid;
+                    }
+                }
                 var seed: ?Type = null;
                 if (bc.groundExpectedTy()) |exp| if (exp.isApp()) {
                     const ce = bc.composite.at(exp.appIdx());
@@ -4067,17 +4075,17 @@ pub const BodyChecker = struct {
         if (callee.tag == .type_app and bc.tree.nodes[(callee.lhs).int()].tag == .field_access and
             bc.resolutions[(callee.lhs).int()] != .func)
             return bc.typeOfExplicitMethodCall(node_idx, n, callee);
-        // The `size_of[T]()` / `align_of[T]()` / `layout_of[T]()` intrinsics: a `type_app`
-        // whose base identifier resolves to a core-only `.builtin`. They take one type-arg
-        // and no value args and type as `int` (the constant is materialized in lower). Intercept
-        // BEFORE the generic-function `type_app` path (which would reject the builtin as
-        // non-generic).
+        // The `size_of[T]()` / `align_of[T]()` / `layout_of[T]()` / `array_layout_of[T]()`
+        // intrinsics: a `type_app` whose base identifier resolves to a core-only `.builtin`.
+        // They take one type-arg and no value args and type as `int` (the constant is
+        // materialized in lower). Intercept BEFORE the generic-function `type_app` path
+        // (which would reject the builtin as non-generic).
         if (callee.tag == .type_app and bc.tree.nodes[(callee.lhs).int()].tag == .identifier) {
             const bres = bc.resolutions[(callee.lhs).int()];
             if (bres == .func and bc.model.fns[bres.func].kind == .builtin) {
                 const bn = bc.nameText(bc.tree.nodes[(callee.lhs).int()].main_token);
                 const bik = Intrinsic.lookup(bn);
-                if (bik == .size_of or bik == .align_of or bik == .layout_of) {
+                if (bik == .size_of or bik == .align_of or bik == .layout_of or bik == .array_layout_of) {
                     const targ_nodes = Ast.rangeSlice(bc.tree, (callee.rhs).int());
                     for (targ_nodes) |tn| bc.node_types[(tn).int()] = bc.typeFromNode(tn);
                     const val_args = Ast.rangeSlice(bc.tree, (n.rhs).int());
@@ -4418,7 +4426,7 @@ pub const BodyChecker = struct {
                     // form handled above; a bare-call misuse names no type, so it can never
                     // produce a size/align/descriptor — reject with the type-arg hint
                     // (mirroring `.gc_array`), never fall through to the generic path.
-                    .size_of, .align_of, .descriptor_of, .layout_of => {
+                    .size_of, .align_of, .descriptor_of, .layout_of, .array_layout_of => {
                         try bc.drainArgs(args);
                         try bc.sink.report(.{ .span = bc.tokSpan(callee.main_token), .code = .T0054 }, "'{s}' requires a type argument, e.g. {s}[int]()", .{ bn, bn });
                         return .invalid;

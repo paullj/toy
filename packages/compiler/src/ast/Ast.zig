@@ -406,7 +406,7 @@ pub const Node = extern struct {
         /// `[]Node` is memcpy'd to/from the content cache; `ParseHeader.version` bumped
         /// 15->16). `main_token` is the `[`; `lhs` is `none`; `rhs` is a Range of the
         /// element exprs. The element type is inferred from `e0`; typed to a populated
-        /// `Vec[V]` and lowered to `new()` + one `push` per element.
+        /// `Vec[V]` and lowered to `with_capacity(n)` + one `push` per element.
         list_literal,
 
         /// A value index `recv[i]`. Appended at END (frozen ordinal). `main_token` is

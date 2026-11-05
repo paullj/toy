@@ -1,0 +1,13 @@
+# A list literal builds its `Vec` through `with_capacity(n)` and `push`, so a `Vec` in scope
+# that lacks either is T0065 at the literal, not a failure in lowering.
+struct Vec[T] { n: int }
+
+impl Vec[T] {
+    fn new() -> Vec[T] { return Vec[T] { n: 0 } }
+    fn push(self, _x: T) { }
+}
+
+fn main() -> int {
+    _v := [1, 2, 3]  #~ ERROR [T0065] a list literal cannot build 'Vec[int]': it has no 'with_capacity' method
+    return 4
+}
