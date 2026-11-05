@@ -11,9 +11,13 @@
 # stack map. A frame no toy fn owns (a hand-written builtin, or C calling back into toy) is
 # scanned word by word: it is the only memory read without a layout.
 #
-# Every object records the layout it was allocated with: 0 for one that holds no
-# reference, `map_header()` for a Map header, else a layout program (`GcLayout` in the
-# compiler) that names the offsets of its references. A Vec header's program leads with
+# Every object is allocated with a layout: 0 for one that holds no reference,
+# `container()` for a Vec or Map backing of references, `map_header()` for a Map header,
+# else a layout program (`GcLayout` in the compiler) that names the offsets of its
+# references. The layout picks the object's kind, and a span holds cells of one size class
+# and one kind. A noscan or container cell is marked but never traced on its own (a
+# backing's live elements are traced through its header), so its span records no layouts.
+# A mixed span records each cell's layout in a table. A Vec header's program leads with
 # `array_mark()` and the element size, then the element's program. A marked object is
 # traced when it comes off the mark stack by running its program (`trace_cell`), or for a
 # container header by running its element layouts over the live elements (`trace_vec`,
@@ -24,10 +28,10 @@
 # allocation sweeps a span at a time once the class's freelist runs dry.
 #
 # The control block is in the image's zero-fill __bss, so every field starts at 0. A span
-# is a 256-byte header, the layout table, then cells of one size, carved from a 64 MiB
-# arena; a large object (over 8 KiB) has a mapping of its own with the same header shape.
-# The page map names the span or large object that owns each heap page. The fns at the end
-# name each field's offset.
+# is a 256-byte header, the layout table if it is mixed, then cells of one size, carved
+# from a 64 MiB arena; a large object (over 8 KiB) has a mapping of its own with the same
+# header shape. The page map names the span or large object that owns each heap page. The
+# fns at the end name each field's offset.
 
 extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
 extern fn munmap(addr: int, len: int) -> int
@@ -35,22 +39,24 @@ extern fn malloc(n: int) -> int
 extern fn realloc(p: int, n: int) -> int
 extern fn memset(p: int, c: int, n: int) -> int
 
-# A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `map_header()` or the
-# address of a layout program. Every caller built with the inliner takes this body spliced
-# in (#211), so the fast path costs no call, and the size and layout it is passed fold: it
-# takes a cell of the first four classes, which step by 16 bytes, off its freelist. Every
+# A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `container()`,
+# `map_header()` or the address of a layout program. Every caller built with the inliner
+# takes this body spliced in (#211), so the fast path costs no call, and the size and
+# layout it is passed fold, the kind with them: it takes a cell of the first four classes,
+# which step by 16 bytes, off its freelist, and only a mixed cell writes its layout. Every
 # other case calls `alloc_slow`.
 pub fn alloc(size: int, layout: int) -> rawptr {
     if size <= 64 && !gc_stress() {
         cb := control_block()
         class := 0
         if size > 16 { class = (size - 1) / 16 }
-        head := freelist(cb, class)
+        kind := kind_of(layout)
+        head := freelist(cb, kind + class)
         cell := word(head)
         if cell != 0 {
             set_word(head, word(cell))
             set_word(cell, 0)
-            set_layout(cell, relative(layout))
+            if kind == mixed() { set_layout(cell, relative(layout)) }
             return offset(cell, 0)
         }
     }
@@ -62,7 +68,9 @@ pub fn alloc(size: int, layout: int) -> rawptr {
 pub fn alloc_slow(size: int, layout: int) -> rawptr {
     cb := control_block()
     fp := frame_address()
-    rel := relative(layout)
+    kind := kind_of(layout)
+    rel := 0
+    if kind == mixed() { rel = relative(layout) }
     # The collection resets the allocation count, so the budget below never also fires: a
     # stress run collects exactly once per allocation.
     if gc_stress() { collect_from(cb, fp) }
@@ -72,20 +80,20 @@ pub fn alloc_slow(size: int, layout: int) -> rawptr {
         return offset(obj, 0)
     }
     class := size_class(size)
-    cell_size := class_size(class)
-    head := freelist(cb, class)
+    list := kind + class
+    head := freelist(cb, list)
     cell := word(head)
     if cell == 0 {
-        cell = sweep_class(cb, class)
+        cell = sweep_list(cb, list)
         if cell == 0 && over_budget(cb) {
             collect_from(cb, fp)
-            cell = sweep_class(cb, class)
+            cell = sweep_list(cb, list)
         }
-        if cell == 0 { cell = refill(cb, class, cell_size) }
+        if cell == 0 { cell = refill(cb, list, class_size(class), kind) }
     }
     set_word(head, word(cell))
     set_word(cell, 0)
-    set_layout(cell, rel)
+    if kind == mixed() { set_layout(cell, rel) }
     return offset(cell, 0)
 }
 
@@ -127,6 +135,33 @@ fn class_size(class: int) -> int {
     return 256 << (class - 7)
 }
 
+# The span kinds, each named by the first of its span lists (a freelist and an unswept list
+# for each size class), so a kind plus a class is a list with no multiply. A noscan cell
+# holds no reference; a container cell is a Vec or Map backing whose references its header
+# traces; a mixed cell is traced by the layout its span records for it. Container and
+# noscan cells are handled alike today, but only a noscan cell may be skipped by a
+# collector that has to find every reference, such as a moving one.
+fn noscan() -> int { return 0 }
+fn mixed() -> int { return class_count() }
+fn container_kind() -> int { return 2 * class_count() }
+fn list_count() -> int { return 3 * class_count() }
+
+fn class_count() -> int { return 13 }
+
+# The layout a Vec or Map backing of references is allocated with, as `core/mem`'s
+# `container` gives it. Like `map_header()`, it is below any layout program's address.
+fn container() -> int { return 2 }
+
+# Most layouts that do not fold are programs, which the first test settles.
+fn kind_of(layout: int) -> int {
+    if layout > container() { return mixed() }
+    if layout == 0 { return noscan() }
+    if layout == container() { return container_kind() }
+    # `map_header()`: a Map header is traced by its own walk, and only a mixed span keeps
+    # the layout that names it.
+    return mixed()
+}
+
 # Go's GOGC=100 pacing: collect once the program has allocated as much as the last sweep
 # kept, but never before 4 MiB, Go's minimum heap. A fixed budget would make a growing live
 # set pay a whole-heap trace every few hundred KiB, and a lower floor made a small heap
@@ -145,31 +180,31 @@ fn map_pages(len: int) -> int {
     return at
 }
 
-# Sweep the class's unswept spans until one frees a cell. Returns the freelist head.
-fn sweep_class(cb: int, class: int) -> int {
-    head := freelist(cb, class)
-    while word(head) == 0 && sweep_next(cb, class) {}
+# Sweep the list's unswept spans until one frees a cell. Returns the freelist head.
+fn sweep_list(cb: int, list: int) -> int {
+    head := freelist(cb, list)
+    while word(head) == 0 && sweep_next(cb, list) {}
     return word(head)
 }
 
-# Sweep the next of the class's unswept spans. False when none is left.
-fn sweep_next(cb: int, class: int) -> bool {
-    list := unswept(cb, class)
-    span := word(list)
+# Sweep the next of the list's unswept spans. False when none is left.
+fn sweep_next(cb: int, list: int) -> bool {
+    at := unswept(cb, list)
+    span := word(at)
     if span == 0 { return false }
-    set_word(list, word(span_link(span)))
+    set_word(at, word(span_link(span)))
     sweep_span(cb, span)
     return true
 }
 
-# Give size class `class` a span, an empty one if a collection found any, else a new
-# mapping, and put its cells on the class's freelist. Returns the freelist head.
-fn refill(cb: int, class: int, cell_size: int) -> int {
+# Give span list `list` a span of `kind`, an empty one if a collection found any, else a
+# new mapping, and put its cells on the list's freelist. Returns the freelist head.
+fn refill(cb: int, list: int, cell_size: int, kind: int) -> int {
     span := word(span_pool(cb))
     if span != 0 {
         set_word(span_pool(cb), word(span_link(span)))
-        # Its cells died unswept, and its layout entries were written for another class's
-        # cell boundaries.
+        # Its cells died unswept, and its layout entries, if it was mixed, were written for
+        # another class's cell boundaries.
         unsafe { memset(span + 256, 0, 16384 - 256) }
     } else {
         span = new_span(cb)
@@ -178,16 +213,18 @@ fn refill(cb: int, class: int, cell_size: int) -> int {
         set_word(span_list(cb), span)
         set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
     }
-    count := (16384 - first_cell()) / cell_size
+    first := first_cell(kind)
+    count := (16384 - first) / cell_size
     set_word(allocated(cb), word(allocated(cb)) + count * cell_size)
     set_word(span_cell_size(span), cell_size)
     set_word(span_cell_count(span), count)
-    set_word(span_cells(span), span + first_cell())
-    set_word(span_class(span), class)
-    head := freelist(cb, class)
+    set_word(span_cells(span), span + first)
+    set_word(span_list_of(span), list)
+    set_word(span_kind(span), kind)
+    head := freelist(cb, list)
     i := 0
     while i < count {
-        cell := span + first_cell() + i * cell_size
+        cell := span + first + i * cell_size
         set_word(cell, word(head))
         set_word(head, cell)
         i += 1
@@ -264,11 +301,11 @@ fn collect_from(cb: int, fp: int) {
     # root that marked one would trace pointers into memory since freed or unmapped. Its
     # sweep zeroes them and clears its marks. Its free cells, like every class's, are found
     # again by the sweep after this collection.
-    class := 0
-    while class < 13 {
-        while sweep_next(cb, class) {}
-        set_word(freelist(cb, class), 0)
-        class += 1
+    list := 0
+    while list < list_count() {
+        while sweep_next(cb, list) {}
+        set_word(freelist(cb, list), 0)
+        list += 1
     }
     scan_stack(fp)
     drain(cb)
@@ -278,8 +315,8 @@ fn collect_from(cb: int, fp: int) {
     set_word(kept(cb), live)
 }
 
-# Mark the object `w` points into, if it is a heap object, and push it to be traced unless
-# its layout says it holds no reference. Any word may come here, so `w` is checked against
+# Mark the object `w` points into, if it is a heap object, and push it to be traced if it
+# is mixed and holds a reference. Any word may come here, so `w` is checked against
 # the heap before anything reads through it: a word that only looks like a pointer keeps an
 # object alive, and nothing worse. Each reference an object holds comes through here, so
 # the push is written out in place, and the one call left, to grow the mark stack, comes
@@ -305,6 +342,7 @@ fn mark_word(w: int) {
         bits := byte(at)
         if (bits & bit) != 0 { return }
         set_byte(at, bits | bit)
+        if word(span_kind(span)) != mixed() { return }
         obj = obj + cell * size
         layout = low_half(word(layout_slot(obj)))
     }
@@ -516,7 +554,7 @@ fn file_spans(cb: int) -> int {
         } else {
             live += marked * word(span_cell_size(span))
             set_word(span_live(span), marked)
-            list := unswept(cb, word(span_class(span)))
+            list := unswept(cb, word(span_list_of(span)))
             set_word(span_link(span), word(list))
             set_word(list, span)
         }
@@ -550,7 +588,7 @@ fn sweep_span(cb: int, span: int) {
     size := word(span_cell_size(span))
     count := word(span_cell_count(span))
     cells := word(span_cells(span))
-    head := freelist(cb, word(span_class(span)))
+    head := freelist(cb, word(span_list_of(span)))
     # A byte of mark bits at a time: its 8 cells, then the byte cleared whole.
     at := span_marks(span)
     i := 0
@@ -614,48 +652,56 @@ fn large_list(cb: int) -> int { return cb + 32 }
 fn mark_stack(cb: int) -> int { return cb + 40 }
 fn mark_len(cb: int) -> int { return cb + 48 }
 fn mark_cap(cb: int) -> int { return cb + 56 }
-# 13 heads, one per size class.
-fn freelist(cb: int, class: int) -> int { return cb + 64 + class * 8 }
 # Bytes the last sweep kept, which pace the next collection.
-fn kept(cb: int) -> int { return cb + 184 }
-fn page_map(cb: int) -> int { return cb + 192 }
+fn kept(cb: int) -> int { return cb + 64 }
+fn page_map(cb: int) -> int { return cb + 72 }
 # The bump cursor and end of the arena new spans are carved from.
-fn arena_next(cb: int) -> int { return cb + 200 }
-fn arena_end(cb: int) -> int { return cb + 208 }
+fn arena_next(cb: int) -> int { return cb + 80 }
+fn arena_end(cb: int) -> int { return cb + 88 }
 # The lowest and highest heap addresses ever mapped. A word between them may still be on
 # no page the map names.
-fn heap_low(cb: int) -> int { return cb + 216 }
-fn heap_high(cb: int) -> int { return cb + 224 }
-# 13 heads of spans marked by the last collection and not yet swept, one per size class.
-fn unswept(cb: int, class: int) -> int { return cb + 240 + class * 8 }
+fn heap_low(cb: int) -> int { return cb + 96 }
+fn heap_high(cb: int) -> int { return cb + 104 }
 # The head of the spans the last collection found empty.
-fn span_pool(cb: int) -> int { return cb + 344 }
+fn span_pool(cb: int) -> int { return cb + 112 }
+# A head for each span list.
+fn freelist(cb: int, list: int) -> int { return cb + 240 + list * 8 }
+# A head for each span list of the spans marked by the last collection and not yet swept.
+fn unswept(cb: int, list: int) -> int { return cb + 552 + list * 8 }
 
 # Span header fields; word 0 links the next span. A large object's header has a cell size
 # of 0, and its own fields at 16, 32, 40 and 48.
 fn span_cell_size(span: int) -> int { return span + 8 }
 fn span_cell_count(span: int) -> int { return span + 16 }
 fn span_cells(span: int) -> int { return span + 24 }
-fn span_class(span: int) -> int { return span + 32 }
-fn span_marks(span: int) -> int { return span + 40 }
+fn span_list_of(span: int) -> int { return span + 32 }
+fn span_kind(span: int) -> int { return span + 40 }
+# A bit per cell: 1008 of the smallest in a span with no layout table.
+fn span_marks(span: int) -> int { return span + 48 }
 # Links the span into an unswept list or the pool; past the most mark bits a span has.
-fn span_link(span: int) -> int { return span + 144 }
+fn span_link(span: int) -> int { return span + 176 }
 # The cells the last collection marked, which the span's sweep does not hand out.
-fn span_live(span: int) -> int { return span + 152 }
+fn span_live(span: int) -> int { return span + 184 }
 fn large_size(obj: int) -> int { return obj + 16 }
 fn large_len(obj: int) -> int { return obj + 32 }
 fn large_mark(obj: int) -> int { return obj + 40 }
 fn large_layout(obj: int) -> int { return obj + 48 }
 
-# The layout table follows a span's header: 4 bytes per 16 bytes of cells, the size of the
-# smallest class, so alloc finds a cell's entry from its address alone, with no divide by
-# the class size (mark divides anyway, for the mark bit). A span holds 806 such cells;
-# the first is past the table and 8 bytes of slack, which `set_layout` writes into.
-fn first_cell() -> int { return 3488 }
+# A mixed span's layout table follows its header: 4 bytes per 16 bytes of cells, the size
+# of the smallest class, so alloc finds a cell's entry from its address alone, with no
+# divide by the class size (mark divides anyway, for the mark bit). A mixed span holds 806
+# such cells; the first is past the table and 8 bytes of slack, which `set_layout` writes
+# into. Any other span's cells start right after the header.
+fn first_cell(kind: int) -> int {
+    if kind == mixed() { return table_end() }
+    return 256
+}
+
+fn table_end() -> int { return 3488 }
 
 fn layout_slot(cell: int) -> int {
     off := cell & 16383
-    return cell - off + (off >> 2) + (256 - (first_cell() >> 2))
+    return cell - off + (off >> 2) + (256 - (table_end() >> 2))
 }
 
 fn set_layout(cell: int, rel: int) {

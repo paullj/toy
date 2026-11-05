@@ -148,6 +148,7 @@ pub fn sameCode(a: []const u8, b: []const u8) bool {
     const lc_load_dylib = 0xc;
     const lc_load_weak_dylib = 0x80000018;
     const lc_rpath = 0x8000001c;
+    const s_zerofill = 0x1;
     const rd32 = struct {
         fn f(img: []const u8, off: usize) u32 {
             return std.mem.readInt(u32, img[off..][0..4], .little);
@@ -192,6 +193,9 @@ pub fn sameCode(a: []const u8, b: []const u8) bool {
                     const sb = ob + 72 + i * 80;
                     // name, segment, addr and size
                     if (!std.mem.eql(u8, a[sa..][0..48], b[sb..][0..48])) return false;
+                    // A zero-fill section (__bss) has no file bytes: its offset is 0, so a
+                    // compare would read the load commands instead.
+                    if (rd32(a, sa + 64) & 0xff == s_zerofill) continue;
                     const size = rd64(a, sa + 40);
                     if (!std.mem.eql(u8, a[rd32(a, sa + 48)..][0..size], b[rd32(b, sb + 48)..][0..size])) return false;
                 };

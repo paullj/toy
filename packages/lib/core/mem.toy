@@ -8,7 +8,9 @@
 # The header is allocated with `array_layout_of[T]()`, a static per-type layout that holds
 # the element size and the element type's layout: the erased collector, which sees only a
 # structurally-identical `gc_array` handle, traces the live elements by it. The backing has
-# no layout of its own: only the header knows how many elements are live.
+# no layout of its own: only the header knows how many elements are live. It is allocated
+# with `backing(...)`, so the collector files a backing of references apart from bytes it
+# need never read.
 
 # An empty array has no backing (`cap` and `elems` are born 0, as cells are zeroed): many
 # Vecs stay empty, and the first push allocates.
@@ -34,7 +36,7 @@ pub fn ga_with_cap[T](n: int) -> gc_array[T] {
     }
     hdr := gc_alloc(24, array_layout_of[T]())
     unsafe {
-        store(offset(hdr, 16), gc_alloc(bytes, 0))
+        store(offset(hdr, 16), gc_alloc(bytes, backing(layout_of[T](), 0)))
         store(offset(hdr, 8), n)
     }
     return gc_array[T](hdr)
@@ -94,7 +96,7 @@ extern fn memcpy(dst: rawptr, src: rawptr, n: int) -> rawptr
 # `memcpy` moves the bytes in bulk: a toy loop costs dozens of instructions per element.
 pub fn ga_grow[T](a: gc_array[T], c: int) {
     nc := if c == 0 { 4 } else { c * 2 }
-    ne := gc_alloc(nc * size_of[T](), 0)
+    ne := gc_alloc(nc * size_of[T](), backing(layout_of[T](), 0))
     e: rawptr = unsafe { load(offset(a, 16)) }
     unsafe {
         store(offset(a, 16), ne)
@@ -107,6 +109,17 @@ pub fn ga_grow[T](a: gc_array[T], c: int) {
 # entries by the header's own fields. No layout program is at address 1.
 fn map_header() -> int {
     return 1
+}
+
+# The layout of a backing of elements whose parts have layouts `a` and `b`: 0 when neither
+# holds a reference, so the collector never reads it, else core/rt/gc's `container`.
+fn backing(a: int, b: int) -> int {
+    if a == 0 && b == 0 { return 0 }
+    return container()
+}
+
+fn container() -> int {
+    return 2
 }
 
 # An erased open-addressing hash table: the ONE hashed container. The 8-byte handle
@@ -134,7 +147,8 @@ pub fn mp_new[K, V]() -> gc_array[int] {
         store(offset(hdr, 48), size_of[K]())
         store(offset(hdr, 56), size_of[K]() + size_of[V]())
         store(offset(hdr, 0), gc_alloc(8 * 8, 0))
-        store(offset(hdr, 8), gc_alloc(8 * (size_of[K]() + size_of[V]()), 0))
+        entries := gc_alloc(8 * (size_of[K]() + size_of[V]()), backing(layout_of[K](), layout_of[V]()))
+        store(offset(hdr, 8), entries)
     }
     return gc_array[int](hdr)
 }
@@ -249,7 +263,7 @@ fn mp_grow[K, V](m: gc_array[int]) {
         oe: rawptr = load(offset(m, 8))
         nc := cap * 2
         nb := gc_alloc(nc * 8, 0)
-        ne := gc_alloc(nc * stride, 0)
+        ne := gc_alloc(nc * stride, backing(layout_of[K](), layout_of[V]()))
         memcpy(ne, oe, len * stride)
         store(offset(m, 0), nb)
         store(offset(m, 8), ne)

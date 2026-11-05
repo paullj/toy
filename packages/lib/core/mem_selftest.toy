@@ -369,3 +369,160 @@ fn inline(a: gc_array[int]) -> bool {
 fn backing_of(a: gc_array[int]) -> int {
     return unsafe { load(offset(a, 16)) }
 }
+
+# A span of noscan cells has no layout table, so its cells start right after the header:
+# 16-byte ones fill 1008 to a span, where a span that records a layout per 16 bytes holds
+# 806. Take ten noscan spans' worth and count the spans mapped. Returns 1; 100+n when n
+# spans were mapped.
+pub fn noscan_span_capacity() -> int {
+    s0 := gc_span_count()
+    i := 0
+    while i < 10080 {
+        p := gc_alloc(16, 0)
+        unsafe { store(p, i) }
+        i = i + 1
+    }
+    grown := gc_span_count() - s0
+    if grown > 11 { return 100 + grown }
+    return 1
+}
+
+# Marking reads no word of a noscan object, so an address kept only in one keeps nothing
+# alive: the cell it names is swept and handed out again, zeroed. `anchor` keeps the span
+# in use, so the sweep, not the span pool, takes the cell back. Returns 1; 2 when the cell
+# survived.
+fn hide(holder: rawptr) -> rawptr {
+    anchor := gc_alloc(48, 0)
+    target := gc_alloc(48, 0)
+    unsafe {
+        store(offset(target, 8), 9)
+        store(holder, target)
+    }
+    return anchor
+}
+
+pub fn noscan_body_untraced() -> int {
+    holder := gc_alloc(16, 0)
+    anchor := hide(holder)
+    gc_collect()
+    again := gc_alloc(48, 0)
+    unsafe { store(offset(again, 8), 5) }
+    at: int = unsafe { load(holder) }
+    cell := gc_alloc(8, 0)
+    unsafe { store(cell, at + 8) }
+    p: rawptr = unsafe { load(cell) }
+    v: int = unsafe { load(p) }
+    unsafe { store(offset(anchor, 8), 1) }
+    if v == 9 { return 2 }
+    return 1
+}
+
+# A backing's span kind comes from its element type: a Vec of ints keeps its elements in a
+# noscan cell, one of references in a container cell, never in a noscan one. Interleave
+# 48-byte noscan cells with 48-byte backings (six elements, too many for the header's own
+# cell) and count the spans mapped: one for the headers, then one more for the 48-byte
+# cells when the backings are noscan too, two when they are containers. Returns the
+# spans mapped.
+pub fn int_backing_spans() -> int {
+    s0 := gc_span_count()
+    keep := mem.ga_with_cap[gc_array[int]](168)
+    i := 0
+    while i < 168 {
+        mem.ga_push[gc_array[int]](keep, mem.ga_with_cap[int](6))
+        p := gc_alloc(48, 0)
+        unsafe { store(p, i) }
+        i = i + 1
+    }
+    return gc_span_count() - s0
+}
+
+pub fn ref_backing_spans() -> int {
+    s0 := gc_span_count()
+    keep := mem.ga_with_cap[gc_array[rawptr]](168)
+    i := 0
+    while i < 168 {
+        mem.ga_push[gc_array[rawptr]](keep, mem.ga_with_cap[rawptr](6))
+        p := gc_alloc(48, 0)
+        unsafe { store(p, i) }
+        i = i + 1
+    }
+    return gc_span_count() - s0
+}
+
+# A pooled span changes kind when another list takes it: a mixed span's cells start past its
+# layout table, a noscan span's right after the header, with mark bits for 1008 cells. Fill
+# 20 spans with mixed 16-byte cells and drop them, then keep 15 spans' worth of noscan
+# 16-byte cells live across a collection, then the reverse, mixed cells whose only
+# reference is to a noscan cell. Returns 1; 2 when a reused cell came back dirty, 3 when a
+# live noscan cell lost its value, 4 when a mixed cell or its target did.
+fn fill_mixed(n: int) {
+    i := 0
+    while i < n {
+        p := gc_alloc(16, layout_of[rawptr]())
+        unsafe { store(offset(p, 8), i + 1) }
+        i = i + 1
+    }
+}
+
+fn noscan_phase(n: int) -> int {
+    keep := mem.ga_with_cap[rawptr](n)
+    i := 0
+    while i < n {
+        p := gc_alloc(16, 0)
+        if word_at(p, 0) != 0 || word_at(p, 8) != 0 { return 2 }
+        unsafe {
+            store(p, i + 7)
+            store(offset(p, 8), i + 7)
+        }
+        mem.ga_push[rawptr](keep, p)
+        i = i + 1
+    }
+    gc_collect()
+    fill_mixed(4000)
+    j := 0
+    while j < n {
+        p := mem.ga_get[rawptr](keep, j)
+        if word_at(p, 0) != j + 7 || word_at(p, 8) != j + 7 { return 3 }
+        j = j + 1
+    }
+    return 1
+}
+
+fn mixed_phase(n: int) -> int {
+    keep := mem.ga_with_cap[rawptr](n)
+    i := 0
+    while i < n {
+        p := gc_alloc(16, layout_of[rawptr]())
+        if word_at(p, 0) != 0 || word_at(p, 8) != 0 { return 2 }
+        t := gc_alloc(16, 0)
+        unsafe {
+            store(t, i + 5)
+            store(p, t)
+            store(offset(p, 8), i + 5)
+        }
+        mem.ga_push[rawptr](keep, p)
+        i = i + 1
+    }
+    gc_collect()
+    j := 0
+    while j < n {
+        p := mem.ga_get[rawptr](keep, j)
+        t: rawptr = unsafe { load(p) }
+        if word_at(p, 8) != j + 5 || word_at(t, 0) != j + 5 { return 4 }
+        j = j + 1
+    }
+    return 1
+}
+
+fn word_at(p: rawptr, k: int) -> int {
+    return unsafe { load(offset(p, k)) }
+}
+
+pub fn span_kind_change() -> int {
+    fill_mixed(16120)
+    gc_collect()
+    r := noscan_phase(15120)
+    if r != 1 { return r }
+    gc_collect()
+    return mixed_phase(8000)
+}
