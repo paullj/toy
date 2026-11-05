@@ -186,6 +186,61 @@ pub fn large_interior_survivor() -> int {
     return unsafe { load(mid) }
 }
 
+# Every page of a 1 MiB object resolves to it: the only root points into its last page,
+# while dropped large objects are mapped and unmapped around it across collections. A swept
+# object is unmapped and the read faults. Reads 9.
+fn large_last_page() -> rawptr {
+    big := gc_alloc(1048576, 0)
+    last := offset(big, 1048568)
+    unsafe { store(last, 9) }
+    return last
+}
+
+pub fn large_last_page_survivor() -> int {
+    last := large_last_page()
+    i := 0
+    loop {
+        if i >= 200 { break }
+        junk := gc_alloc(65536 + i * 16384, 0)
+        unsafe { store(junk, i) }
+        i = i + 1
+    }
+    gc_collect()
+    return unsafe { load(last) }
+}
+
+# Spans come from 64 MiB arenas, so a live heap past one makes the collector map a second
+# and find spans in both. Keep 1150000 64-byte cells (about 70 MiB) live, each holding its
+# index, across collections. Returns 1; 2 when a cell lost its value.
+pub fn arena_growth() -> int {
+    n := 1150000
+    arr := mem.ga_with_cap[rawptr](n)
+    i := 0
+    loop {
+        if i >= n { break }
+        c := gc_alloc(64, 0)
+        unsafe { store(offset(c, 56), i) }
+        mem.ga_push[rawptr](arr, c)
+        i = i + 1
+    }
+    gc_collect()
+    j := 0
+    loop {
+        if j >= 100000 { break }
+        junk := gc_alloc(64, 0)
+        unsafe { store(junk, j) }
+        j = j + 1
+    }
+    gc_collect()
+    k := 0
+    while k < n {
+        v := unsafe { load(offset(mem.ga_get[rawptr](arr, k), 56)) }
+        if v != k { return 2 }
+        k = k + 1
+    }
+    return 1
+}
+
 # Spans the sweep finds empty serve any size class, and a reused span hands out zeroed
 # cells. Fill about 20 spans with 16-byte cells holding nonzero words, drop them all and
 # collect, then take 15 spans' worth of 64-byte cells: within the budget, so no collection

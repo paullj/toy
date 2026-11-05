@@ -2,7 +2,7 @@
 # cells. Lowered code calls its entries, `alloc` (or `alloc_slow`, where `alloc` is spliced
 # in) and `collect`. A call between core/rt fns is no safepoint: T0082 holds every core/rt
 # fn but the entries to never reach the collector, so the collector gets its own memory
-# from mmap, malloc and calloc.
+# from mmap, malloc and realloc.
 #
 # Every address here is an `int`. None is a reference the collector must keep alive, so no
 # stack map names one.
@@ -24,16 +24,15 @@
 # allocation sweeps a span at a time once the class's freelist runs dry.
 #
 # The control block is in the image's zero-fill __bss, so every field starts at 0. A span
-# is a 256-byte header, the layout table, then cells of one size; a large object (over 8
-# KiB) has a mapping of its own with the same header shape. The fns at the end name each
-# field's offset.
+# is a 256-byte header, the layout table, then cells of one size, carved from a 64 MiB
+# arena; a large object (over 8 KiB) has a mapping of its own with the same header shape.
+# The page map names the span or large object that owns each heap page. The fns at the end
+# name each field's offset.
 
 extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
 extern fn munmap(addr: int, len: int) -> int
 extern fn malloc(n: int) -> int
 extern fn realloc(p: int, n: int) -> int
-extern fn calloc(n: int, size: int) -> int
-extern fn free(p: int)
 extern fn memset(p: int, c: int, n: int) -> int
 
 # A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `map_header()` or the
@@ -138,8 +137,12 @@ fn over_budget(cb: int) -> bool {
     return word(allocated(cb)) >= budget
 }
 
+# A failed mapping (MAP_FAILED, -1) would put the page map, an arena or a large object at
+# address -1, where the next write lands far from any mapping, so it panics here instead.
 fn map_pages(len: int) -> int {
-    return unsafe { mmap(0, len, 3, 4098, -1, 0) }
+    at := unsafe { mmap(0, len, 3, 4098, -1, 0) }
+    if at == -1 { panic("out of memory") }
+    return at
 }
 
 # Sweep the class's unswept spans until one frees a cell. Returns the freelist head.
@@ -169,7 +172,8 @@ fn refill(cb: int, class: int, cell_size: int) -> int {
         # cell boundaries.
         unsafe { memset(span + 256, 0, 16384 - 256) }
     } else {
-        span = map_pages(16384)
+        span = new_span(cb)
+        set_pages(cb, span, 16384, span)
         set_word(span, word(span_list(cb)))
         set_word(span_list(cb), span)
         set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
@@ -197,6 +201,8 @@ fn alloc_large(cb: int, size: int, fp: int) -> int {
     if over_budget(cb) { collect_from(cb, fp) }
     len := (size + 256 + 16383) / 16384 * 16384
     obj := map_pages(len)
+    add_heap(cb, obj, len)
+    set_pages(cb, obj, len, obj)
     set_word(obj, word(large_list(cb)))
     set_word(large_list(cb), obj)
     set_word(large_size(obj), size)
@@ -205,6 +211,45 @@ fn alloc_large(cb: int, size: int, fp: int) -> int {
     set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
     set_word(allocated(cb), word(allocated(cb)) + size)
     return obj + 256
+}
+
+# The next 16 KiB of the current arena, or of a new one once it is used up. An arena costs
+# one mmap for 4096 spans, and the kernel commits its pages only as they are written.
+fn new_span(cb: int) -> int {
+    span := word(arena_next(cb))
+    if span == word(arena_end(cb)) {
+        span = map_pages(arena_size())
+        add_heap(cb, span, arena_size())
+        set_word(arena_end(cb), span + arena_size())
+    }
+    set_word(arena_next(cb), span + 16384)
+    return span
+}
+
+fn arena_size() -> int { return 67108864 }
+
+# Widen the heap's bounds to cover a new mapping, mapping the page map first. The map has a
+# word for each 16 KiB page below 2^47, macOS's user address space, so it needs no base and
+# no second level wherever the kernel puts an arena or a large object. Its 64 GiB are
+# reserved, not committed: a page of the map is resident only once a word in the 32 MiB of
+# address space it covers has been looked up. The bounds keep any other word off the map.
+fn add_heap(cb: int, at: int, len: int) {
+    if word(page_map(cb)) == 0 {
+        set_word(page_map(cb), map_pages(68719476736))
+        set_word(heap_low(cb), at)
+    }
+    if at < word(heap_low(cb)) { set_word(heap_low(cb), at) }
+    if at + len > word(heap_high(cb)) { set_word(heap_high(cb), at + len) }
+}
+
+# Point the page map entry of every page of [at, at + len) at `owner`, or 0 for none.
+fn set_pages(cb: int, at: int, len: int, owner: int) {
+    entry := word(page_map(cb)) + (at >> 14) * 8
+    end := entry + (len >> 14) * 8
+    while entry < end {
+        set_word(entry, owner)
+        entry += 8
+    }
 }
 
 # One collection. `fp` is the frame record of the entry the program called, so the walk
@@ -225,114 +270,25 @@ fn collect_from(cb: int, fp: int) {
         set_word(freelist(cb, class), 0)
         class += 1
     }
-    build_span_table(cb)
     scan_stack(fp)
     drain(cb)
-    unsafe { free(word(span_table(cb))) }
-    set_word(span_table(cb), 0)
     live := file_spans(cb) + sweep_large(cb)
     set_word(collections_run(cb), word(collections_run(cb)) + 1)
     set_word(allocated(cb), 0)
     set_word(kept(cb), live)
 }
 
-# Hash every heap page to its span or large object, so a marked word finds its object in
-# about one probe. Walking the span list per word made a collection cost O(live words x
-# spans). The table is at most half full, and it lives only for the collection, so no
-# allocation or unmap has to keep it current.
-fn build_span_table(cb: int) {
-    pages := 0
-    span := word(span_list(cb))
-    while span != 0 {
-        pages += 1
-        span = word(span)
-    }
-    obj := word(large_list(cb))
-    while obj != 0 {
-        pages += word(large_len(obj)) / 16384
-        obj = word(obj)
-    }
-    cap := 16
-    shift := 60
-    while cap < pages * 2 {
-        cap *= 2
-        shift -= 1
-    }
-    set_word(span_table(cb), unsafe { calloc(cap, 16) })
-    set_word(table_mask(cb), cap - 1)
-    set_word(table_shift(cb), shift)
-    low := 9223372036854775807
-    high := 0
-    span = word(span_list(cb))
-    while span != 0 {
-        add_page(cb, span, span)
-        if span < low { low = span }
-        if span + 16384 > high { high = span + 16384 }
-        span = word(span)
-    }
-    obj = word(large_list(cb))
-    while obj != 0 {
-        len := word(large_len(obj))
-        page := 0
-        while page < len {
-            add_page(cb, obj + page, obj)
-            page += 16384
-        }
-        if obj < low { low = obj }
-        if obj + len > high { high = obj + len }
-        obj = word(obj)
-    }
-    set_word(heap_low(cb), low)
-    set_word(heap_high(cb), high)
-}
-
-# Fibonacci hashing of the page: kernel-chosen span addresses come in runs that an identity
-# hash would pile into one probe chain. A page's low 14 bits are 0, so this is the page
-# number's product shifted up 14 bits, and the shift keeps well-mixed bits from just below
-# that product's top. Its sign fill lands above the mask.
-fn page_slot(cb: int, page: int) -> int {
-    return (page *% -7046029254386353131) >> word(table_shift(cb))
-}
-
-fn add_page(cb: int, page: int, owner: int) {
-    table := word(span_table(cb))
-    mask := word(table_mask(cb))
-    i := page_slot(cb, page)
-    loop {
-        slot := table + (i & mask) * 16
-        if word(slot) == 0 {
-            set_word(slot, page)
-            set_word(slot + 8, owner)
-            return
-        }
-        i += 1
-    }
-}
-
 # Mark the object `w` points into, if it is a heap object, and push it to be traced unless
 # its layout says it holds no reference. Any word may come here, so `w` is checked against
 # the heap before anything reads through it: a word that only looks like a pointer keeps an
 # object alive, and nothing worse. Each reference an object holds comes through here, so
-# the span table probe and the push are written out in place, and the one call left, to
-# grow the mark stack, comes last: nothing is live across a call, so no register is saved.
+# the push is written out in place, and the one call left, to grow the mark stack, comes
+# last: nothing is live across a call, so no register is saved.
 fn mark_word(w: int) {
     cb := control_block()
     if w < word(heap_low(cb)) || w >= word(heap_high(cb)) { return }
-    page := w - (w & 16383)
-    table := word(span_table(cb))
-    mask := word(table_mask(cb))
-    i := page_slot(cb, page)
-    span := 0
-    loop {
-        slot := table + (i & mask) * 16
-        p := word(slot)
-        if p == page {
-            span = word(slot + 8)
-            break
-        }
-        if p == 0 { return }
-        i += 1
-    }
+    span := word(word(page_map(cb)) + (w >> 14) * 8)
+    if span == 0 { return }
     obj := word(span_cells(span))
     size := word(span_cell_size(span))
     layout := 0
@@ -636,6 +592,7 @@ fn sweep_large(cb: int) -> int {
             link = obj
         } else {
             set_word(link, next)
+            set_pages(cb, obj, word(large_len(obj)), 0)
             unsafe { munmap(obj, word(large_len(obj))) }
         }
         obj = next
@@ -661,9 +618,12 @@ fn mark_cap(cb: int) -> int { return cb + 56 }
 fn freelist(cb: int, class: int) -> int { return cb + 64 + class * 8 }
 # Bytes the last sweep kept, which pace the next collection.
 fn kept(cb: int) -> int { return cb + 184 }
-fn span_table(cb: int) -> int { return cb + 192 }
-fn table_mask(cb: int) -> int { return cb + 200 }
-fn table_shift(cb: int) -> int { return cb + 208 }
+fn page_map(cb: int) -> int { return cb + 192 }
+# The bump cursor and end of the arena new spans are carved from.
+fn arena_next(cb: int) -> int { return cb + 200 }
+fn arena_end(cb: int) -> int { return cb + 208 }
+# The lowest and highest heap addresses ever mapped. A word between them may still be on
+# no page the map names.
 fn heap_low(cb: int) -> int { return cb + 216 }
 fn heap_high(cb: int) -> int { return cb + 224 }
 # 13 heads of spans marked by the last collection and not yet swept, one per size class.
