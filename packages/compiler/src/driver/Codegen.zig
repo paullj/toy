@@ -239,8 +239,8 @@ const Plan = struct {
     /// Each module's line starts, by module id, when the profile wants debug info; else
     /// empty. Owned.
     line_starts: []const []const u32 = &.{},
-    /// Each body unit's position, by symbol: the units the inliner can read. Owned.
-    bodies_by_name: std.StringHashMapUnmanaged(u32) = .empty,
+    /// Each body and derive unit's position, by symbol: the units the inliner can read. Owned.
+    inline_units_by_name: std.StringHashMapUnmanaged(u32) = .empty,
     /// The callee IR the inliner prepared, shared by every job. Owned.
     inline_cache: *InlineUnits.InlineCache,
 
@@ -300,8 +300,8 @@ const Plan = struct {
         errdefer gpa.free(p.units);
         p.closure_facts = try p.ownerClosureFacts(gpa);
         errdefer freeClosureFacts(gpa, p.closure_facts);
-        errdefer p.bodies_by_name.deinit(gpa);
-        for (p.units, 0..) |u, i| if (u == .body) try p.bodies_by_name.put(gpa, p.symOf(u).name, @intCast(i));
+        errdefer p.inline_units_by_name.deinit(gpa);
+        for (p.units, 0..) |u, i| if (u == .body or u == .derive) try p.inline_units_by_name.put(gpa, p.symOf(u).name, @intCast(i));
         if (o.profile.debugInfo()) {
             const starts = try gpa.alloc([]const u32, modules.len);
             var done: usize = 0;
@@ -321,7 +321,7 @@ const Plan = struct {
     fn deinit(p: *Plan, gpa: std.mem.Allocator) void {
         p.inline_cache.deinit(gpa);
         gpa.destroy(p.inline_cache);
-        p.bodies_by_name.deinit(gpa);
+        p.inline_units_by_name.deinit(gpa);
         for (p.line_starts) |st| gpa.free(st);
         gpa.free(p.line_starts);
         freeClosureFacts(gpa, p.closure_facts);
@@ -460,7 +460,7 @@ const Plan = struct {
 
     fn findBody(ctx: *const anyopaque, name: []const u8) ?Engine.Frozen {
         const p: *const Plan = @ptrCast(@alignCast(ctx));
-        const i = p.bodies_by_name.get(name) orelse return null;
+        const i = p.inline_units_by_name.get(name) orelse return null;
         return p.frozenFor(i);
     }
 

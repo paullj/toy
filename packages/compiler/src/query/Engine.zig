@@ -650,7 +650,7 @@ fn adapterKey(target: []const u8, fr: *const Frozen, a: *const Closure.Adapter) 
 fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl: Ast.Index, guard_stack: bool) !Cache.Key {
     var fp = try sourceFp(gpa, fr, decl);
     if (guard_stack) fp = std.hash.Wyhash.hash(fp, "guard_stack");
-    var reach = try InlineUnits.Reach.init(gpa, fr, decl);
+    var reach = try InlineUnits.Reach.init(gpa, fr);
     defer reach.deinit();
     if (reach.names.items.len != 0) {
         var h = std.hash.Wyhash.init(fp);
@@ -715,7 +715,7 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
         .source => |src| {
             try AstWalk.walkCalls(gpa, &fr.in, src.decl, fr.in.sig, &sigs);
             // An inlined body's calls are folded through that callee's own content.
-            var reach = try InlineUnits.Reach.init(gpa, fr, src.decl);
+            var reach = try InlineUnits.Reach.init(gpa, fr);
             defer reach.deinit();
             for (reach.facts.items) |f| try inlined.appendSlice(gpa, f.calls);
         },
@@ -755,6 +755,12 @@ fn folds(fr: *const Frozen, sigs: []const Fingerprint.Sig, name: []const u8) boo
 /// index-free layout (the same descriptor the touched fold builds) and the resolved field
 /// witnesses, so a field-layout edit flips it. `symMix` separates it from every real fn.
 fn deriveKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, d: *const Derive.Derive) !Cache.Key {
+    return Key.codegen(target, try deriveFp(gpa, fr, d), fr.profile, fr.sym);
+}
+
+/// A derive unit's own content, which its key and the key of every caller that inlines it
+/// fold.
+pub fn deriveFp(gpa: std.mem.Allocator, fr: *const Frozen, d: *const Derive.Derive) !u64 {
     var conform_list: std.ArrayList(Fingerprint.TouchedType) = .empty;
     defer {
         AstWalk.freeTouched(gpa, conform_list.items);
@@ -762,8 +768,7 @@ fn deriveKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, d: *
     }
     try AstWalk.appendTouched(gpa, fr.in.layouts, fr.in.enum_layouts, d.conform_ty, &conform_list);
     const conform: Fingerprint.TouchedType = if (conform_list.items.len > 0) conform_list.items[0] else .{ .kind = d.conform_ty.kind };
-    const fp = Fingerprint.deriveFingerprint(d.protocol_name, d.kind, conform, d.field_witnesses);
-    return Key.codegen(target, fp, fr.profile, fr.sym);
+    return Fingerprint.deriveFingerprint(d.protocol_name, d.kind, conform, d.field_witnesses);
 }
 
 /// The cache/verify/fresh-lower state machine of a keyed unit, honoring `self.mode`:

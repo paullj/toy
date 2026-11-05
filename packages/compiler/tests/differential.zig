@@ -769,6 +769,48 @@ test "inline: a comment in a helper's body does not keep it from inlining" {
     try testing.expect(std.mem.indexOf(u8, body, "call @main.add1") == null);
 }
 
+test "inline: a release build splices derive witnesses into their callers" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-inline-derive";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\struct P { x: int, y: int }
+        \\fn same(a: P, b: P) -> bool { a == b }
+        \\fn to_char(n: int) -> char {
+        \\    return match n.try_into() {
+        \\        .ok(c) -> c
+        \\        .err(_) -> '?'
+        \\    }
+        \\}
+        \\fn is_w(c: char) -> bool { c == 'w' }
+        \\fn main() -> int {
+        \\    k := if same(P { x: 1, y: 2 }, P { x: 1, y: 2 }) { 40 } else { 0 }
+        \\    w := if is_w(to_char(119)) { 2 } else { 0 }
+        \\    return k + w
+        \\}
+        \\
+    ;
+    try writeFixture(io, dir, &.{.{ "main.toy", src }});
+    const ir = try harness.emitIr(gpa, io, dir ++ "/main.toy", &.{"--release"});
+    defer gpa.free(ir);
+    const same = harness.irBody(ir, "main.same") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, same, "call @Eq$eq$") == null);
+    const to_char = harness.irBody(ir, "main.to_char") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, to_char, "call @TryInto$int_to_char$") == null);
+    const is_w = harness.irBody(ir, "main.is_w") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, is_w, "call @Eq$eq$") == null);
+
+    const prog = try harness.compile(gpa, io, dir ++ "/rel", src, &.{"--release"});
+    defer gpa.free(prog);
+    try testing.expectEqual(@as(u8, 42), try harness.runExit(gpa, io, prog));
+}
+
 test "panic: a backtrace cut off by the frame cap before main ends with a '...' line" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
