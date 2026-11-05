@@ -83,3 +83,14 @@ run = "bash bench/peers/run.sh"
 [tasks."test:gc-stress"]
 description = "Run the corpus with a collection before every allocation"
 run = "zig build test-bin && TOY_GC_STRESS=1 ./zig-out/bin/toy-corpus-test"
+
+# Zig never prunes .zig-cache, and every compiler change builds fresh objects into it,
+# so it grows by tens of GB in a few days of work. The next build rebuilds what it needs.
+[tasks."clean:cache"]
+description = "Delete .zig-cache, and .stack-work toys and probes older than 2 days"
+run = """
+rm -rf .zig-cache
+[ -d .stack-work/toys ] && find .stack-work/toys -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} +
+[ -d .stack-work/probes ] && find .stack-work/probes -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} +
+true
+"""
