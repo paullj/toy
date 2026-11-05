@@ -1,0 +1,127 @@
+# Feature: #207: a closure another closure captures escapes only when that closure does: a fn-value param, a local fn, a mut param and a big boxed local followed through capture chains, against chains that do escape, and a non-escaping closure that leaks its capture (returns it, stores it in a struct or a Vec, passes it to a fn that returns it), with collections and frame clobbers in between
+# expect: stdout "205\n102\n130\n38\n5\n89\n201\n11\n22\n33\n44\n"
+# expect: exit 0
+import std/io
+import std/vec
+import std/gc
+struct A { a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int }
+fn churn() -> int {
+    junk: Vec[str] = []
+    k := 0
+    while k < 100 {
+        junk.push("xxxxxxxxxxxxxxxx".concat(k.to_string()))
+        k += 1
+    }
+    gc.collect()
+    junk.len()
+}
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+fn twice(f: fn(int) -> int) -> fn(int) -> int { fn(x: int) -> int { f(f(x)) } }
+# fn-value param captured by a non-escaping closure: the caller's lambda can live in its frame
+fn use_param(f: fn(int) -> int) -> int {
+    h := fn(x: int) -> int {
+        churn()
+        f(x) + 1
+    }
+    apply(h, 1) + h(2)
+}
+# fn-value param captured by an escaping closure: must escape
+fn esc_param(f: fn(int) -> int) -> fn(int) -> int {
+    h := fn(x: int) -> int { f(x) + 1 }
+    h
+}
+# recursion where a closure param is captured and passed down
+fn rec(n: int, f: fn(int) -> int) -> int {
+    if n == 0 { return f(0) }
+    g := fn(x: int) -> int { f(x) + 1 }
+    churn()
+    rec(n - 1, g)
+}
+# local fn capturing a closure
+fn local_fns() -> int {
+    big := A { a0: 1, a1: 2, a2: 3, a3: 4, a4: 5, a5: 6, a6: 7, a7: 8 }
+    g := fn(x: int) -> int { x + big.a7 }
+    fn lf(n: int) -> int { if n == 0 { g(0) } else { lf(n - 1) + g(n) } }
+    lf(3)
+}
+# mut param through a non-escaping chain
+fn mut_chain(mut n: int) -> int {
+    g := fn() { n = n + 1 }
+    h := fn() {
+        g()
+        g()
+    }
+    h()
+    run_it(h)
+    n
+}
+fn run_it(f: fn()) { f() }
+# big aggregate mutated after creation, captured through a chain
+fn chain_mut() -> int {
+    b := A { a0: 1, a1: 2, a2: 3, a3: 4, a4: 5, a5: 6, a6: 7, a7: 8 }
+    g := fn() -> int { b.a7 }
+    h := fn() -> int {
+        churn()
+        g()
+    }
+    b.a7 = 80
+    r := h()
+    b = A { a0: 1, a1: 2, a2: 3, a3: 4, a4: 5, a5: 6, a6: 7, a7: 9 }
+    r + h()
+}
+struct Holder { f: fn() -> int }
+fn id(f: fn() -> int) -> fn() -> int { f }
+# a non-escaping closure that leaks the closure it captures: that one escapes
+fn leak_ret(base: int) -> fn() -> int {
+    g := fn() -> int { base + 1 }
+    h := fn() -> fn() -> int { g }
+    h()
+}
+fn leak_struct(base: int) -> fn() -> int {
+    g := fn() -> int { base + 2 }
+    h := fn() -> Holder { Holder { f: g } }
+    h().f
+}
+fn leak_vec(base: int) -> fn() -> int {
+    g := fn() -> int { base + 3 }
+    v: Vec[fn() -> int] = []
+    h := fn() { v.push(g) }
+    h()
+    v[0]
+}
+fn leak_id(base: int) -> fn() -> int {
+    g := fn() -> int { base + 4 }
+    h := fn() -> fn() -> int { id(g) }
+    h()
+}
+# overwrites the stack a dangling frame env would sit in
+fn clobber(n: int) -> int {
+    x := A { a0: n, a1: n, a2: n, a3: n, a4: n, a5: n, a6: n, a7: n }
+    y := A { a0: n, a1: n, a2: n, a3: n, a4: n, a5: n, a6: n, a7: n }
+    x.a0 + y.a7
+}
+fn call_late(f: fn() -> int) -> int {
+    churn()
+    clobber(99)
+    f()
+}
+fn main() -> int {
+    k := 100
+    io.println(use_param(fn(x: int) -> int { x + k }))
+    e := esc_param(fn(x: int) -> int { x + k })
+    churn()
+    io.println(e(1))
+    io.println(rec(30, fn(x: int) -> int { x + k }))
+    io.println(local_fns())
+    a := 1
+    io.println(mut_chain(a))
+    io.println(chain_mut())
+    t := twice(fn(x: int) -> int { x + k })
+    churn()
+    io.println(t(1))
+    io.println(call_late(leak_ret(10)))
+    io.println(call_late(leak_struct(20)))
+    io.println(call_late(leak_vec(30)))
+    io.println(call_late(leak_id(40)))
+    0
+}

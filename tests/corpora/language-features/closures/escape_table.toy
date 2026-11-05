@@ -1,0 +1,53 @@
+# Feature: #40's table: a captured and assigned local of any size, an env of any size, and a closure another non-escaping closure captures and only calls all stay out of the heap at -O1 (tests/closures.zig counts the allocations)
+# expect: exit 21
+struct P2 { a: int, b: int }
+struct P3 { a: int, b: int, c: int }
+struct A { a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int }
+struct Q4 { a: A, b: A, c: A, d: A }
+struct Q5 { a: A, b: A, c: A, d: A, e: A }
+struct Acc { n: int }
+impl Acc { fn plus(self, x: int) -> int { self.n + x } }
+
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+fn run(f: fn()) { f() }
+fn get(f: fn() -> int) -> int { f() }
+fn a(x: int) -> A { A { a0: x, a1: x, a2: x, a3: x, a4: x, a5: x, a6: x, a7: x } }
+
+fn hole_capture(acc: Acc) -> int {
+    g := acc.plus(_)
+    apply(g, 1)
+}
+
+fn mut16() -> int {
+    p := P2 { a: 1, b: 2 }
+    run(fn() { p.a = p.a + 1 })
+    p.a
+}
+
+fn mut24() -> int {
+    p := P3 { a: 1, b: 2, c: 3 }
+    run(fn() { p.a = p.a + 1 })
+    p.a
+}
+
+fn nested() -> int {
+    k := 5
+    g := fn(x: int) -> int { x + k }
+    h := fn() -> int { g(1) }
+    h()
+}
+
+fn env256() -> int {
+    q := Q4 { a: a(1), b: a(2), c: a(3), d: a(4) }
+    get(fn() { q.d.a7 })
+}
+
+fn env320() -> int {
+    q := Q5 { a: a(1), b: a(2), c: a(3), d: a(4), e: a(5) }
+    get(fn() { q.e.a7 })
+}
+
+fn main() -> int {
+    acc := Acc { n: 1 }
+    return hole_capture(acc) + mut16() + mut24() + nested() + env256() + env320()
+}

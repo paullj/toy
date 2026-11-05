@@ -7390,7 +7390,7 @@ test "with frame storage a by-value read of an unboxed aggregate copies it first
     try testing.expect(std.mem.indexOf(u8, frame, "copy ") != null);
 }
 
-test "with frame storage an unboxed capture is an int place slot in the lambda whose aggregate stores are not staged" {
+test "with frame storage an unboxed capture reads in the lambda exactly as its cell does, aggregate stores unstaged" {
     const gpa = testing.allocator;
     // The `mut` param turns staging on for the lambda; only its store is staged, as `p`'s
     // value reads neither `p` nor code that could.
@@ -7415,10 +7415,11 @@ test "with frame storage an unboxed capture is an int place slot in the lambda w
     defer gpa.free(cell);
     try testing.expect(std.mem.indexOf(u8, cell, "slots: s0:rawptr s1:int s2:rawptr") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, cell, "copy "));
+    // The owner may keep `p` in its cell after all (`Engine.lowerFitted`), so the lambda
+    // cannot tell the two apart.
     const addr = try renderUnit(gpa, src, "main.f$l0", .{ .frame = true });
     defer gpa.free(addr);
-    try testing.expect(std.mem.indexOf(u8, addr, "slots: s0:rawptr s1:int s2:int") != null);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, addr, "copy "));
+    try testing.expectEqualStrings(cell, addr);
 }
 
 test "a .ref capture is an int place slot in the lambda, and a non-self .ref stages aggregate stores like its owner" {

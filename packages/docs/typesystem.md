@@ -633,7 +633,7 @@ inside a block). It is checked bidirectionally, like a literal:
   that does not escape (closures.md, Escape analysis); one that escapes is **T0052**. A
   local passed as a `mut` argument counts as assigned. A captured
   `Vec`/`Map` is its handle, so pushes through it are shared either way. With the opt
-  passes on, a boxed local of 16 B or less that only closures that do not escape capture
+  passes on, a boxed local of any size that only closures that do not escape capture
   stays in its slot, and they hold its address (closures.md, Escape analysis).
 
 Each lambda is its own function `<owner>$l<rank>(env, params..)`, where the owner is
