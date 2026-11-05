@@ -1,0 +1,78 @@
+# Differential: a fn that calls itself takes small callees inlined (#354) while their slots
+# fit a small frame budget. A tree builder splices Vec.new, Vec.with_capacity and Vec.push;
+# mutual recursion keeps the call that leads back into the caller; a recursive Map walk
+# with a user Hash/Eq key splices its helpers and still reads what it stored; and a
+# 50000-deep recursion through spliced callees keeps a frame small enough to fit the stack.
+# expect: stdout "1023\n1\n0\n5050\n120\n50000\n"
+# expect: exit 0
+import std/io
+import std/vec
+import std/map
+
+struct Node { kids: Vec[Node] }
+
+fn build(d: int) -> Node {
+    if d == 0 { return Node { kids: [] } }
+    return Node { kids: [build(d - 1), build(d - 1)] }
+}
+
+fn size(n: Node) -> int {
+    s := 1
+    for k in n.kids { s = s + size(k) }
+    return s
+}
+
+fn dec(n: int) -> int { n - 1 }
+
+fn is_even(n: int) -> int {
+    if n == 0 { return 1 }
+    return is_odd(dec(n))
+}
+
+fn is_odd(n: int) -> int {
+    if n == 0 { return 0 }
+    return is_even(dec(n))
+}
+
+struct K { v: int }
+
+impl K has Hash {
+    fn hash(self) -> int { self.v % 7 }
+}
+
+impl K has Eq {
+    fn eq(self, o: K) -> bool { self.v == o.v }
+}
+
+fn fill(m: Map[K, int], i: int) -> int {
+    if i == 0 { return 0 }
+    m.set(K { v: i }, i)
+    return i + fill(m, i - 1)
+}
+
+fn sum_back(m: Map[K, int], i: int, acc: int) -> int {
+    if i > 10 { return acc }
+    return sum_back(m, i + 1, acc + m.get(K { v: i * 2 }).or(0) + m.len() % 3)
+}
+
+fn deep(v: Vec[int], i: int) -> int {
+    if i >= v.len() { return 0 }
+    return 1 + deep(v, i + 1)
+}
+
+fn main() -> int {
+    io.println(size(build(9)))
+    io.println(is_even(10))
+    io.println(is_odd(10))
+    m: Map[K, int] = Map.new()
+    io.println(fill(m, 100))
+    io.println(sum_back(m, 1, 0))
+    v: Vec[int] = []
+    i := 0
+    while i < 50000 {
+        v.push(i)
+        i += 1
+    }
+    io.println(deep(v, 0))
+    0
+}

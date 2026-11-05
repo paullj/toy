@@ -143,7 +143,7 @@ pub fn typeAlign(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLa
 /// Whether a type is a value AGGREGATE (str / struct / enum) — passed in a reg
 /// pair (<=16B) or indirect+x8 (>16B), copied by bytes.
 pub fn isAggregate(ty: Type) bool {
-    return ty.kind == .str or ty.kind == .@"struct" or ty.kind == .@"enum";
+    return ty.isAggregateValue();
 }
 
 /// How many 8-byte "eightbytes" a <=16-byte reg-pair value occupies (1 or 2).

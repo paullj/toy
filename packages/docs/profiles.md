@@ -143,8 +143,9 @@ call's setup costs nothing and the other passes simplify across it. A function i
 inlined when it has no loop, does not call itself, and stays under a small size after its
 own small callees are inlined into it, three calls deep at most. It can come from any
 module, the standard library included; a function that holds a closure is not inlined.
-A function that calls itself takes no inlined bodies: each one would grow its frame, and
-a deep recursion would run out of stack sooner than without inlining.
+A function that calls itself takes only the inlined bodies that add at most two one-word
+slots to its frame. Each extra byte of frame is paid at every level of a recursion, so a
+bigger frame would run out of stack sooner than without inlining.
 
 An inlined function has no frame of its own, so a panic inside it shows the caller's
 frame, and the function itself drops out of the backtrace:

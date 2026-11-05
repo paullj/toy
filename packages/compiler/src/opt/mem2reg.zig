@@ -63,7 +63,8 @@ fn fits(t: Ir.Type, slot: Ir.Type) bool {
     return t.eql(slot) or (t.kind == .int and slot.kind == .int);
 }
 
-fn candidates(gpa: std.mem.Allocator, func: *Ir.Function) error{OutOfMemory}![]bool {
+/// Which of `func`'s slots this pass promotes.
+pub fn candidates(gpa: std.mem.Allocator, func: *const Ir.Function) error{OutOfMemory}![]bool {
     const ok = try gpa.alloc(bool, func.slots.len);
     errdefer gpa.free(ok);
     for (func.slots, ok) |s, *o| o.* = registerType(s.type);
@@ -71,10 +72,9 @@ fn candidates(gpa: std.mem.Allocator, func: *Ir.Function) error{OutOfMemory}![]b
     const sites = try gpa.alloc(u32, func.slots.len);
     defer gpa.free(sites);
     @memset(sites, 0);
-    for (func.blocks) |*b| walk.remapBlockSlots(b, sites, struct {
-        fn count(c: []u32, s: Ir.SlotId) Ir.SlotId {
-            if (s != Ir.none_slot and s < c.len) c[s] += 1;
-            return s;
+    walk.forEachSlotUse(func, sites, struct {
+        fn count(c: []u32, s: Ir.SlotId) void {
+            if (s < c.len) c[s] += 1;
         }
     }.count);
 
