@@ -54,7 +54,7 @@ pub fn buildAndRunWith(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, ent
 
 /// The load-bearing precise-trace entry: 64 OWNED (heap `concat`-built) string keys inserted
 /// into a `Map[str,int]` (which grows `cap` to 128, scattering the 64 dense entries into
-/// physical buckets ≥ len), then a forced collection while ~20000 dead heap strings churn the
+/// physical buckets ≥ len), then a forced collection while ~100000 dead heap strings churn the
 /// same size classes so a swept key buffer is reused and overwritten. It exits 42 iff every
 /// key still maps to its value. The collector's `trace_map` keeps them by walking the DENSE
 /// `entries[0..len)` and marking each key buffer — the backings have no layout of their
@@ -73,7 +73,7 @@ const map_high_bucket_src =
     \\    }
     \\    i := 0
     \\    loop {
-    \\        if i >= 20000 { break }
+    \\        if i >= 100000 { break }
     \\        dead := "x".concat(i.to_string())
     \\        junk: Vec[int] = []
     \\        junk.push(i)
@@ -218,7 +218,7 @@ test "dfe: a collection inside a kept fn works after the link drops an allocatin
         \\    xs: Vec[int] = []
         \\    for i in 0..n { xs.push(i) }
         \\    gc.collect()
-        \\    for i in 0..20000 {
+        \\    for i in 0..100000 {
         \\        junk: Vec[int] = []
         \\        junk.push(i)
         \\    }
@@ -336,7 +336,7 @@ test "gc: churning unreachable Vecs triggers at least one collection (falsifies 
         \\import std/gc
         \\import std/vec
         \\fn main() -> int {
-        \\    for i in 0..20000 {
+        \\    for i in 0..100000 {
         \\        junk: Vec[int] = []
         \\        junk.push(i)
         \\    }
@@ -359,7 +359,7 @@ test "gc: a Ref embedded in a struct local survives a forced collection (whole-f
         \\fn main() -> int {
         \\    h := Holder { r: Ref.new(7) }
         \\    gc.collect()
-        \\    for i in 0..20000 { _junk := Ref.new(i) }
+        \\    for i in 0..100000 { _junk := Ref.new(i) }
         \\    return h.r.get()
         \\}
         \\
@@ -380,7 +380,7 @@ test "gc: a self-referential cycle is traced without looping and swept without c
     try std.testing.expectEqual(@as(u8, 1), code);
 }
 
-test "gc: a rooted Vec survives churning ~20000 unreachable Vecs (collect.toy spike gate)" {
+test "gc: a rooted Vec survives churning ~100000 unreachable Vecs (collect.toy spike gate)" {
     // The spike gate: exit 15 (= keep.get(0)==7 + 8) proves the collector does NOT
     // over-collect the survivor rooted in main's frame while reclaiming the churn.
     const gpa = std.testing.allocator;
@@ -394,7 +394,7 @@ test "gc: a rooted Vec survives churning ~20000 unreachable Vecs (collect.toy sp
         \\    keep.push(7)
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        junk: Vec[int] = []
         \\        junk.push(i)
         \\        i = i + 1
@@ -449,10 +449,10 @@ test "gc: churning dropped large objects is bounded — dead spans munmapped, ro
     try std.testing.expectEqual(@as(u8, 9), code);
 }
 
-test "gc: the collection budget scales with the live heap, not a fixed 256 KiB (GOGC=100 pacing)" {
-    // Exit 1 = no collection while churning 1 MiB under a ~2.25 MiB live heap, then one
-    // once the churn passes it. A fixed 256 KiB trigger runs 3 inside the budget (103),
-    // the quadratic total GC time #87 reported.
+test "gc: the collection budget scales with the live heap, not a fixed floor (GOGC=100 pacing)" {
+    // Exit 1 = no collection while churning 6 MiB under a ~9 MiB live heap, then one once
+    // the churn passes it. A fixed 4 MiB trigger runs one inside the budget (101), the
+    // quadratic total GC time #87 reported.
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -463,6 +463,35 @@ test "gc: the collection budget scales with the live heap, not a fixed 256 KiB (
         \\
     , &.{harness.dev_core_imports});
     try std.testing.expectEqual(@as(u8, 1), code);
+}
+
+test "gc: a heap under the 4 MiB pacing floor runs no collection" {
+    // Exit 1 = churning 3 MiB with nothing live collected nothing; 100+k = k collections.
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const code = try buildAndRunWith(gpa, io, ".toy-test-gc-pacing-floor",
+        \\import core/mem_selftest
+        \\fn main() -> int { return mem_selftest.pacing_floor() }
+        \\
+    , &.{harness.dev_core_imports});
+    try std.testing.expectEqual(@as(u8, 1), code);
+}
+
+test "heap: store_u32 writes 4 bytes and leaves its neighbours alone" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-store-u32",
+            \\import core/mem_selftest
+            \\fn main() -> int { return mem_selftest.store_u32_narrow() }
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
 }
 
 test "gc: a large object rooted only through its third page survives (every page is in the span table)" {
@@ -528,7 +557,7 @@ test "gc: a by-value aggregate SLOT survivor is kept by recursing the precise ro
         \\    keep: Bag = make()
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        junk: Vec[int] = []
         \\        junk.push(i)
         \\        i = i + 1
@@ -557,7 +586,7 @@ test "gc: a box VALUE held across an alloc-triggered collection is a root (retyp
         \\fn churn_ref() -> Ref[int] {
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        j: Vec[int] = []
         \\        j.push(i)
         \\        i = i + 1
@@ -572,7 +601,7 @@ test "gc: a box VALUE held across an alloc-triggered collection is a root (retyp
 
 test "gc: a struct-embedded heap str survives churn (str leaf projected at its ptr half)" {
     // A `str` field holds a pointer into a heap buffer; the precise map must project that
-    // pointer (base+0). Box{s: to_string(700)} survives 20000 churned vectors and still
+    // pointer (base+0). Box{s: to_string(700)} survives 100000 churned vectors and still
     // compares equal to "700" (exit 7); without the str leaf the buffer is swept (exit 0).
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -585,7 +614,7 @@ test "gc: a struct-embedded heap str survives churn (str leaf projected at its p
         \\    b := Box{ s: 700.to_string(), n: 0 }
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        junk: Vec[int] = []
         \\        junk.push(i)
         \\        i = i + 1
@@ -648,7 +677,7 @@ test "gc: a str-only aggregate as a Vec element survives churn (its layout reach
         \\    keep := build()
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        dead := "x".concat(i.to_string())
         \\        junk: Vec[int] = []
         \\        junk.push(i)
@@ -691,7 +720,7 @@ test "gc: a multi-entry Map[str,Ref] keeps EVERY value's pointee across a collec
         \\    m := build()
         \\    i := 0
         \\    loop {
-        \\        if i >= 20000 { break }
+        \\        if i >= 100000 { break }
         \\        dead := "x".concat(i.to_string())
         \\        junk: Vec[int] = []
         \\        junk.push(i)
@@ -720,7 +749,7 @@ const stale_slot_src =
     \\fn churn_mk(k: int, _j: int) -> C {
     \\    i := 0
     \\    loop {
-    \\        if i >= 30000 { break }
+    \\        if i >= 150000 { break }
     \\        p := Pt { x: i, y: i }
     \\        f := Pt { x: 1, y: 2 }
     \\        _q := f
@@ -733,7 +762,7 @@ const stale_slot_src =
     \\fn churn_closures(k: int) -> C {
     \\    i := 0
     \\    loop {
-    \\        if i >= 30000 { break }
+    \\        if i >= 150000 { break }
     \\        p := Pt { x: i, y: i }
     \\        f := fn() -> int { p.x }
     \\        _q := f
@@ -768,7 +797,7 @@ test "gc: a container slot is cleared before a collection can scan it" {
 
 const churn_src =
     \\fn churn() -> int {
-    \\    for i in 0..20000 {
+    \\    for i in 0..100000 {
     \\        junk: Vec[int] = []
     \\        junk.push(i)
     \\    }

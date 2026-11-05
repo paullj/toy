@@ -16,7 +16,7 @@ fn c(x: int, name: str) -> C { C { c0: b(x), c1: b(x), c2: b(x), c3: b(x), c4: b
 
 fn churn() {
     i := 0
-    while i < 20000 {
+    while i < 100000 {
         junk: Vec[int] = []
         junk.push(i)
         i = i + 1

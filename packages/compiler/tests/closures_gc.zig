@@ -22,7 +22,7 @@ const fn_vec_src =
     \\fn triple(x: int) -> int { x * 3 }
     \\fn square(x: int) -> int { x * x }
     \\fn churn() -> int {
-    \\    for i in 0..20000 {
+    \\    for i in 0..100000 {
     \\        junk: Vec[int] = []
     \\        junk.push(i)
     \\    }
@@ -60,7 +60,7 @@ test "fn-value programs are byte-identical at -j1 and -j8" {
 }
 
 /// Closure GC-pressure fixtures. Every victim env is an 8- or 16-byte cell; `churn` makes
-/// 20000 closures whose 8-byte envs hold junk, so a victim env swept for want of a root
+/// 100000 closures whose 8-byte envs hold junk, so a victim env swept for want of a root
 /// is reused and overwritten before the victim is called. Each churn closure escapes
 /// through `keep_one`, or at -O1 its env would sit in `churn`'s frame and overwrite no
 /// cell. `collect` forces one collection and then churns.
@@ -76,7 +76,7 @@ const closure_gc_prelude =
     \\fn churn() -> int {
     \\    i := 0
     \\    loop {
-    \\        if i >= 20000 { break }
+    \\        if i >= 100000 { break }
     \\        j := i + 1000
     \\        _g := keep_one(fn() -> int { j })
     \\        junk: Vec[int] = []

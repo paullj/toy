@@ -416,10 +416,10 @@ test "a capturing lambda passed to Vec.each in a loop triggers no collection at 
         \\    gc.collect()
         \\    a := gc.collections()
         \\    total := 0
-        \\    for _ in 0..100000 { xs.each(fn(v: int) { total = total + v }) }
+        \\    for _ in 0..400000 { xs.each(fn(v: int) { total = total + v }) }
         \\    gc.collect()
         \\    b := gc.collections()
-        \\    if total != 600000 { return 255 }
+        \\    if total != 2400000 { return 255 }
         \\    return b - a
         \\}
         \\

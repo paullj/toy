@@ -1,5 +1,5 @@
 # expect: exit 7
-# A Vec[Ref[int]] holds two boxed ints; churning ~20000 unreachable Vecs forces a
+# A Vec[Ref[int]] holds two boxed ints; churning ~100000 unreachable Vecs forces a
 # collection while `keep` is rooted. The int cells survive ONLY if the precise container
 # trace walks keep's live elements by the Ref element layout (marking the backing, then
 # each boxed cell). 3 + 4 = 7.
@@ -12,7 +12,7 @@ fn main() -> int {
     keep.push(Ref.new(4))
     i := 0
     loop {
-        if i >= 20000 { break }
+        if i >= 100000 { break }
         junk: Vec[int] = []
         junk.push(i)
         i = i + 1

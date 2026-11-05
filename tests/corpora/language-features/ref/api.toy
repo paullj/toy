@@ -33,7 +33,7 @@ fn main() -> int {
         i = i + 1
     }
     before := gc.collections()
-    for k in 0..20000 {
+    for k in 0..100000 {
         junk: Vec[int] = []
         junk.push(k)
     }

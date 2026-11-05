@@ -50,8 +50,6 @@ pub fn alloc(size: int, layout: int) -> rawptr {
         if cell != 0 {
             set_word(head, word(cell))
             set_word(cell, 0)
-            # Grouped so a constant class folds to one add.
-            set_word(allocated(cb), word(allocated(cb)) + (class * 16 + 16))
             set_layout(cell, relative(layout))
             return offset(cell, 0)
         }
@@ -75,7 +73,6 @@ pub fn alloc_slow(size: int, layout: int) -> rawptr {
     }
     class := size_class(size)
     cell_size := class_size(class)
-    set_word(allocated(cb), word(allocated(cb)) + cell_size)
     head := freelist(cb, class)
     cell := word(head)
     if cell == 0 {
@@ -131,11 +128,12 @@ fn class_size(class: int) -> int {
 }
 
 # Go's GOGC=100 pacing: collect once the program has allocated as much as the last sweep
-# kept, but never before 256 KiB. A fixed budget would make a growing live set pay a
-# whole-heap trace every 256 KiB.
+# kept, but never before 4 MiB, Go's minimum heap. A fixed budget would make a growing live
+# set pay a whole-heap trace every few hundred KiB, and a lower floor made a small heap
+# collect 16 times as often: alloc ran 17% more instructions with a 256 KiB floor.
 fn over_budget(cb: int) -> bool {
     budget := word(kept(cb))
-    if budget < 262144 { budget = 262144 }
+    if budget < 4194304 { budget = 4194304 }
     return word(allocated(cb)) >= budget
 }
 
@@ -176,6 +174,7 @@ fn refill(cb: int, class: int, cell_size: int) -> int {
         set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
     }
     count := (16384 - first_cell()) / cell_size
+    set_word(allocated(cb), word(allocated(cb)) + count * cell_size)
     set_word(span_cell_size(span), cell_size)
     set_word(span_cell_count(span), count)
     set_word(span_cells(span), span + first_cell())
@@ -556,6 +555,7 @@ fn file_spans(cb: int) -> int {
             set_word(span_pool(cb), span)
         } else {
             live += marked * word(span_cell_size(span))
+            set_word(span_live(span), marked)
             list := unswept(cb, word(span_class(span)))
             set_word(span_link(span), word(list))
             set_word(list, span)
@@ -615,6 +615,7 @@ fn sweep_span(cb: int, span: int) {
         set_byte(at, 0)
         at += 1
     }
+    set_word(allocated(cb), word(allocated(cb)) + (count - word(span_live(span))) * size)
 }
 
 # Unmap every unmarked large object and clear the marks. Returns the bytes kept.
@@ -642,7 +643,9 @@ fn sweep_large(cb: int) -> int {
 # core/rt/stack's: 1 once it has armed the stack overflow handler.
 fn spans_mapped(cb: int) -> int { return cb }
 fn collections_run(cb: int) -> int { return cb + 8 }
-# Bytes allocated since the last collection.
+# Bytes allocated since the last collection, counted when a refill or a sweep hands a
+# span's free cells to a freelist rather than per cell taken, which keeps the count off the
+# fast path.
 fn allocated(cb: int) -> int { return cb + 16 }
 fn span_list(cb: int) -> int { return cb + 24 }
 fn large_list(cb: int) -> int { return cb + 32 }
@@ -673,6 +676,8 @@ fn span_class(span: int) -> int { return span + 32 }
 fn span_marks(span: int) -> int { return span + 40 }
 # Links the span into an unswept list or the pool; past the most mark bits a span has.
 fn span_link(span: int) -> int { return span + 144 }
+# The cells the last collection marked, which the span's sweep does not hand out.
+fn span_live(span: int) -> int { return span + 152 }
 fn large_size(obj: int) -> int { return obj + 16 }
 fn large_len(obj: int) -> int { return obj + 32 }
 fn large_mark(obj: int) -> int { return obj + 40 }
@@ -689,10 +694,8 @@ fn layout_slot(cell: int) -> int {
     return cell - off + (off >> 2) + (256 - (first_cell() >> 2))
 }
 
-# Only the low 4 bytes are the cell's entry; the word's other half is the next cell's.
 fn set_layout(cell: int, rel: int) {
-    at := layout_slot(cell)
-    set_word(at, (word(at) & -4294967296) | rel)
+    unsafe { store_u32(layout_slot(cell), rel) }
 }
 
 # The 4-byte entry of `layout`. A program is kept as its offset from the stack map, which

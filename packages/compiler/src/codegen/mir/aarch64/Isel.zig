@@ -361,7 +361,10 @@ const S = struct {
             .load_byte => |a| try s.emit(.{ .load = .{ .rt = try s.def(res), .mem = Mem.reg(try s.val(a), 0), .size = .b1 } }),
             .get_tag => |a| try s.emit(.{ .load = .{ .rt = try s.def(res), .mem = Mem.reg(try s.val(a), 0) } }),
             .store => |st| try s.emit(.{ .store = .{ .rt = try s.val(st.val), .mem = Mem.reg(try s.val(st.addr), 0) } }),
-            .store_byte => |st| try s.emit(.{ .store = .{ .rt = try s.val(st.val), .mem = Mem.reg(try s.val(st.addr), 0), .size = .b1 } }),
+            .store_narrow => |st| try s.emit(.{ .store = .{ .rt = try s.val(st.val), .mem = Mem.reg(try s.val(st.addr), 0), .size = switch (st.width) {
+                .b1 => .b1,
+                .b4 => .b4,
+            } } }),
             .copy => |c| try s.emit(.{ .copy = .{ .dst = Mem.reg(try s.val(c.dst), 0), .src = Mem.reg(try s.val(c.src), 0), .size = s.typeSize(c.ty) } }),
             .cstr_ptr => |h| try s.emit(.{ .sym_addr = .{ .rd = try s.def(res), .target = .{ .cstr = h } } }),
             .fn_addr => |sym| try s.emit(.{ .sym_addr = .{ .rd = try s.def(res), .target = .{ .func = sym } } }),

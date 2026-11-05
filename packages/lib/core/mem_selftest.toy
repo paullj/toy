@@ -125,14 +125,14 @@ pub fn large_churn_survivor() -> int {
 }
 
 # The allocation budget between collections must scale with the live heap (GOGC=100
-# pacing), or a growing live set pays a whole-heap trace every fixed 256 KiB and the total
-# GC time grows quadratically. Root ~2.25 MiB (a 256 KiB large array of 32768 64-byte
-# cells), collect once to measure it, then churn 1 MiB: below the live-sized budget, so no
-# collection may run (a fixed 256 KiB trigger runs 3). Churning 4 MiB more crosses
-# the budget and must collect. Returns 1; 100+k when k collections ran inside the budget,
-# 2 when none ran past it.
+# pacing), or a growing live set pays a whole-heap trace every fixed budget and the total
+# GC time grows quadratically. Root ~9 MiB (a 1 MiB large array of 131072 64-byte cells),
+# well above the 4 MiB floor, collect once to measure it, then churn 6 MiB: past the floor
+# but below the live-sized budget, so no collection may run (a fixed 4 MiB trigger runs
+# one). Churning 6 MiB more crosses the budget and must collect. Returns 1; 100+k when k
+# collections ran inside the budget, 2 when none ran past it.
 pub fn live_paced_collections() -> int {
-    n := 32768
+    n := 131072
     arr := mem.ga_with_cap[rawptr](n)
     i := 0
     loop {
@@ -144,7 +144,7 @@ pub fn live_paced_collections() -> int {
     s0 := gc_stats()
     j := 0
     loop {
-        if j >= 16384 { break }
+        if j >= 98304 { break }
         junk := gc_alloc(64, 0)
         unsafe { store(junk, j) }
         j = j + 1
@@ -152,7 +152,7 @@ pub fn live_paced_collections() -> int {
     s1 := gc_stats()
     k := 0
     loop {
-        if k >= 65536 { break }
+        if k >= 98304 { break }
         junk := gc_alloc(64, 0)
         unsafe { store(junk, k) }
         k = k + 1
@@ -220,5 +220,37 @@ pub fn empty_spans_reused() -> int {
     grown := gc_span_count() - s0
     if grown != 0 { return 100 + grown }
     if dirty != 0 { return 2 }
+    return 1
+}
+
+# A program whose heap stays small never pays for a collection: the budget has a 4 MiB
+# floor, Go's minimum heap. Churn 3 MiB of 64-byte cells with nothing live. Returns 1;
+# 100+k when k collections ran.
+pub fn pacing_floor() -> int {
+    s0 := gc_stats()
+    i := 0
+    loop {
+        if i >= 49152 { break }
+        junk := gc_alloc(64, 0)
+        unsafe { store(junk, i) }
+        i = i + 1
+    }
+    k := gc_stats() - s0
+    if k != 0 { return 100 + k }
+    return 1
+}
+
+# `store_u32` writes the low 4 bytes of its value and nothing around them. Returns 1; 2
+# when the word it wrote into is wrong, 3 when a neighbour changed.
+pub fn store_u32_narrow() -> int {
+    p := gc_alloc(32, 0)
+    unsafe {
+        store(p, -1)
+        store(offset(p, 8), -1)
+        store(offset(p, 16), -1)
+        store_u32(offset(p, 12), 0x1_2345_6789)
+        if load(offset(p, 8)) != 0x2345_6789_FFFF_FFFF { return 2 }
+        if load(p) != -1 || load(offset(p, 16)) != -1 { return 3 }
+    }
     return 1
 }

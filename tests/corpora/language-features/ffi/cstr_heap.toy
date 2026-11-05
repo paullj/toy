@@ -17,7 +17,7 @@ fn main() -> int {
     i := 0
     keep: Vec[cstr] = []
     fields: Vec[Field] = []
-    while i < 3000 {
+    while i < 30000 {
         want := "k".concat(i.to_string())
         junk: Vec[str] = []
         junk.push("pad".concat(i.to_string()))

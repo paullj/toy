@@ -11,7 +11,7 @@ import std/vec
 fn main() -> int {
     i := 0
     loop {
-        if i >= 20000 { break }
+        if i >= 100000 { break }
         junk: Vec[int] = []
         junk.push(i)
         i = i + 1

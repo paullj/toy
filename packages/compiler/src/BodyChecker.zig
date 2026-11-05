@@ -4391,14 +4391,14 @@ pub const BodyChecker = struct {
                         bc.node_types[(node_idx).int()] = Type.unit;
                         return Type.unit;
                     },
-                    .store_byte => {
+                    .store_byte, .store_u32 => {
                         if (try bc.checkArity(node_idx, args, 2)) {
                             const pt = try bc.typeOf(args[0]);
                             _ = try bc.typeOf(args[1]);
                             if (!bc.in_unsafe)
-                                try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer 'store_byte' requires an 'unsafe' block", .{});
+                                try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0038 }, "raw pointer '{s}' requires an 'unsafe' block", .{Intrinsic.name(ik)});
                             if (pt.kind != .rawptr and pt.kind != .int and pt.kind != .invalid)
-                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'store_byte' expects a 'rawptr' or an 'int' address, got '{f}'", .{bc.fmtType(pt)});
+                                try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "'{s}' expects a 'rawptr' or an 'int' address, got '{f}'", .{ Intrinsic.name(ik), bc.fmtType(pt) });
                         }
                         bc.node_types[(node_idx).int()] = Type.unit;
                         return Type.unit;

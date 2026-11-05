@@ -9,7 +9,7 @@ const std = @import("std");
 /// Declared in the order the resolver seeds them. Seed order fixes each intrinsic
 /// fn's global id, which feeds the content fingerprint / -jN identity, so the
 /// order is load-bearing — append, never reorder.
-pub const Kind = enum { size_of, align_of, gc_alloc, gc_span_count, store, load, gc_array, offset, gc_collect, gc_stats, text_base, call_hash, call_eq, descriptor_of, store_byte, load_byte, ref_new, ref_get, ref_set, control_block, frame_address, stack_map, gc_stress, layout_of };
+pub const Kind = enum { size_of, align_of, gc_alloc, gc_span_count, store, load, gc_array, offset, gc_collect, gc_stats, text_base, call_hash, call_eq, descriptor_of, store_byte, load_byte, ref_new, ref_get, ref_set, control_block, frame_address, stack_map, gc_stress, layout_of, store_u32 };
 
 pub fn name(k: Kind) []const u8 {
     return switch (k) {
@@ -37,6 +37,7 @@ pub fn name(k: Kind) []const u8 {
         .stack_map => "stack_map",
         .gc_stress => "gc_stress",
         .layout_of => "layout_of",
+        .store_u32 => "store_u32",
     };
 }
 
@@ -59,7 +60,7 @@ pub fn scope(k: Kind) Scope {
 pub fn allocates(k: Kind) bool {
     return switch (k) {
         .gc_alloc, .gc_collect, .ref_new, .call_hash, .call_eq => true,
-        .size_of, .align_of, .gc_span_count, .store, .load, .gc_array, .offset, .gc_stats, .text_base, .descriptor_of, .store_byte, .load_byte, .ref_get, .ref_set, .control_block, .frame_address, .stack_map, .gc_stress, .layout_of => false,
+        .size_of, .align_of, .gc_span_count, .store, .load, .gc_array, .offset, .gc_stats, .text_base, .descriptor_of, .store_byte, .load_byte, .ref_get, .ref_set, .control_block, .frame_address, .stack_map, .gc_stress, .layout_of, .store_u32 => false,
     };
 }
 
@@ -74,7 +75,7 @@ pub fn lookup(n: []const u8) ?Kind {
 test "name/lookup round-trip over every Kind, in seed order" {
     const order = std.enums.values(Kind);
     try std.testing.expectEqual(Kind.size_of, order[0]);
-    try std.testing.expectEqual(Kind.layout_of, order[order.len - 1]);
+    try std.testing.expectEqual(Kind.store_u32, order[order.len - 1]);
     for (order) |k| try std.testing.expectEqual(k, lookup(name(k)).?);
     try std.testing.expect(lookup("not_an_intrinsic") == null);
 }

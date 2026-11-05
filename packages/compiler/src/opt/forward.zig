@@ -157,7 +157,7 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                         .unknown => clearAll(&avail),
                     }
                 },
-                .store_byte => |s| switch (resolve(def, s.addr)) {
+                .store_narrow => |s| switch (resolve(def, s.addr)) {
                     .slot => |sl| clearSlot(&avail, sl.s),
                     .unknown => clearAll(&avail),
                 },
@@ -215,7 +215,7 @@ fn markEscapes(func: *const Ir.Function, def: []const ?Ir.Op, escaped: []bool) v
         for (b.instrs) |ins| {
             switch (ins.op) {
                 .store => |s| escapeOf(def, escaped, s.val),
-                .store_byte => |s| escapeOf(def, escaped, s.val),
+                .store_narrow => |s| escapeOf(def, escaped, s.val),
                 .copy => |c| escapeOf(def, escaped, c.src),
                 .call => |c| for (c.args) |a| switch (a) {
                     .value => |v| escapeOf(def, escaped, v),

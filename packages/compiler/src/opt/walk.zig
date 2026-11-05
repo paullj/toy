@@ -51,7 +51,7 @@ fn eachInstrUseOperand(op: *Ir.Op, ctx: anytype, comptime each: anytype) void {
             each(ctx, &s.addr);
             each(ctx, &s.val);
         },
-        .store_byte => |*s| {
+        .store_narrow => |*s| {
             each(ctx, &s.addr);
             each(ctx, &s.val);
         },
@@ -179,7 +179,7 @@ pub fn remapBlockSlots(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx
             ops.args(ctx, c.args);
             c.ret_slot = map(ctx, c.ret_slot);
         },
-        .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_byte, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .data_addr, .frame_addr, .overflow => {},
+        .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_narrow, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .data_addr, .frame_addr, .overflow => {},
     };
     switch (b.term) {
         .br => |*br| ops.args(ctx, br.args),
@@ -296,7 +296,7 @@ fn buildUseFixture(a: std.mem.Allocator) !Ir.Function {
     instrs[28] = .{ .result = 125, .op = .{ .umod = .{ .lhs = 55, .rhs = 56 } } };
     instrs[29] = .{ .result = 126, .op = .{ .scvtf = 57 } };
     instrs[30] = .{ .result = 127, .op = .{ .fcvtzs = 58 } };
-    instrs[31] = .{ .result = Ir.none_value, .op = .{ .store_byte = .{ .addr = 60, .val = 61 } } };
+    instrs[31] = .{ .result = Ir.none_value, .op = .{ .store_narrow = .{ .addr = 60, .val = 61, .width = .b1 } } };
     instrs[32] = .{ .result = 128, .op = .{ .fcvt = 62 } };
 
     var br_args = try a.alloc(Ir.Operand, 3);
@@ -341,7 +341,7 @@ const expected_uses = [_]Ir.ValueId{
     52, // bcompl
     53, 54, 55, 56, // smod/umod
     57, 58, // scvtf, fcvtzs
-    60, 61, // store_byte
+    60, 61, // store_narrow
     62, // fcvt
     30, // br arg (slot + none skipped)
     31, // cond_br cond

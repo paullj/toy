@@ -29,9 +29,9 @@ fn pair(a: Ref[int], b: Ref[int], c: int) -> int {
 }
 
 fn show(v: Vec[int], x: int, f: float) -> int {
-    c := churn(2000)
+    c := churn(60000)
     io.println(v.get(0).or(0) + c)
-    io.println(x + churn(2000))
+    io.println(x + churn(60000))
     io.println(f)
     return c
 }
@@ -39,5 +39,5 @@ fn show(v: Vec[int], x: int, f: float) -> int {
 fn main() -> int {
     v: Vec[int] = []
     v.push(8)
-    return pair(Ref.new(30), Ref.new(12), churn(3000) + show(v, 13, 2.5))
+    return pair(Ref.new(30), Ref.new(12), churn(100000) + show(v, 13, 2.5))
 }
