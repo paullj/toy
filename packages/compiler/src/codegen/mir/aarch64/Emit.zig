@@ -1,8 +1,9 @@
 //! The AArch64 MIR encoder: MIR on physical registers to machine words, relocs and the line
 //! table, through the `Aarch64.zig` word encoders. It lays blocks out in index order,
 //! drops a `b` to the next block, turns a conditional branch to the next block followed
-//! by a `b` into one inverted branch, aims a branch at a block that is only a `b` at that
-//! `b`'s target instead, and resolves branches by backpatching.
+//! by a `b` into one inverted branch, aims a branch at a block whose code is only a `b` at
+//! that `b`'s target instead, repeats the epilogue for a `b` to a block that is only the
+//! epilogue, and resolves branches by backpatching.
 //!
 //! It owns the frame shape: the prologue saves x29/x30 and points x29 at them (the frame
 //! chain every profile keeps), then opens `Frame.size()` bytes that stay fixed until the
@@ -57,6 +58,8 @@ const E = struct {
     fixups: std.ArrayList(Fixup) = .empty,
     /// Per block, where a branch to it lands once blocks that only hold a `b` are skipped.
     fwd: []const u32 = &.{},
+    /// Per block, whether its code is only the epilogue, which a `b` to it repeats instead.
+    rets: []const bool = &.{},
 
     fn word(e: *E, w: u32) error{OutOfMemory}!void {
         var buf: [4]u8 = undefined;
@@ -272,6 +275,7 @@ const E = struct {
                 .sub => Aarch64.subShifted(o.rd.hw(), o.rn.hw(), o.rm.hw(), o.shift, o.amt),
             }),
             .shift_imm => |o| try e.word(Aarch64.shiftImm(o.op, o.rd.hw(), o.rn.hw(), o.amt)),
+            .logic_imm => |o| try e.word(Aarch64.logicImm(o.op, o.rd.hw(), o.rn.hw(), Aarch64.bitmaskImm(o.imm).?)),
             .unary => |o| {
                 const rd = o.rd.hw();
                 const rn = o.rn.hw();
@@ -389,7 +393,10 @@ const E = struct {
             },
             .brk => try e.word(Aarch64.brk0),
             .safepoint_poll, .keep => {},
-            .b => |target| if (e.fwd[target] != block + 1) try e.branch(Aarch64.b(0), target, .imm26),
+            .b => |target| if (e.fwd[target] != block + 1) {
+                if (e.rets[e.fwd[target]]) return e.epilogue();
+                try e.branch(Aarch64.b(0), target, .imm26);
+            },
             .cbnz => |o| try e.branch(Aarch64.cbnz(o.rn.hw(), 0), o.target, .imm19),
             .b_cond => |o| try e.branch(Aarch64.bCond(o.cond, 0), o.target, .imm19),
             .ret => try e.epilogue(),
@@ -426,9 +433,8 @@ fn inverted(i: Inst, after: Inst, block: u32, fwd: []const u32) ?u32 {
 }
 
 /// Per block, the block a branch to it reaches through any chain of blocks that hold only
-/// a `b` (lower's empty arms, split edges a later pass moved away from their source). A
-/// block holding a safepoint poll is not skipped, so every back edge still polls. A chain
-/// that loops on itself is left alone.
+/// a `b` (lower's empty arms, split edges a later pass moved away from their source) and
+/// instructions that encode to nothing. A chain that loops on itself is left alone.
 fn forwards(gpa: std.mem.Allocator, func: *const Func) error{OutOfMemory}![]u32 {
     const n = func.blocks.len;
     const fwd = try gpa.alloc(u32, n);
@@ -436,13 +442,31 @@ fn forwards(gpa: std.mem.Allocator, func: *const Func) error{OutOfMemory}![]u32 
         var t: u32 = @intCast(b);
         var steps: usize = 0;
         while (steps < n) : (steps += 1) {
-            const insts = func.blocks[t].insts.items;
-            if (insts.len != 1 or insts[0].op != .b) break;
-            t = insts[0].op.b;
+            const only = onlyCode(func.blocks[t].insts.items) orelse break;
+            t = switch (only.op) {
+                .b => |next| next,
+                else => break,
+            };
         } else t = @intCast(b);
         f.* = t;
     }
     return fwd;
+}
+
+/// The last instruction of a block when it is the only one that encodes to anything.
+fn onlyCode(insts: []const Inst) ?Inst {
+    if (insts.len == 0) return null;
+    for (insts[0 .. insts.len - 1]) |i| if (!encodesNothing(i)) return null;
+    return insts[insts.len - 1];
+}
+
+/// A safepoint poll is a placeholder today. Once it encodes a poll (#83) it must leave this
+/// set, so a back edge through a block that holds one still polls.
+fn encodesNothing(i: Inst) bool {
+    return switch (i.op) {
+        .keep, .safepoint_poll => true,
+        else => false,
+    };
 }
 
 fn scaleOf(s: Inst.Size) u32 {
@@ -465,6 +489,13 @@ pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame
     const fwd = try forwards(gpa, func);
     defer gpa.free(fwd);
     e.fwd = fwd;
+    const rets = try gpa.alloc(bool, func.blocks.len);
+    defer gpa.free(rets);
+    for (func.blocks, rets) |*blk, *r| {
+        const only = onlyCode(blk.insts.items);
+        r.* = only != null and only.?.op == .ret;
+    }
+    e.rets = rets;
     const block_off = try gpa.alloc(u32, func.blocks.len);
     defer gpa.free(block_off);
 
@@ -638,12 +669,14 @@ test "encode: a branch to a block that only holds a b lands on that b's target" 
     try encode(gpa, &f, &frame, Ir.no_line, false, &out);
     const code = out.code.items;
     // b.lt reaches b1 through b2, the next block, so it inverts onto b3: b.ge at word 2.
-    // b1's epilogue is words 3-4 and b2's b to b1 word 5. b3 falls into b4, whose b
-    // back to b3 is word 6: the forwarder loop is kept, not followed.
-    try testing.expectEqual(Aarch64.bCond(.ge, 4), wordAt(code, 2));
-    try testing.expectEqual(Aarch64.b(-2), wordAt(code, 5));
-    try testing.expectEqual(Aarch64.b(0), wordAt(code, 6));
-    try testing.expectEqual(@as(usize, 7 * 4), code.len);
+    // b1's epilogue is words 3-4, and b2's b to b1, a block of only the epilogue, repeats
+    // it in words 5-6. b3 falls into b4, whose b back to b3 is word 7: the forwarder loop
+    // is kept, not followed.
+    try testing.expectEqual(Aarch64.bCond(.ge, 5), wordAt(code, 2));
+    try testing.expectEqual(Aarch64.ldpFpLrPost, wordAt(code, 5));
+    try testing.expectEqual(Aarch64.ret, wordAt(code, 6));
+    try testing.expectEqual(Aarch64.b(0), wordAt(code, 7));
+    try testing.expectEqual(@as(usize, 8 * 4), code.len);
 }
 
 test "encode: a conditional branch to the next block and a b become one inverted branch" {
@@ -668,4 +701,28 @@ test "encode: a conditional branch to the next block and a b become one inverted
     try testing.expectEqual(Aarch64.cbz(3, 2), wordAt(code, 3));
     try testing.expectEqual(Aarch64.cbz(4, -1), wordAt(code, 4));
     try testing.expectEqual(Aarch64.ldpFpLrPost, wordAt(code, 5));
+}
+
+test "encode: a branch skips a block whose only code is its b, past instructions that encode nothing" {
+    const gpa = testing.allocator;
+    var f = try Func.init(gpa, 4);
+    defer f.deinit(gpa);
+    // b0: cbnz x3 -> b2; b b3    b1: brk    b2: poll; keep x4; b b1    b3: ret
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .cbnz = .{ .rn = Reg.gp(3), .target = 2 } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .b = 3 } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .brk });
+    try f.blocks[2].insts.append(gpa, .{ .op = .safepoint_poll });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .keep = Reg.gp(4) } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[3].insts.append(gpa, .{ .op = .ret });
+    var none = [_]u32{};
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    var out: Out = .{};
+    defer out.deinit(gpa);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
+    const code = out.code.items;
+    // cbnz reaches b1, the next block, through b2: one cbz to b3 (word 5).
+    try testing.expectEqual(Aarch64.cbz(3, 3), wordAt(code, 2));
+    try testing.expectEqual(Aarch64.b(-1), wordAt(code, 4));
+    try testing.expectEqual(@as(usize, 7 * 4), code.len);
 }

@@ -68,6 +68,13 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                     if (res != Ir.none_value) known[res] = .addr;
                 },
                 .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .band, .bor, .bxor => |bin| {
+                    if (logicBool(known, ins.op, bin)) |folded| {
+                        ins.op = .{ .bconst = folded };
+                        if (res != Ir.none_value) known[res] = .{ .bool = folded };
+                        stats.consts_folded += 1;
+                        changed = true;
+                        continue;
+                    }
                     const l = constInt(known, bin.lhs) orelse continue;
                     const r = constInt(known, bin.rhs) orelse continue;
                     // A constant-0 divisor must NOT fold: the op has to survive so
@@ -189,6 +196,20 @@ fn cmpOperand(known: []const Known, v: Ir.ValueId, other: Ir.ValueId) ?i64 {
     return constInt(known, v);
 }
 
+/// A bool `band`/`bor` with a known operand that decides it, alone or with the other: the
+/// `min / -1` guard of a division by a constant other than -1 tests `is_min & false`.
+fn logicBool(known: []const Known, op: Ir.Op, bin: Ir.Bin) ?bool {
+    const decides = switch (op) {
+        .band => false,
+        .bor => true,
+        else => return null,
+    };
+    const l = constBool(known, bin.lhs);
+    const r = constBool(known, bin.rhs);
+    if (l == decides or r == decides) return decides;
+    return if (l != null and r != null) !decides else null;
+}
+
 fn constBool(known: []const Known, v: Ir.ValueId) ?bool {
     if (v == Ir.none_value or v >= known.len) return null;
     return switch (known[v]) {
@@ -264,6 +285,35 @@ test "fold add of two iconsts -> iconst, with propagation chain in one pass" {
     try expectIconst(got[3], 12);
     try expectIconst(got[4], 14);
     try expectIconst(got[5], 12);
+}
+
+test "fold: a bool and/or folds once one known operand decides it, or both are known" {
+    const gpa = testing.allocator;
+    // %0 = a load (unknown); %1=false; %2=true; %3=band %0,%1 -> false; %4=bor %2,%0 -> true;
+    // %5=band %0,%2 stays; %6=bor %1,%2 -> true; %7=band %2,%2 -> true.
+    var values = [_]Ir.ValueDef{.{ .type = Ir.Type.bool }} ** 9;
+    values[8] = .{ .type = Ir.Type.int };
+    const instrs = [_]Ir.Instr{
+        .{ .result = 8, .op = .{ .iconst = 3 } },
+        .{ .result = 0, .op = .{ .load = .{ .addr = 8, .ty = Ir.Type.bool } } },
+        .{ .result = 1, .op = .{ .bconst = false } },
+        .{ .result = 2, .op = .{ .bconst = true } },
+        .{ .result = 3, .op = .{ .band = .{ .lhs = 0, .rhs = 1 } } },
+        .{ .result = 4, .op = .{ .bor = .{ .lhs = 2, .rhs = 0 } } },
+        .{ .result = 5, .op = .{ .band = .{ .lhs = 0, .rhs = 2 } } },
+        .{ .result = 6, .op = .{ .bor = .{ .lhs = 1, .rhs = 2 } } },
+        .{ .result = 7, .op = .{ .band = .{ .lhs = 2, .rhs = 2 } } },
+    };
+    var func = try buildFn(gpa, &values, &instrs, .{ .ret = .none });
+    defer func.deinit(gpa);
+    var st: Opt.Stats = .{};
+    _ = try run(gpa, &func, &st);
+    const got = func.blocks[0].instrs;
+    try expectBconst(got[4], false);
+    try expectBconst(got[5], true);
+    try testing.expect(got[6].op == .band);
+    try expectBconst(got[7], true);
+    try expectBconst(got[8], true);
 }
 
 test "fold: a constant-0 divisor does NOT fold (op survives for the panic guard); INT_MIN/-1 still folds" {

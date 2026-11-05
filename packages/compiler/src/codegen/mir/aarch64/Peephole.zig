@@ -6,7 +6,8 @@
 //! - a frame address or a register plus a constant feeding a memory operand folds into
 //!   the access (`ldr x, [sp, #off]`, `ldr x, [base, #off]`);
 //! - a small constant operand of `cmp`, `add`, `sub` and the `adds` overflow check
-//!   becomes the instruction's immediate;
+//!   becomes the instruction's immediate, and a bitmask constant of `and`, `orr` and
+//!   `eor` the logical immediate;
 //! - signed and unsigned division by a power of two becomes shifts, and the `msub` of a
 //!   remainder by one becomes a shifted `sub`; a multiply by a power of two becomes a left
 //!   shift;
@@ -39,18 +40,26 @@ const Def = union(enum) {
     reg_off: struct { base: Reg, off: u32 },
 };
 
-pub fn run(gpa: std.mem.Allocator, f: *Func) error{OutOfMemory}!void {
-    var p: P = .{ .gpa = gpa, .f = f };
+pub const Options = struct {
+    /// Per IR slot, whether the collector reads a reference word of it (a memory root). A
+    /// slot past the end counts as one.
+    rooted_slots: []const bool = &.{},
+};
+
+pub fn run(gpa: std.mem.Allocator, f: *Func, opts: Options) error{OutOfMemory}!void {
+    var p: P = .{ .gpa = gpa, .f = f, .opts = opts };
     defer p.deinit();
     try p.analyze();
     try p.rewrite();
     try p.fuseBranches();
     try p.dropDead();
+    if (try p.forwardParams()) try p.dropDead();
 }
 
 const P = struct {
     gpa: std.mem.Allocator,
     f: *Func,
+    opts: Options,
     defs: []u32 = &.{},
     known: []Def = &.{},
 
@@ -193,6 +202,14 @@ const P = struct {
                 .udiv => if (log2Of(p.imm(o.rm))) |k| {
                     inst.op = if (k == 0) .{ .mov = .{ .rd = o.rd, .rn = o.rn } } else .{ .shift_imm = .{ .op = .lsr, .rd = o.rd, .rn = o.rn, .amt = k } };
                 },
+                .@"and", .orr, .eor => if (o.rd != zr) {
+                    const rn, const k = if (p.imm(o.rm)) |k| .{ o.rn, k } else if (p.imm(o.rn)) |k| .{ o.rm, k } else return out.append(p.gpa, inst);
+                    if (Aarch64.bitmaskImm(@bitCast(k)) != null) inst.op = .{ .logic_imm = .{ .op = switch (o.op) {
+                        .@"and" => .@"and",
+                        .orr => .orr,
+                        else => .eor,
+                    }, .rd = o.rd, .rn = rn, .imm = @bitCast(k) } };
+                },
                 .mul => {
                     const rn, const k = if (log2Of(p.imm(o.rm))) |k| .{ o.rn, k } else if (log2Of(p.imm(o.rn))) |k| .{ o.rm, k } else return out.append(p.gpa, inst);
                     inst.op = if (k == 0) .{ .mov = .{ .rd = o.rd, .rn = rn } } else .{ .shift_imm = .{ .op = .lsl, .rd = o.rd, .rn = rn, .amt = k } };
@@ -247,6 +264,121 @@ const P = struct {
                 if (cond) |cc| inst.op = .{ .b_cond = .{ .cond = cc, .target = c.target } };
             }
         }
+    }
+
+    /// A param slot the prologue stores once and the body only loads whole words of keeps
+    /// each word in a register from the prologue on: the store goes unless the slot is a
+    /// memory root, which the collector reads, and each load reads that register. A word
+    /// loaded once into a virtual register is written straight into it, so the copy adds
+    /// no register of its own. Block 0 runs once, before every other block, so the stored
+    /// word is what each load sees.
+    fn forwardParams(p: *P) error{OutOfMemory}!bool {
+        const Word = struct { slot: u32, off: u32, src: Reg, loads: u32 = 0, reg: ?Reg = null };
+        var words: std.ArrayList(Word) = .empty;
+        defer words.deinit(p.gpa);
+        for (p.f.blocks[0].insts.items) |inst| switch (inst.op) {
+            .store => |o| if (o.size == .b8) if (slotOf(o.mem)) |sid| {
+                try words.append(p.gpa, .{ .slot = sid, .off = o.mem.off, .src = o.rt });
+            },
+            else => {},
+        };
+        if (words.items.len == 0) return false;
+
+        var bad: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer bad.deinit(p.gpa);
+        for (words.items, 0..) |w, i| {
+            if (findWord(Word, words.items[0..i], w.slot, w.off) != null) try bad.put(p.gpa, w.slot, {});
+        }
+        for (p.f.blocks, 0..) |*b, bi| for (b.insts.items) |inst| {
+            var mems: [2]?Mem = .{ null, null };
+            switch (inst.op) {
+                .load => |o| {
+                    const sid = slotOf(o.mem) orelse continue;
+                    const wi = findWord(Word, words.items, sid, o.mem.off) orelse {
+                        try bad.put(p.gpa, sid, {});
+                        continue;
+                    };
+                    const w = &words.items[wi];
+                    if (bi == 0 or o.size != .b8 or p.f.classOf(o.rt) != p.f.classOf(w.src)) try bad.put(p.gpa, sid, {});
+                    // Only an IR value's one definition may move up into the prologue.
+                    w.loads += if (p.single(o.rt) and p.f.vregs.items[o.rt.index()].home != null) 1 else 2;
+                    continue;
+                },
+                .store => |o| if (bi != 0 or o.size != .b8) {
+                    mems[0] = o.mem;
+                },
+                .addr => |o| mems[0] = o.mem,
+                .copy => |o| mems = .{ o.dst, o.src },
+                else => continue,
+            }
+            for (mems) |m| if (slotOf(m orelse continue)) |sid| try bad.put(p.gpa, sid, {});
+        };
+
+        var any = false;
+        for (words.items) |*w| {
+            if (bad.contains(w.slot)) continue;
+            any = true;
+            if (w.loads > 1) w.reg = try p.f.newVReg(p.gpa, p.f.classOf(w.src), .{ .slot = w.slot });
+        }
+        if (!any) return false;
+
+        // A word loaded once: its load's register, found and the load dropped.
+        for (p.f.blocks[1..]) |*b| {
+            var k: usize = 0;
+            while (k < b.insts.items.len) {
+                const o = switch (b.insts.items[k].op) {
+                    .load => |o| o,
+                    else => {
+                        k += 1;
+                        continue;
+                    },
+                };
+                const sid = slotOf(o.mem) orelse {
+                    k += 1;
+                    continue;
+                };
+                if (bad.contains(sid)) {
+                    k += 1;
+                    continue;
+                }
+                const w = &words.items[findWord(Word, words.items, sid, o.mem.off).?];
+                if (w.reg) |r| {
+                    b.insts.items[k].op = .{ .mov = .{ .rd = o.rt, .rn = r } };
+                    k += 1;
+                } else {
+                    w.reg = o.rt;
+                    _ = b.insts.orderedRemove(k);
+                }
+            }
+        }
+
+        var out: std.ArrayList(Inst) = .empty;
+        errdefer out.deinit(p.gpa);
+        const prologue = &p.f.blocks[0].insts;
+        for (prologue.items) |inst| {
+            const o = switch (inst.op) {
+                .store => |o| o,
+                else => {
+                    try out.append(p.gpa, inst);
+                    continue;
+                },
+            };
+            const sid = slotOf(o.mem) orelse {
+                try out.append(p.gpa, inst);
+                continue;
+            };
+            if (bad.contains(sid)) {
+                try out.append(p.gpa, inst);
+                continue;
+            }
+            const w = words.items[findWord(Word, words.items, sid, o.mem.off).?];
+            const rooted = sid >= p.opts.rooted_slots.len or p.opts.rooted_slots[sid];
+            if (w.reg) |r| try out.append(p.gpa, .{ .op = .{ .mov = .{ .rd = r, .rn = w.src } }, .line = inst.line });
+            if (rooted) try out.append(p.gpa, .{ .op = .{ .store = .{ .rt = w.reg orelse w.src, .mem = o.mem } }, .line = inst.line });
+        }
+        prologue.deinit(p.gpa);
+        prologue.* = out;
+        return true;
     }
 
     /// Drop pure instructions whose virtual result nothing reads, until none is left. Uses
@@ -309,8 +441,23 @@ fn setsFlags(inst: Inst) bool {
     return switch (inst.op) {
         .cmp, .cmp_imm, .cmn_imm, .fcmp, .call, .b, .cbnz, .b_cond, .ret, .brk => true,
         .alu => |o| o.op == .adds,
-        .mov_imm, .mov, .msub, .add_imm, .sub_imm, .alu_sh, .shift_imm, .unary, .cset, .csel => false,
+        .mov_imm, .mov, .msub, .add_imm, .sub_imm, .alu_sh, .shift_imm, .logic_imm, .unary, .cset, .csel => false,
         .fp_alu, .cvt, .load, .store, .addr, .copy, .sym_addr, .keep, .safepoint_poll => false,
+    };
+}
+
+fn findWord(comptime W: type, ws: []const W, slot: u32, off: u32) ?usize {
+    for (ws, 0..) |w, i| if (w.slot == slot and w.off == off) return i;
+    return null;
+}
+
+fn slotOf(m: Mem) ?u32 {
+    return switch (m.base) {
+        .frame => |fr| switch (fr) {
+            .slot => |sid| sid,
+            else => null,
+        },
+        .reg => null,
     };
 }
 
@@ -349,6 +496,7 @@ fn pureDef(inst: Inst) ?Reg {
         .sub_imm => |o| o.rd,
         .alu_sh => |o| o.rd,
         .shift_imm => |o| o.rd,
+        .logic_imm => |o| o.rd,
         .unary => |o| o.rd,
         .cset => |o| o.rd,
         .sym_addr => |o| o.rd,
@@ -442,7 +590,7 @@ test "peephole: a frame address, or a register plus a constant, folds into the a
     try add(gpa, &f, 1, .{ .load = .{ .rt = v(5), .mem = Mem.frame(.{ .slot = 2 }, 0) } });
     try add(gpa, &f, 1, .{ .add_imm = .{ .rd = v(6), .rn = v(5), .imm = 4 } });
     try add(gpa, &f, 1, .{ .store = .{ .rt = v(2), .mem = Mem.reg(v(6), 0) } });
-    try run(gpa, &f);
+    try run(gpa, &f, .{});
 
     const got = f.blocks[1].insts.items;
     try testing.expectEqual(@as(usize, 7), got.len);
@@ -461,7 +609,7 @@ test "peephole: an add of a constant folds into the access through its result" {
     try add(gpa, &f, 1, .{ .alu = .{ .op = .add, .rd = v(2), .rn = v(0), .rm = v(1) } });
     try add(gpa, &f, 1, .{ .load = .{ .rt = v(3), .mem = Mem.reg(v(2), 0) } });
     try add(gpa, &f, 1, .{ .store = .{ .rt = v(3), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
-    try run(gpa, &f);
+    try run(gpa, &f, .{});
 
     const got = f.blocks[1].insts.items;
     try testing.expectEqual(@as(usize, 3), got.len);
@@ -487,7 +635,7 @@ test "peephole: small constant operands become immediates" {
     try add(gpa, &f, 1, .{ .cmp = .{ .rn = a, .rm = v(3) } });
     try add(gpa, &f, 1, .{ .alu = .{ .op = .sub, .rd = v(7), .rn = v(1), .rm = a } });
     for (4..8) |i| try add(gpa, &f, 1, .{ .store = .{ .rt = v(@intCast(i)), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
-    try run(gpa, &f);
+    try run(gpa, &f, .{});
 
     const got = f.blocks[1].insts.items;
     // The load, the two constants still read (5 by `5 - a`, 5000 by its cmp), then:
@@ -514,7 +662,7 @@ test "peephole: division and remainder by a power of two become shifts that roun
         try add(gpa, &f, 1, .{ .msub = .{ .rd = v(3), .rn = v(2), .rm = v(1), .ra = v(0) } });
         try add(gpa, &f, 1, .{ .alu = .{ .op = .udiv, .rd = v(4), .rn = v(0), .rm = v(1) } });
         for (2..5) |i| try add(gpa, &f, 1, .{ .store = .{ .rt = v(@intCast(i)), .mem = Mem.frame(.{ .slot = 0 }, 0) } });
-        try run(gpa, &f);
+        try run(gpa, &f, .{});
         for (f.blocks[1].insts.items) |i| try testing.expect(i.op != .msub and !(i.op == .alu and i.op.alu.op != .add));
 
         var regs: [128]u64 = @splat(0);
@@ -539,7 +687,7 @@ test "peephole: a multiply by a power of two becomes a left shift" {
     try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(4), .rn = v(1), .rm = v(0) } });
     try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(5), .rn = v(0), .rm = v(2) } });
     for (3..6) |i| try add(gpa, &f, 1, .{ .store = .{ .rt = v(@intCast(i)), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
-    try run(gpa, &f);
+    try run(gpa, &f, .{});
 
     const got = f.blocks[1].insts.items;
     try testing.expectEqualDeep(Inst.Op{ .shift_imm = .{ .op = .lsl, .rd = v(3), .rn = v(0), .amt = 4 } }, got[2].op);
@@ -569,7 +717,7 @@ test "peephole: a cset the block's cbnz reads becomes a b.cond on the flags" {
         try add(gpa, &f, 1, .safepoint_poll);
         try add(gpa, &f, 1, .{ .cbnz = .{ .rn = v(2), .target = 2 } });
         try add(gpa, &f, 1, .{ .b = 3 });
-        try run(gpa, &f);
+        try run(gpa, &f, .{});
         const got = f.blocks[1].insts.items;
         const br = got[got.len - 2].op;
         if (c.fused) {
@@ -578,5 +726,121 @@ test "peephole: a cset the block's cbnz reads becomes a b.cond on the flags" {
         var has_cset = false;
         for (got) |i| has_cset = has_cset or i.op == .cset;
         try testing.expectEqual(c.cset_left, has_cset);
+    }
+}
+
+test "peephole: a bitmask constant of and, orr or eor becomes a logical immediate" {
+    const gpa = testing.allocator;
+    var f = try testFunc(gpa, 2, 12);
+    defer f.deinit(gpa);
+    const v = Reg.virt;
+    const a = v(0);
+    try add(gpa, &f, 1, .{ .load = .{ .rt = a, .mem = Mem.frame(.{ .slot = 0 }, 0) } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(1), .imm = 0x3FFF } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(2), .imm = std.math.minInt(i64) } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(3), .imm = -1 } });
+    try add(gpa, &f, 1, .{ .mov_imm = .{ .rd = v(4), .imm = 0x1234 } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .@"and", .rd = v(5), .rn = a, .rm = v(1) } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .orr, .rd = v(6), .rn = v(2), .rm = a } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .eor, .rd = v(7), .rn = a, .rm = v(1) } });
+    // -1 and 0x1234 are no bitmask immediates.
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .@"and", .rd = v(8), .rn = a, .rm = v(3) } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .orr, .rd = v(9), .rn = a, .rm = v(4) } });
+    for (5..10) |i| try add(gpa, &f, 1, .{ .store = .{ .rt = v(@intCast(i)), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
+    try run(gpa, &f, .{});
+
+    var logic: [3]Inst.Op = undefined;
+    var n: usize = 0;
+    var alus: usize = 0;
+    for (f.blocks[1].insts.items) |i| switch (i.op) {
+        .logic_imm => {
+            logic[n] = i.op;
+            n += 1;
+        },
+        .alu => alus += 1,
+        .mov_imm => |m| try testing.expect(m.rd == v(3) or m.rd == v(4)),
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqual(@as(usize, 2), alus);
+    try testing.expectEqualDeep(Inst.Op{ .logic_imm = .{ .op = .@"and", .rd = v(5), .rn = a, .imm = 0x3FFF } }, logic[0]);
+    try testing.expectEqualDeep(Inst.Op{ .logic_imm = .{ .op = .orr, .rd = v(6), .rn = a, .imm = 0x8000000000000000 } }, logic[1]);
+    try testing.expectEqualDeep(Inst.Op{ .logic_imm = .{ .op = .eor, .rd = v(7), .rn = a, .imm = 0x3FFF } }, logic[2]);
+}
+
+/// A fn whose prologue stores x0 and x1 to slot 0 and d0 to slot 1, then `body` in block 1.
+fn paramFunc(gpa: std.mem.Allocator, body: []const Inst.Op) !Func {
+    var f = try testFunc(gpa, 3, 8);
+    errdefer f.deinit(gpa);
+    try add(gpa, &f, 0, .{ .store = .{ .rt = Reg.gp(0), .mem = Mem.frame(.{ .slot = 0 }, 0) } });
+    try add(gpa, &f, 0, .{ .store = .{ .rt = Reg.gp(1), .mem = Mem.frame(.{ .slot = 0 }, 8) } });
+    try add(gpa, &f, 0, .{ .store = .{ .rt = Reg.fp(0), .mem = Mem.frame(.{ .slot = 1 }, 0) } });
+    try add(gpa, &f, 0, .{ .b = 1 });
+    for (body) |op| try add(gpa, &f, 1, op);
+    try add(gpa, &f, 1, .{ .b = 2 });
+    try add(gpa, &f, 2, .ret);
+    return f;
+}
+
+test "peephole: a param slot only loaded keeps its words in registers from the prologue" {
+    const gpa = testing.allocator;
+    const v = Reg.virt;
+    const s0 = Mem.frame(.{ .slot = 0 }, 0);
+    const s0_8 = Mem.frame(.{ .slot = 0 }, 8);
+    const keep = Mem.frame(.{ .slot = 2 }, 0);
+    {
+        // Word 0 loaded once into v0, word 8 twice (once into the physical x2).
+        var f = try paramFunc(gpa, &.{
+            .{ .load = .{ .rt = v(0), .mem = s0 } },
+            .{ .load = .{ .rt = v(1), .mem = s0_8 } },
+            .{ .load = .{ .rt = Reg.gp(2), .mem = s0_8 } },
+            .{ .store = .{ .rt = v(0), .mem = keep } },
+            .{ .store = .{ .rt = v(1), .mem = keep } },
+        });
+        defer f.deinit(gpa);
+        try run(gpa, &f, .{ .rooted_slots = &.{ false, false, false } });
+        const pro = f.blocks[0].insts.items;
+        // Slot 1 is never loaded: its store goes and nothing replaces it.
+        try testing.expectEqual(@as(usize, 3), pro.len);
+        try testing.expectEqualDeep(Inst.Op{ .mov = .{ .rd = v(0), .rn = Reg.gp(0) } }, pro[0].op);
+        const w8 = pro[1].op.mov.rd;
+        try testing.expectEqual(Reg.gp(1), pro[1].op.mov.rn);
+        try testing.expect(f.vregs.items[w8.index()].home != null);
+        const body = f.blocks[1].insts.items;
+        try testing.expectEqualDeep(Inst.Op{ .mov = .{ .rd = v(1), .rn = w8 } }, body[0].op);
+        try testing.expectEqualDeep(Inst.Op{ .mov = .{ .rd = Reg.gp(2), .rn = w8 } }, body[1].op);
+        try testing.expect(try f.tempsStayLocal(gpa));
+    }
+    {
+        // A rooted slot keeps its store, from the register.
+        var f = try paramFunc(gpa, &.{
+            .{ .load = .{ .rt = v(0), .mem = s0 } },
+            .{ .store = .{ .rt = v(0), .mem = keep } },
+        });
+        defer f.deinit(gpa);
+        try run(gpa, &f, .{ .rooted_slots = &.{ true, false, false } });
+        const pro = f.blocks[0].insts.items;
+        try testing.expectEqualDeep(Inst.Op{ .mov = .{ .rd = v(0), .rn = Reg.gp(0) } }, pro[0].op);
+        try testing.expectEqualDeep(Inst.Op{ .store = .{ .rt = v(0), .mem = s0 } }, pro[1].op);
+        try testing.expectEqualDeep(Inst.Op{ .store = .{ .rt = Reg.gp(1), .mem = s0_8 } }, pro[2].op);
+    }
+    // Any other access to the slot leaves it as it is.
+    for ([_]Inst.Op{
+        .{ .addr = .{ .rd = v(2), .mem = s0 } },
+        .{ .store = .{ .rt = v(3), .mem = s0 } },
+        .{ .load = .{ .rt = v(2), .mem = s0, .size = .b4 } },
+        .{ .load = .{ .rt = v(2), .mem = Mem.frame(.{ .slot = 0 }, 16) } },
+        .{ .copy = .{ .dst = keep, .src = s0, .size = 16 } },
+    }) |other| {
+        var f = try paramFunc(gpa, &.{
+            .{ .load = .{ .rt = v(0), .mem = s0 } },
+            .{ .store = .{ .rt = v(0), .mem = keep } },
+            .{ .store = .{ .rt = v(2), .mem = keep } },
+            other,
+        });
+        defer f.deinit(gpa);
+        try run(gpa, &f, .{ .rooted_slots = &.{ false, false, false } });
+        try testing.expectEqualDeep(Inst.Op{ .store = .{ .rt = Reg.gp(0), .mem = s0 } }, f.blocks[0].insts.items[0].op);
+        try testing.expect(f.blocks[1].insts.items[0].op == .load);
     }
 }

@@ -396,14 +396,29 @@ pub fn LinearScan(comptime Target: type) type {
                 try a.pushUnhandled(try a.splitAt(ci, pos));
             }
 
-            fn hintFor(a: *const A, it: *const Interval) ?Mir.Reg {
-                if (a.hint_phys[it.vreg]) |r| return r;
-                for ([_]CopyHint{ a.hint_vreg[it.vreg], a.hint_dst[it.vreg] }) |h| {
-                    if (h.v == none) continue;
-                    const loc = a.locAt(h.v, h.pos) orelse continue;
-                    if (loc == .reg) return loc.reg;
+            /// The registers the copies of `it` ask for, best first: a physical register it is
+            /// copied from or to, the register of the one it is copied from, then that of the
+            /// one it is copied to. A destination not allocated yet passes the ask on down its
+            /// own copies (a merge param copied on into a loop param).
+            fn hintsFor(a: *const A, it: *const Interval) [3]?Mir.Reg {
+                var out: [3]?Mir.Reg = .{ a.hint_phys[it.vreg], null, null };
+                const from = a.hint_vreg[it.vreg];
+                if (from.v != none) if (a.locAt(from.v, from.pos)) |loc| if (loc == .reg) {
+                    out[1] = loc.reg;
+                };
+                var to = a.hint_dst[it.vreg];
+                // Copy destinations can form a cycle (loop params swapped each iteration), so
+                // the walk stops after a few hops; a merge param into a loop param needs two.
+                const max_hops = 4;
+                for (0..max_hops) |_| {
+                    if (to.v == none) break;
+                    if (a.locAt(to.v, to.pos)) |loc| {
+                        if (loc == .reg) out[2] = loc.reg;
+                        break;
+                    }
+                    to = a.hint_dst[to.v];
                 }
-                return null;
+                return out;
             }
 
             fn tryAllocateFree(a: *A, ci: u32) Error!bool {
@@ -433,9 +448,8 @@ pub fn LinearScan(comptime Target: type) type {
 
                 const end = cur.end();
                 var reg: Mir.Reg = regs[0];
-                if (a.hintFor(cur)) |h| if (h.physClass() == class and free[@intFromEnum(h)] >= end) {
-                    reg = h;
-                    cur.reg = reg;
+                for (a.hintsFor(cur)) |hint| if (hint) |h| if (h.physClass() == class and free[@intFromEnum(h)] >= end) {
+                    cur.reg = h;
                     return true;
                 };
                 const whole = for (regs) |r| {
@@ -1409,6 +1423,46 @@ test "linear scan: a loop's next value takes the register of the param it is cop
     var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
     defer res.deinit(gpa);
     for (f.blocks[2].insts.items) |i| try testing.expect(i.op != .mov);
+    const want = try Machine.run(gpa, &before, null);
+    defer gpa.free(want);
+    const got = try Machine.run(gpa, &f, res.maps);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u64, want, got);
+}
+
+test "linear scan: a value copied through a merge param into a loop param takes the loop param's register" {
+    const gpa = testing.allocator;
+    // b0: t = 7 ; p = 3 ; use t ; b 1
+    // b1: cbnz p, 2 ; b 4
+    // b2: n = p - 1 ; m = n ; b 3          (m is not allocated when n is: n asks p's)
+    // b3: p = m ; b 1
+    // b4: use p ; ret
+    var f = try TF.init(gpa, 5);
+    defer f.deinit(gpa);
+    const t = try f.newVReg(gpa, .gpr, null);
+    const p = try f.newVReg(gpa, .gpr, null);
+    const n = try f.newVReg(gpa, .gpr, null);
+    const m = try f.newVReg(gpa, .gpr, null);
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .imm = .{ .rd = t, .imm = 7 } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .imm = .{ .rd = p, .imm = 3 } } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .use = t } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .{ .cbnz = .{ .rn = p, .target = 2 } } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .{ .b = 4 } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .dec = .{ .rd = n, .rn = p } } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .mov = .{ .rd = m, .rn = n } } });
+    try f.blocks[2].insts.append(gpa, .{ .op = .{ .b = 3 } });
+    try f.blocks[3].insts.append(gpa, .{ .op = .{ .mov = .{ .rd = p, .rn = m } } });
+    try f.blocks[3].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[4].insts.append(gpa, .{ .op = .{ .use = p } });
+    try f.blocks[4].insts.append(gpa, .{ .op = .ret });
+
+    var before = try cloneFunc(gpa, &f);
+    defer before.deinit(gpa);
+    var frame: Mir.Frame = .{ .layout = undefined };
+    var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
+    defer res.deinit(gpa);
+    for (f.blocks[2..4]) |b| for (b.insts.items) |i| try testing.expect(i.op != .mov);
     const want = try Machine.run(gpa, &before, null);
     defer gpa.free(want);
     const got = try Machine.run(gpa, &f, res.maps);
