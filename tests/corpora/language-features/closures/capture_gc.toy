@@ -13,7 +13,7 @@ fn churn() -> int {
     before := gc.collections()
     i := 0
     loop {
-        if i >= 20000 { break }
+        if i >= 100000 { break }
         j := i + 1000
         _g := fn() -> int { j }
         junk: Vec[int] = []

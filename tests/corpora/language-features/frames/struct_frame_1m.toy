@@ -22,7 +22,7 @@ fn e(x: int, name: str) -> E { E { e0: d(x), e1: d(x), e2: d(x), e3: d(x), e4: d
 
 fn churn() {
     i := 0
-    while i < 20000 {
+    while i < 100000 {
         junk: Vec[int] = []
         junk.push(i)
         i = i + 1

@@ -12,7 +12,7 @@ import std/map
 
 fn churn() {
     i := 0
-    while i < 20000 {
+    while i < 100000 {
         g := Vec[int].new()
         g.push(i)
         i = i + 1

@@ -10,7 +10,7 @@ import std/vec
 
 fn churn() -> int {
     before := gc.collections()
-    for i in 0..20000 {
+    for i in 0..100000 {
         junk: Vec[int] = []
         junk.push(i)
     }

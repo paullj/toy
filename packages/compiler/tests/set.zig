@@ -152,7 +152,7 @@ const str_collect_src =
     \\    s.add("c".concat("cc"))
     \\    i := 0
     \\    loop {
-    \\        if i >= 20000 { break }
+    \\        if i >= 100000 { break }
     \\        junk: Vec[int] = []
     \\        junk.push(i)
     \\        i = i + 1
@@ -177,7 +177,7 @@ test "set: Set[str] with owned keys survives a forced collection" {
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    // Owned (concat'd) str keys are heap buffers; churning ~20000 dead Vec[int] forces at
+    // Owned (concat'd) str keys are heap buffers; churning ~100000 dead Vec[int] forces at
     // least one collection. The collector must keep the Set's Map header, entries array,
     // and each str key's buffer alive, so every lookup by a content-equal literal still
     // hits. A mis-swept key buffer changes the exit.

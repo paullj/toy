@@ -174,10 +174,10 @@ pub const Op = union(enum) {
     load_byte: ValueId,
     /// Scalar store; no result.
     store: struct { addr: ValueId, val: ValueId, ty: Type },
-    /// 1-byte store into a packed byte buffer; no result. DISTINCT from `store`
+    /// A store of the value's low 1 or 4 bytes; no result. DISTINCT from `store`
     /// (always a 64-bit `str`) so store→load forwarding (slot-only) never rewrites
-    /// across a byte write, and the golden IR text stays width-explicit.
-    store_byte: struct { addr: ValueId, val: ValueId },
+    /// across a narrow write, and the golden IR text stays width-explicit.
+    store_narrow: struct { addr: ValueId, val: ValueId, width: enum { b1, b4 } },
     /// Aggregate byte copy (dst ptr ← src ptr, sizeof `ty`); no result. codegen
     /// lowers to a tight load/store loop with NO intervening branch.
     copy: struct { dst: ValueId, src: ValueId, ty: Type },
@@ -564,7 +564,10 @@ fn renderInstr(
             try renderType(out, s.ty, layouts, enum_layouts);
             try out.writeAll("\n");
         },
-        .store_byte => |s| try out.print("store_byte %{d}, %{d}\n", .{ s.addr, s.val }),
+        .store_narrow => |s| try out.print("{s} %{d}, %{d}\n", .{ switch (s.width) {
+            .b1 => "store_byte",
+            .b4 => "store_u32",
+        }, s.addr, s.val }),
         .copy => |c| {
             try out.print("copy %{d} <- %{d} : ", .{ c.dst, c.src });
             try renderType(out, c.ty, layouts, enum_layouts);
@@ -744,7 +747,7 @@ test "render: arithmetic + slots + call" {
     try std.testing.expectEqualStrings(want, w.buffered());
 }
 
-test "render: store_byte / load_byte round-trip through a slot" {
+test "render: store_byte / store_u32 / load_byte through a slot" {
     const gpa = std.testing.allocator;
 
     var values = try gpa.alloc(ValueDef, 3);
@@ -755,11 +758,12 @@ test "render: store_byte / load_byte round-trip through a slot" {
     var slots = try gpa.alloc(Slot, 1);
     slots[0] = .{ .type = Type.int };
 
-    var instrs = try gpa.alloc(Instr, 4);
+    var instrs = try gpa.alloc(Instr, 5);
     instrs[0] = .{ .result = 0, .op = .{ .slot_addr = 0 } };
     instrs[1] = .{ .result = 1, .op = .{ .iconst = 65 } };
-    instrs[2] = .{ .result = none_value, .op = .{ .store_byte = .{ .addr = 0, .val = 1 } } };
-    instrs[3] = .{ .result = 2, .op = .{ .load_byte = 0 } };
+    instrs[2] = .{ .result = none_value, .op = .{ .store_narrow = .{ .addr = 0, .val = 1, .width = .b4 } } };
+    instrs[3] = .{ .result = none_value, .op = .{ .store_narrow = .{ .addr = 0, .val = 1, .width = .b1 } } };
+    instrs[4] = .{ .result = 2, .op = .{ .load_byte = 0 } };
 
     var blocks = try gpa.alloc(Block, 1);
     blocks[0] = .{
@@ -790,6 +794,7 @@ test "render: store_byte / load_byte round-trip through a slot" {
         "b0:\n" ++
         "  %0 = slot_addr s0\n" ++
         "  %1 = iconst 65\n" ++
+        "  store_u32 %0, %1\n" ++
         "  store_byte %0, %1\n" ++
         "  %2 = load_byte %0\n" ++
         "  ret %2\n" ++

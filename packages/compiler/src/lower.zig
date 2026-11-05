@@ -2454,11 +2454,11 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
             args[1] = .{ .value = bp };
             return .{ .value = try b.emit(.{ .call_indirect = .{ .target = fp, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.bool) };
         },
-        .store_byte => {
+        .store_byte, .store_u32 => {
             const sargs = Ast.rangeSlice(b.in.tree, (n.rhs).int());
             const addr = operandValue(try lowerExpr(b, sargs[0]));
             const val = operandValue(try lowerExpr(b, sargs[1]));
-            _ = try b.emit(.{ .store_byte = .{ .addr = addr, .val = val } }, null);
+            _ = try b.emit(.{ .store_narrow = .{ .addr = addr, .val = val, .width = if (ik == .store_byte) .b1 else .b4 } }, null);
             return .none;
         },
         .load_byte => {

@@ -5,7 +5,7 @@ import std/ref
 import std/gc
 
 fn churn() {
-    for i in 0..20000 {
+    for i in 0..100000 {
         junk: Vec[int] = []
         junk.push(i)
     }

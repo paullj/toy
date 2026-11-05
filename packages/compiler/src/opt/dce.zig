@@ -125,7 +125,7 @@ fn dropDeadSlotStores(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.St
     for (func.blocks) |*b| {
         for (b.instrs) |*ins| switch (ins.op) {
             .store => |st| ctx.mark(st.val),
-            .store_byte => |st| ctx.mark(st.val),
+            .store_narrow => |st| ctx.mark(st.val),
             .copy => |c| ctx.mark(c.src),
             .field_addr, .slot_addr => {},
             .call => |c| for (c.args) |a| ctx.slot(a),
@@ -172,7 +172,7 @@ fn dropDeadSlotStores(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.St
 fn deadStore(ctx: anytype, op: Ir.Op) bool {
     const target = switch (op) {
         .store => |st| st.addr,
-        .store_byte => |st| st.addr,
+        .store_narrow => |st| st.addr,
         .copy => |c| c.dst,
         else => return false,
     };
@@ -192,7 +192,7 @@ fn instrLive(ins: Ir.Instr, used: []const bool) bool {
 
 fn hasSideEffect(op: Ir.Op) bool {
     return switch (op) {
-        .call, .call_indirect, .store, .store_byte, .copy => true,
+        .call, .call_indirect, .store, .store_narrow, .copy => true,
         else => false,
     };
 }
