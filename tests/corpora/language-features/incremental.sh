@@ -382,6 +382,74 @@ TOY
 }
 run_inline_callee
 
+# 5c) INLINED WITNESS — a release build splices `P`'s derived Eq into `same`, and the
+#     derive's own field witness, the imported `Key.eq`, into it. The derive has no
+#     source: `same`'s key folds its recipe and layout, then the witnesses it calls.
+#     Editing only `Key.eq` must re-lower `same`; the unrelated fn still cuts off.
+run_inline_witness() {
+  local d="$work/inline_witness"; mkdir -p "$d/lib"
+  ( cd "$d" && rm -rf .toy )
+  cat > "$d/main.toy" <<'TOY'
+import lib/key
+struct P { k: key.Key }
+fn same(a: P, b: P) -> bool { a == b }
+fn unrelated() -> int { return 3 }
+fn main() -> int {
+    a := P { k: key.Key { v: 1 } }
+    b := P { k: key.Key { v: 2 } }
+    return if same(a, b) { 42 } else { 41 } + unrelated() - 3
+}
+TOY
+  cat > "$d/lib/key.toy" <<'TOY'
+pub struct Key { pub v: int }
+impl Key has Eq {
+    fn eq(self, o: Key) -> bool { self.v == o.v }
+}
+TOY
+  ( cd "$d" && "$toyc" --release -o base.bin main.toy >/dev/null 2>&1 ) \
+    || { fail_one "inline-witness: cold build failed"; return; }
+  if ( cd "$d" && "$toyc" --emit ir --release main.toy 2>/dev/null ) | sed -n '/^fn main.same(/,/^}/p' | grep -q 'call @'; then
+    fail_one "inline-witness: same still calls a witness at release (nothing to test)"
+    return
+  fi
+  local full_compiled
+  full_compiled="$( cd "$d" && "$toyc" --release -o /dev/null --codegen-stats --no-cache main.toy 2>&1 )"; full_compiled="$(compiled_of "$full_compiled")"
+
+  cat > "$d/lib/key.toy" <<'TOY'
+pub struct Key { pub v: int }
+impl Key has Eq {
+    fn eq(self, _o: Key) -> bool { true }
+}
+TOY
+  local inc_out
+  inc_out="$( cd "$d" && "$toyc" --release -o inc.bin --codegen-stats main.toy 2>&1 )"
+  ( cd "$d" && "$toyc" --release -o force.bin --no-cache main.toy >/dev/null 2>&1 ) \
+    || { fail_one "inline-witness: force build failed"; return; }
+
+  local base_rc inc_rc
+  "$d/base.bin"; base_rc=$?
+  "$d/inc.bin"; inc_rc=$?
+  if [ "$base_rc" != 41 ] || [ "$inc_rc" != 42 ]; then
+    fail_one "inline-witness: exit base=$base_rc inc=$inc_rc, want 41 then 42 [STALE INLINED WITNESS]"
+    return
+  fi
+  local ih fh
+  ih="$(texthash "$d/inc.bin")"; fh="$(texthash "$d/force.bin")"
+  if [ "$ih" != "$fh" ]; then
+    fail_one "inline-witness: SOUNDNESS — inc __text ($ih) != force __text ($fh) [STALE-CACHE MISCOMPILE]"
+    return
+  fi
+  local comp
+  comp="$(compiled_of "$inc_out")"
+  if [ -n "$comp" ] && [ -n "$full_compiled" ] && [ "$comp" -lt "$full_compiled" ]; then
+    echo "  OK   inline-witness: SOUND; exit 41->42; CUTOFF codegen compiled=$comp < full=$full_compiled"
+    pass=$((pass + 1))
+  else
+    fail_one "inline-witness: CUTOFF — codegen compiled=$comp NOT < full=$full_compiled"
+  fi
+}
+run_inline_witness
+
 # 6) `?`-FROM CONFORMANCE TOGGLE — `outer`'s `?` WIDENS `inner()`'s error via
 #    `impl BigErr has From[SmallErr]`. Base builds; REMOVING the impl makes a warm rebuild a
 #    T0033 compile-error (the widen is NOT stale-served from the cached green `outer`);

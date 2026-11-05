@@ -2,7 +2,6 @@
 //! a build prepares for every caller, and the candidates a caller's cache key folds.
 
 const std = @import("std");
-const Ast = @import("../ast/Ast.zig");
 const AstWalk = @import("AstWalk.zig");
 const Cache = @import("Cache.zig");
 const Closure = @import("../symbols/Closure.zig");
@@ -15,6 +14,7 @@ const Walk = @import("../ast/Walk.zig");
 const Abi = @import("../codegen/abi/Abi.zig");
 const Typecheck = @import("../types.zig");
 const lower = @import("../lower.zig");
+const DeriveEmit = @import("../lower/derive_emit.zig");
 const StdNames = @import("../symbols/StdNames.zig");
 const Frozen = Engine.Frozen;
 
@@ -40,23 +40,24 @@ pub const inline_depth = 3;
 /// std and the bench programs no body that fits has more than 46.
 const inline_nodes_max = 80;
 
-/// The declaration of a unit the inliner may splice, or null: a keyed body from source
-/// (so a caller's key can fold its content), not `main`, and owning no closure (its
-/// lambdas would read an env from a frame that inlining dissolves).
-fn inlineCandidate(fr: *const Frozen) ?Ast.Index {
+/// Whether the inliner may splice a unit: a keyed body from source (so a caller's key can
+/// fold its content), not `main`, owning no closure (its lambdas would read an env from a
+/// frame that inlining dissolves); or an auto-derive unit, whose recipe and layout
+/// (`Engine.deriveFp`) a caller's key folds in place of a source fingerprint.
+fn inlineCandidate(fr: *const Frozen) bool {
     const s = switch (fr.body) {
         .source => |s| s,
-        else => return null,
+        .derive => return true,
+        else => return false,
     };
-    if (!s.cached or s.is_entry or fr.closure_facts.len != 0) return null;
-    if (fr.in.closure.owner) |o| if (Closure.ownerUnits(fr.in.closure.lambda_units, o).len != 0) return null;
+    if (!s.cached or s.is_entry or fr.closure_facts.len != 0) return false;
+    if (fr.in.closure.owner) |o| if (Closure.ownerUnits(fr.in.closure.lambda_units, o).len != 0) return false;
     const src: Walk.Source = .{ .tree = fr.in.tree, .tokens = fr.in.tokens, .source = fr.in.source };
     // A loop never leaves the IR (`Opt.inliner.fits` rejects it), so its body is not
     // lowered to find out.
     var shape: Shape = .{};
     Walk.walk(src, s.decl, &shape) catch unreachable;
-    if (shape.loop or (shape.nodes > inline_nodes_max and !spliced(fr.sym.name))) return null;
-    return s.decl;
+    return !shape.loop and (shape.nodes <= inline_nodes_max or spliced(fr.sym.name));
 }
 
 const Shape = struct {
@@ -85,12 +86,22 @@ fn spliced(name: []const u8) bool {
 }
 
 /// The callees a keyed body's key folds by name, the only ones it may inline: its call
-/// identities (`AstWalk.walkCalls`) and an instance's conformance witnesses.
-fn appendCallNames(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, out: *std.ArrayList([]const u8)) !void {
-    var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
-    defer sigs.deinit(gpa);
-    try AstWalk.walkCalls(gpa, &fr.in, decl, fr.in.sig, &sigs);
-    for (sigs.items) |sg| try out.append(gpa, sg.name);
+/// identities (`AstWalk.walkCalls`) and an instance's conformance witnesses; for a derive
+/// unit, its field witnesses.
+fn appendCallNames(gpa: std.mem.Allocator, fr: *const Frozen, out: *std.ArrayList([]const u8)) !void {
+    switch (fr.body) {
+        .source => |s| {
+            var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
+            defer sigs.deinit(gpa);
+            try AstWalk.walkCalls(gpa, &fr.in, s.decl, fr.in.sig, &sigs);
+            for (sigs.items) |sg| try out.append(gpa, sg.name);
+        },
+        .derive => |d| for (d.field_witnesses) |fw| switch (fw) {
+            .eq_call, .cmp_eq, .cmp_call, .hash_call, .display_call => |n| try out.append(gpa, n),
+            .inline_kind => {},
+        },
+        else => {},
+    }
     for (fr.conformances) |rc| try out.appendSlice(gpa, rc.witness_syms);
 }
 
@@ -103,7 +114,7 @@ pub const Reach = struct {
     /// Parallel to `names`; borrowed from the build's `InlineCache`.
     facts: std.ArrayList(Facts) = .empty,
 
-    pub fn init(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index) !Reach {
+    pub fn init(gpa: std.mem.Allocator, fr: *const Frozen) !Reach {
         var r: Reach = .{ .gpa = gpa };
         errdefer r.deinit();
         const units = fr.units orelse return r;
@@ -113,7 +124,7 @@ pub const Reach = struct {
         try seen.put(gpa, fr.sym.name, {});
         var frontier: std.ArrayList([]const u8) = .empty;
         defer frontier.deinit(gpa);
-        try appendCallNames(gpa, fr, decl, &frontier);
+        try appendCallNames(gpa, fr, &frontier);
         var level: usize = 0;
         while (level < inline_depth) : (level += 1) {
             var next: std.ArrayList([]const u8) = .empty;
@@ -139,8 +150,7 @@ pub const Reach = struct {
 
 /// What the key fold and the inliner read of one candidate unit, computed once per build.
 const Facts = struct {
-    decl: Ast.Index,
-    /// Its own content (`sourceFp`).
+    /// Its own content: `sourceFp`, or a derive unit's `deriveFp`.
     fp: u64,
     /// The callees its key folds by name (`appendCallNames`). Owned by the cache.
     calls: []const []const u8,
@@ -194,12 +204,16 @@ pub const InlineCache = struct {
             if (c.facts.get(name)) |f| return f;
         }
         var mine: ?Facts = null;
-        if (units.find(name)) |g| if (inlineCandidate(&g)) |decl| {
+        if (units.find(name)) |g| if (inlineCandidate(&g)) {
             var calls: std.ArrayList([]const u8) = .empty;
             defer calls.deinit(gpa);
-            try appendCallNames(gpa, &g, decl, &calls);
-            const fp = try Engine.sourceFp(gpa, &g, decl);
-            mine = .{ .decl = decl, .fp = fp, .calls = try calls.toOwnedSlice(gpa) };
+            try appendCallNames(gpa, &g, &calls);
+            const fp = switch (g.body) {
+                .source => |s| try Engine.sourceFp(gpa, &g, s.decl),
+                .derive => |d| try Engine.deriveFp(gpa, &g, d),
+                else => unreachable,
+            };
+            mine = .{ .fp = fp, .calls = try calls.toOwnedSlice(gpa) };
         };
         c.lock();
         defer c.unlock();
@@ -300,10 +314,13 @@ const Inliner = struct {
         }
         const facts = try self.units.cache.factsOf(self.gpa, self.units, name) orelse return null;
         const fr = self.units.find(name).?;
-        const decl = facts.decl;
         var diags: std.ArrayList(Diagnostic) = .empty;
         defer diags.deinit(self.gpa);
-        var irf = try lower.lowerFn(self.gpa, fr.in, decl, fr.sym, false, &diags);
+        var irf = switch (fr.body) {
+            .source => |s| try lower.lowerFn(self.gpa, fr.in, s.decl, fr.sym, false, &diags),
+            .derive => |d| try DeriveEmit.lower(self.gpa, fr.in, d.*, fr.sym, &diags),
+            else => unreachable,
+        };
         errdefer irf.deinit(self.gpa);
         if (diags.items.len != 0) {
             irf.deinit(self.gpa);
@@ -373,7 +390,7 @@ pub const CallerScope = struct {
         var sc: Scope = .{ .inliner = .{ .gpa = gpa, .units = u, .cfg = cfg, .layouts = fr.in.layouts, .enum_layouts = fr.in.enum_layouts }, .depth = inline_depth, .runtime_cfg = fr.profile.forRuntime().opt };
         switch (fr.body) {
             .source => |s| if (s.cached) {
-                try appendCallNames(gpa, fr, s.decl, &cs.allowed);
+                try appendCallNames(gpa, fr, &cs.allowed);
             } else {
                 sc.any = true;
             },
