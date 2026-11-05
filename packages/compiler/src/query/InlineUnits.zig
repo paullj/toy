@@ -12,6 +12,8 @@ const Fingerprint = @import("Fingerprint.zig");
 const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
 const Walk = @import("../ast/Walk.zig");
+const Abi = @import("../codegen/abi/Abi.zig");
+const Typecheck = @import("../types.zig");
 const lower = @import("../lower.zig");
 const StdNames = @import("../symbols/StdNames.zig");
 const Frozen = Engine.Frozen;
@@ -272,6 +274,10 @@ const Inliner = struct {
     gpa: std.mem.Allocator,
     units: Units,
     cfg: Opt.Config,
+    /// The program's layouts, which size the slots a recursive caller's budget counts.
+    /// A callee's key folds the layouts it touches, so a caller's key covers each size.
+    layouts: []const Typecheck.Layout = &.{},
+    enum_layouts: []const Typecheck.EnumLayout = &.{},
 
     /// `name`'s optimized IR with its callees inlined `depth` levels deep, or null when it
     /// is no candidate. Lives as long as the cache.
@@ -325,7 +331,12 @@ const Scope = struct {
     runtime_cfg: ?Opt.Config = null,
 
     fn lookup(s: *Scope) Opt.inliner.Lookup {
-        return .{ .ctx = s, .findFn = find, .splicedFn = if (s.runtime_cfg != null) findSpliced else null };
+        return .{ .ctx = s, .findFn = find, .splicedFn = if (s.runtime_cfg != null) findSpliced else null, .bytesFn = bytes };
+    }
+
+    fn bytes(ctx: *anyopaque, t: Ir.Type) u32 {
+        const s: *Scope = @ptrCast(@alignCast(ctx));
+        return Abi.typeSize(t, s.inliner.layouts, s.inliner.enum_layouts);
     }
 
     fn findSpliced(ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
@@ -359,7 +370,7 @@ pub const CallerScope = struct {
         const cfg = fr.profile.opt;
         if (!cfg.@"inline") return cs;
         const u = fr.units orelse return cs;
-        var sc: Scope = .{ .inliner = .{ .gpa = gpa, .units = u, .cfg = cfg }, .depth = inline_depth, .runtime_cfg = fr.profile.forRuntime().opt };
+        var sc: Scope = .{ .inliner = .{ .gpa = gpa, .units = u, .cfg = cfg, .layouts = fr.in.layouts, .enum_layouts = fr.in.enum_layouts }, .depth = inline_depth, .runtime_cfg = fr.profile.forRuntime().opt };
         switch (fr.body) {
             .source => |s| if (s.cached) {
                 try appendCallNames(gpa, fr, s.decl, &cs.allowed);

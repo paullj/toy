@@ -1,0 +1,22 @@
+# A fn that calls itself inlines only callees that add a word or two to its frame (#354).
+# f1 and f2 take a 96-byte struct by value; splicing them would pool a slot of that size
+# into rec's frame, at every level of a 50000-deep recursion that fits the stack without.
+# expect: stdout "150000\n"
+# expect: exit 0
+import std/io
+
+struct Big { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int }
+
+fn f1(x: Big) -> int { x.a + x.l }
+fn f2(x: Big) -> int { x.b * x.k }
+
+fn rec(n: int, x: Big) -> int {
+    if n == 0 { return 0 }
+    return f1(x) % 3 + f2(x) % 5 + rec(n - 1, x)
+}
+
+fn main() -> int {
+    b := Big { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9, j: 10, k: 11, l: 12 }
+    io.println(rec(50000, b))
+    0
+}

@@ -1,6 +1,6 @@
 # Regression: inlining gave a recursive fn's frame a cell for every value of every
 # spliced helper, so -O1 and --release overflowed the stack at a depth -O0 handles.
-# A recursive caller now takes no inlined bodies.
+# A recursive caller now takes only bodies whose slots fit a two-slot budget.
 # expect: exit 188
 fn h0(a: int, b: int) -> int {
     x := a * 1 + b

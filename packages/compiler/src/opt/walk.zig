@@ -159,32 +159,53 @@ pub fn remapBlockValues(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ct
 
 /// Rewrite every SlotId site of `b` (a `slot_addr`, a call's slot args and `ret_slot`, a
 /// terminator's slot operands) through `map`. `none_slot` is passed through `map` too.
-/// Exhaustive like the value spine, so a new op that names a slot fails to compile here.
 pub fn remapBlockSlots(b: *Ir.Block, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ir.SlotId) Ir.SlotId) void {
+    const Adaptor = struct {
+        fn each(c: @TypeOf(ctx), p: *Ir.SlotId) void {
+            p.* = map(c, p.*);
+        }
+    };
+    eachBlockSlot(b, ctx, Adaptor.each);
+}
+
+/// Visit every SlotId site of `func` (never `none_slot`), in block-id then instruction
+/// order. Read-only, so it may run over IR other jobs share.
+pub fn forEachSlotUse(func: *const Ir.Function, ctx: anytype, comptime f: fn (@TypeOf(ctx), Ir.SlotId) void) void {
+    const Adaptor = struct {
+        fn each(c: @TypeOf(ctx), p: *Ir.SlotId) void {
+            if (p.* != Ir.none_slot) f(c, p.*);
+        }
+    };
+    for (func.blocks) |*b| eachBlockSlot(b, ctx, Adaptor.each);
+}
+
+/// The slot spine: exhaustive like the value spine, so a new op that names a slot fails
+/// to compile here.
+fn eachBlockSlot(b: *Ir.Block, ctx: anytype, comptime f: fn (@TypeOf(ctx), *Ir.SlotId) void) void {
     const ops = struct {
         fn args(c: @TypeOf(ctx), as: []Ir.Operand) void {
             for (as) |*a| switch (a.*) {
-                .slot => |*s| s.* = map(c, s.*),
+                .slot => |*s| f(c, s),
                 .value, .none => {},
             };
         }
     };
     for (b.instrs) |*ins| switch (ins.op) {
-        .slot_addr => |*s| s.* = map(ctx, s.*),
+        .slot_addr => |*s| f(ctx, s),
         .call => |*c| {
             ops.args(ctx, c.args);
-            c.ret_slot = map(ctx, c.ret_slot);
+            f(ctx, &c.ret_slot);
         },
         .call_indirect => |*c| {
             ops.args(ctx, c.args);
-            c.ret_slot = map(ctx, c.ret_slot);
+            f(ctx, &c.ret_slot);
         },
         .iconst, .bconst, .unit, .add, .sub, .mul, .sdiv, .udiv, .smod, .umod, .neg, .bnot, .icmp, .field_addr, .load, .load_byte, .store, .store_narrow, .copy, .get_tag, .cstr_ptr, .band, .bor, .bxor, .shl, .lshr, .ashr, .bcompl, .fconst, .fadd, .fsub, .fmul, .fdiv, .fcmp, .scvtf, .fcvtzs, .fcvt, .fn_addr, .data_addr, .frame_addr, .overflow => {},
     };
     switch (b.term) {
         .br => |*br| ops.args(ctx, br.args),
         .ret => |*o| switch (o.*) {
-            .slot => |*s| s.* = map(ctx, s.*),
+            .slot => |*s| f(ctx, s),
             .value, .none => {},
         },
         .cond_br, .@"unreachable", .panic => {},

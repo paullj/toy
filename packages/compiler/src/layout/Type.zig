@@ -159,6 +159,12 @@ pub const Type = struct {
         return t.kind == .app;
     }
 
+    /// Whether a value of this type is held by bytes (a frame cell, a reg pair or an
+    /// indirect pointer) rather than in one word.
+    pub fn isAggregateValue(t: Type) bool {
+        return t.kind == .str or t.kind == .@"struct" or t.kind == .@"enum";
+    }
+
     /// The composite-table index of an `app` (read of the reused id field). Two
     /// structurally-equal `app`s share an index within a run (content-addressed
     /// interning), so `eql`-by-id is correct.
