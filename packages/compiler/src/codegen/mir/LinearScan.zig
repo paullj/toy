@@ -522,7 +522,7 @@ pub fn LinearScan(comptime Target: type) type {
                         continue;
                     }
                     _ = a.active.swapRemove(i);
-                    try a.evict(ai, evenFloor(start));
+                    try a.evict(ai, evenFloor(start), start);
                 }
                 i = 0;
                 while (i < a.inactive.items.len) {
@@ -533,14 +533,14 @@ pub fn LinearScan(comptime Target: type) type {
                         continue;
                     }
                     _ = a.inactive.swapRemove(i);
-                    try a.evict(ai, evenCeil(start));
+                    try a.evict(ai, evenCeil(start), start);
                 }
             }
 
             /// Take piece `idx` out of its register from `at` on: the part from `at` lives
             /// in the slot until just before its next use, and from there waits to be
-            /// allocated again.
-            fn evict(a: *A, idx: u32, at_in: u32) Error!void {
+            /// allocated again. `now` is the start of the piece being allocated.
+            fn evict(a: *A, idx: u32, at_in: u32, now: u32) Error!void {
                 var tail = idx;
                 const victim = &a.intervals.items[idx];
                 if (at_in > victim.start()) {
@@ -562,7 +562,10 @@ pub fn LinearScan(comptime Target: type) type {
                     try a.pushUnhandled(tail);
                     return;
                 }
-                const pos = a.splitPos(it.start(), u) orelse return error.Unallocatable;
+                // The store may go back to a block boundary before `now`, but the reload
+                // piece must not start there: it would be allocated against the active set
+                // of `now`, blind to the pieces that ended in between and held registers.
+                const pos = a.splitPos(@max(it.start(), evenFloor(now)), u) orelse return error.Unallocatable;
                 it.spilled = true;
                 try a.pushUnhandled(try a.splitAt(tail, pos));
             }
@@ -1224,7 +1227,26 @@ fn cloneFunc(gpa: std.mem.Allocator, f: *TF) !TF {
     return c;
 }
 
-test "linear scan: random programs compute the same before and after allocation, under a moving collector" {
+/// Move every block but the entry to a random place in the layout. Every block ends in
+/// explicit branches, so what the program computes stays the same, but a loop's blocks no
+/// longer sit together and a value's uses no longer follow its def in position order.
+fn shuffleLayout(gpa: std.mem.Allocator, f: *TF, seed: u64) !void {
+    const n = f.blocks.len;
+    if (n < 3) return;
+    const at = try gpa.alloc(u32, n);
+    defer gpa.free(at);
+    for (at, 0..) |*x, i| x.* = @intCast(i);
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x5eed);
+    prng.random().shuffle(u32, at[1..]);
+    const old = try gpa.dupe(TF.Block, f.blocks);
+    defer gpa.free(old);
+    for (old, 0..) |b, i| f.blocks[at[i]] = b;
+    for (f.blocks) |*b| for (b.insts.items) |*inst| {
+        if (inst.branchTarget()) |t| inst.setBranchTarget(at[t]);
+    };
+}
+
+fn expectRandomPrograms(shuffle: bool) !void {
     const gpa = testing.allocator;
     // How many programs needed each mechanism, so the test cannot pass by never using one.
     var spilled: usize = 0;
@@ -1236,6 +1258,7 @@ test "linear scan: random programs compute the same before and after allocation,
         var f = try TF.init(gpa, 0);
         defer f.deinit(gpa);
         try Gen.program(gpa, &f, seed);
+        if (shuffle) try shuffleLayout(gpa, &f, seed);
         var before = try cloneFunc(gpa, &f);
         defer before.deinit(gpa);
         const want = try Machine.run(gpa, &before, null);
@@ -1263,6 +1286,14 @@ test "linear scan: random programs compute the same before and after allocation,
         if (frame.saved != 0) saved += 1;
     }
     try testing.expect(spilled > 100 and mapped > 50 and edge_split > 10 and saved > 100);
+}
+
+test "linear scan: random programs compute the same before and after allocation, under a moving collector" {
+    try expectRandomPrograms(false);
+}
+
+test "linear scan: random programs laid out out of order compute the same after allocation" {
+    try expectRandomPrograms(true);
 }
 
 test "linear scan: a value live across a call takes the callee-saved register; a reference goes to its slot" {
@@ -1416,6 +1447,47 @@ test "linear scan: a value spilled inside a loop reloads at the loop entry, not 
     var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
     defer res.deinit(gpa);
     for (f.blocks[2].insts.items) |i| try testing.expect(i.op != .ld);
+    const want = try Machine.run(gpa, &before, null);
+    defer gpa.free(want);
+    const got = try Machine.run(gpa, &f, res.maps);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u64, want, got);
+}
+
+test "linear scan: a value evicted back to an earlier block boundary reloads no earlier than its evictor starts" {
+    const gpa = testing.allocator;
+    // A random program, laid out out of order, where a value is evicted with its store
+    // moved back to a block boundary before the evicting piece: its reload piece started
+    // there too, took a register the pieces that ended in between still held, and
+    // clobbered one of them.
+    const Op = @FieldType(TI, "op");
+    var f = try TF.init(gpa, 9);
+    defer f.deinit(gpa);
+    var v: [13]Mir.Reg = undefined;
+    for (&v, 0..) |*r, i| {
+        r.* = try f.newVReg(gpa, .gpr, null);
+        f.vregs.items[i].ref = i == 8 or i == 11;
+    }
+    const x0 = Mir.Reg.gp(0);
+    const x0_bit = Mir.regBit(x0);
+    const code = [9][]const Op{
+        &.{ .{ .imm = .{ .rd = v[0], .imm = 2000 } }, .{ .call = .{ .safepoint = false } }, .{ .imm = .{ .rd = v[1], .imm = 3 } }, .{ .b = 2 } },
+        &.{ .{ .imm = .{ .rd = v[11], .imm = 7000 } }, .{ .add = .{ .rd = v[12], .rn = v[0], .rm = v[0] } }, .{ .use = v[0] }, .{ .use = v[0] }, .{ .use = v[11] }, .{ .use = v[12] }, .ret },
+        &.{ .{ .cbnz = .{ .rn = v[1], .target = 7 } }, .{ .b = 1 } },
+        &.{ .{ .call = .{ .safepoint = false } }, .{ .call = .{ .safepoint = false } }, .{ .call = .{} }, .{ .use = v[2] }, .{ .mov = .{ .rd = v[4], .rn = v[2] } }, .{ .cbnz = .{ .rn = v[0], .target = 5 } }, .{ .b = 8 } },
+        &.{ .{ .use = v[2] }, .{ .mov = .{ .rd = x0, .rn = v[0] } }, .{ .call = .{ .uses = x0_bit } }, .{ .call = .{ .defs = x0_bit } }, .{ .mov = .{ .rd = v[10], .rn = x0 } }, .{ .dec = .{ .rd = v[1], .rn = v[1] } }, .{ .b = 2 } },
+        &.{ .{ .imm = .{ .rd = v[8], .imm = 5000 } }, .{ .imm = .{ .rd = v[9], .imm = 6000 } }, .{ .dec = .{ .rd = v[3], .rn = v[3] } }, .{ .b = 6 } },
+        &.{ .{ .cbnz = .{ .rn = v[3], .target = 3 } }, .{ .b = 4 } },
+        &.{ .{ .call = .{ .defs = x0_bit } }, .{ .mov = .{ .rd = v[2], .rn = x0 } }, .{ .use = v[0] }, .{ .imm = .{ .rd = v[3], .imm = 1 } }, .{ .b = 6 } },
+        &.{ .{ .add = .{ .rd = v[0], .rn = v[2], .rm = v[2] } }, .{ .add = .{ .rd = v[5], .rn = v[0], .rm = v[0] } }, .{ .imm = .{ .rd = v[6], .imm = 3000 } }, .{ .imm = .{ .rd = v[7], .imm = 4000 } }, .{ .mov = .{ .rd = v[4], .rn = v[5] } }, .{ .b = 5 } },
+    };
+    for (code, f.blocks) |ops, *b| for (ops) |op| try b.insts.append(gpa, .{ .op = op });
+
+    var before = try cloneFunc(gpa, &f);
+    defer before.deinit(gpa);
+    var frame: Mir.Frame = .{ .layout = undefined };
+    var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
+    defer res.deinit(gpa);
     const want = try Machine.run(gpa, &before, null);
     defer gpa.free(want);
     const got = try Machine.run(gpa, &f, res.maps);
