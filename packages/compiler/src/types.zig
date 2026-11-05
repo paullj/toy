@@ -3617,7 +3617,7 @@ fn scanCalls(t: *Typecheck, model: *const Model, templates: Mono.Templates, mod:
     }
     var prim_gids: [std.enums.values(StdNames.ElemPrim).len]?u32 = undefined;
     for (std.enums.values(StdNames.ElemPrim), &prim_gids) |prim, *g| g.* = elemPrimGid(model, prim);
-    // A non-empty list literal `[e0, ..]` desugars to `new()` + one `push` per element
+    // A non-empty list literal `[e0, ..]` desugars to `with_capacity(n)` + one `push` per element
     // over its typed `Vec[V]` receiver, and a `for x in xs` desugars to `it := xs.iter()`
     // then a loop over `it.next()`: discover the template instances lower will call (the
     // transitive `Vec$T.get`/`mem.ga_*`/`Option$T` follow from re-checking each body).

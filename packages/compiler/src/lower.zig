@@ -861,7 +861,7 @@ pub fn lowerExpr(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Operand
         },
         // An empty list literal `[]` is sugar for the type's associated `new()`.
         .empty_list => return .{ .slot = try lowerEmptyListSlot(b, node_idx, ty) },
-        // A non-empty `[e0, ..]` builds a `Vec[V]` via `new()` + one `push` per element.
+        // A non-empty `[e0, ..]` builds a `Vec[V]` via `with_capacity(n)` + one `push` per element.
         .list_literal => return .{ .slot = try lowerListLiteralSlot(b, node_idx, ty) },
         .index => return try lowerIndex(b, node_idx, ty),
         // A value-headed `type_app` is a value index the parser could not tell from a
@@ -2352,6 +2352,10 @@ fn lowerTypeIntrinsicCall(b: *Builder, n: Ast.Node) error{OutOfMemory}!Ir.Operan
             const tnodes = Ast.rangeSlice(b.in.tree, (callee_node.rhs).int());
             return .{ .value = try emitLayoutOf(b, b.in.nodes.typeOf(tnodes[0])) };
         },
+        .array_layout_of => {
+            const tnodes = Ast.rangeSlice(b.in.tree, (callee_node.rhs).int());
+            return .{ .value = try emitLayout(b, try GcLayout.arrayProgram(b.gpa, b.in.nodes.typeOf(tnodes[0]), b.in.layouts, b.in.enum_layouts)) };
+        },
         // `gc_array[T](p)` wraps a raw cell pointer into an 8-byte handle: a checker-only
         // type change, so lower yields the pointer operand directly.
         .gc_array => {
@@ -3238,7 +3242,8 @@ fn lowerEmptyListSlot(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) erro
 }
 
 /// Lower a non-empty list literal `[e0, ..]` (type `ty`, a `Vec[V]`) into a fresh temp
-/// slot: call the type's associated `new()`, then one `push(self, ei)` per element.
+/// slot: call the type's associated `with_capacity(n)`, so the backing is exactly the
+/// literal's size, then one `push(self, ei)` per element.
 /// `push` takes `self` by value (the 8-byte handle), so the same slot is passed as the
 /// receiver each time — the header never moves, so every push targets the shared
 /// backing. An aggregate element rides `push`'s arg by slot (its `store` copies
@@ -3247,14 +3252,16 @@ fn lowerListLiteralSlot(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) er
     const n = b.in.tree.nodes[(node_idx).int()];
     const slot = try b.addSlot(ty);
     const dm = comptime StdNames.desugarMethods(.list_literal);
-    comptime std.debug.assert(dm.len == 2); // dm[0]: new, dm[1]: push
+    comptime std.debug.assert(dm.len == 2); // dm[0]: with_capacity, dm[1]: push
+    const elems = Ast.rangeSlice(b.in.tree, (n.rhs).int());
     const nm = Typecheck.findMethod(b.in.methods, ty, dm[0].name) orelse {
-        try b.note(n.main_token, "list-literal 'new' constructor unresolved in lower");
+        try b.note(n.main_token, "list-literal 'with_capacity' constructor unresolved in lower");
         return slot;
     };
     {
-        const new_args = try b.gpa.alloc(Ir.Operand, 0);
+        const new_args = try b.gpa.alloc(Ir.Operand, 1);
         errdefer b.gpa.free(new_args);
+        new_args[0] = .{ .value = try b.emit(.{ .iconst = @intCast(elems.len) }, Typecheck.Type.int) };
         _ = try b.emit(.{ .call = .{ .callee = witnessCallee(b, nm), .args = new_args, .ret_slot = slot } }, null);
     }
     const pm = Typecheck.findMethod(b.in.methods, ty, dm[1].name) orelse {
@@ -3262,7 +3269,7 @@ fn lowerListLiteralSlot(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) er
         return slot;
     };
     const push_callee = witnessCallee(b, pm);
-    for (Ast.rangeSlice(b.in.tree, (n.rhs).int())) |ei| {
+    for (elems) |ei| {
         const args = try b.gpa.alloc(Ir.Operand, 2);
         errdefer b.gpa.free(args);
         args[0] = .{ .slot = slot };

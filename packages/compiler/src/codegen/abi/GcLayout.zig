@@ -16,15 +16,31 @@
 
 const std = @import("std");
 const types = @import("../../types.zig");
+const Abi = @import("Abi.zig");
 const Type = types.Type;
 const Layout = types.Layout;
 const EnumLayout = types.EnumLayout;
 
 pub const Op = enum(u2) { end = 0, ptr = 1, @"switch" = 2, jump = 3 };
 
-/// The layout word of a Vec or Map header, which the collector walks by the header's own
+/// The layout word of a Map or Set header, which the collector walks by the header's own
 /// fields. No program lies at address 1, so it can never name one.
-pub const container: u64 = 1;
+pub const map_header: u64 = 1;
+
+/// The low 3 bits of the first word of a Vec header's program (`arrayProgram`). As an op
+/// it is END, so no cell program starts with it: an empty one is no program at all.
+pub const array_mark: u64 = 4;
+
+/// The Vec header `{len, cap, elems}` core/mem lays out and the collector reads by these
+/// offsets. Elements of up to `inline_max` bytes sit in the header's own cell, right past
+/// it, so a small literal stays one cell of at most 64 bytes.
+pub const VecHeader = struct {
+    pub const len = 0;
+    pub const cap = 8;
+    pub const elems = 16;
+    pub const size = 24;
+    pub const inline_max = 64 - size;
+};
 
 /// Walk the references of a `ty` cell based at `base`, calling `v.ptr(off)` for each and,
 /// around an enum's variants, `v.enumBegin(tag_off, n)`, `v.variant(k)` before variant k's
@@ -159,6 +175,22 @@ pub fn program(gpa: std.mem.Allocator, ty: Type, layouts: []const Layout, enum_l
     return b.finish();
 }
 
+/// The program of a `VecHeader` whose elements are `elem` cells: the
+/// element size above `array_mark`, then the element's own program, whose word indexes
+/// count from the word after the mark. The collector reads the size and the element layout
+/// from here, so a header carries neither and fits a 32-byte cell.
+pub fn arrayProgram(gpa: std.mem.Allocator, elem: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) error{OutOfMemory}![]u8 {
+    const inner = try program(gpa, elem, layouts, enum_layouts);
+    defer gpa.free(inner);
+    const words = if (inner.len == 0) 2 else 1 + inner.len / 8;
+    const out = try gpa.alloc(u8, words * 8);
+    @memset(out, 0);
+    const size: u64 = Abi.typeSize(elem, layouts, enum_layouts);
+    std.mem.writeInt(u64, out[0..8], (size << 3) | array_mark, .little);
+    @memcpy(out[8 .. 8 + inner.len], inner);
+    return out;
+}
+
 /// Every offset a `ty` cell based at `base` may hold a reference at, appended to `out`:
 /// an enum gives each variant's, since a frame root map has no tag to read.
 pub fn appendRefOffsets(gpa: std.mem.Allocator, ty: Type, base: u32, layouts: []const Layout, enum_layouts: []const EnumLayout, out: *std.ArrayList(u32)) error{OutOfMemory}!void {
@@ -184,20 +216,53 @@ fn bundledSource(path: []const u8) ![]const u8 {
     return error.TestUnexpectedResult;
 }
 
-test "the .toy runtime mirrors the ops and the container layout" {
+test "the .toy runtime mirrors the ops and the container layouts" {
     // The collector and core/mem are .toy and cannot import these, so each mirror is pinned
-    // by its text: trace_cell's op tests and both copies of the container layout.
+    // by its text: trace_cell's op tests, both copies of the map header layout and the
+    // collector's array mark.
     var buf: [64]u8 = undefined;
     const gc = try bundledSource("core/rt/gc");
     for ([_]Op{ .ptr, .@"switch", .jump }) |op| {
         const want = try std.fmt.bufPrint(&buf, "op == {d}", .{@intFromEnum(op)});
         try testing.expect(std.mem.indexOf(u8, gc, want) != null);
     }
-    const c = try std.fmt.bufPrint(&buf, "fn container() -> int {{ return {d} }}", .{container});
+    const c = try std.fmt.bufPrint(&buf, "fn map_header() -> int {{ return {d} }}", .{map_header});
     try testing.expect(std.mem.indexOf(u8, gc, c) != null);
+    const a = try std.fmt.bufPrint(&buf, "fn array_mark() -> int {{ return {d} }}", .{array_mark});
+    try testing.expect(std.mem.indexOf(u8, gc, a) != null);
     const mem = try bundledSource("core/mem");
-    const h = try std.fmt.bufPrint(&buf, "fn header_layout() -> int {{\n    return {d}\n}}", .{container});
+    const h = try std.fmt.bufPrint(&buf, "fn map_header() -> int {{\n    return {d}\n}}", .{map_header});
     try testing.expect(std.mem.indexOf(u8, mem, h) != null);
+}
+
+test "core/mem and the collector agree on the Vec header" {
+    // Both are .toy and name the header fields by literal offsets, so each is pinned here.
+    var buf: [64]u8 = undefined;
+    const gc = try bundledSource("core/rt/gc");
+    comptime std.debug.assert(VecHeader.len == 0);
+    try testing.expect(std.mem.indexOf(u8, gc, "len := word(header)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, gc, try std.fmt.bufPrint(&buf, "word(header + {d})", .{VecHeader.elems})) != null);
+    const mem = try bundledSource("core/mem");
+    const pins = [_][]const u8{
+        try std.fmt.allocPrint(testing.allocator, "load(offset(a, {d}))", .{VecHeader.len}),
+        try std.fmt.allocPrint(testing.allocator, "load(offset(a, {d}))", .{VecHeader.cap}),
+        try std.fmt.allocPrint(testing.allocator, "load(offset(a, {d}))", .{VecHeader.elems}),
+        try std.fmt.allocPrint(testing.allocator, "gc_alloc({d}, array_layout_of[T]())", .{VecHeader.size}),
+        try std.fmt.allocPrint(testing.allocator, "store(offset(hdr, {d}), offset(hdr, {d}))", .{ VecHeader.elems, VecHeader.size }),
+        try std.fmt.allocPrint(testing.allocator, "if bytes <= {d} {{", .{VecHeader.inline_max}),
+    };
+    defer for (pins) |p| testing.allocator.free(p);
+    for (pins) |p| try testing.expect(std.mem.indexOf(u8, mem, p) != null);
+}
+
+test "an array program leads with the element size, then the element's program" {
+    const gpa = testing.allocator;
+    const i = try arrayProgram(gpa, Type.int, &.{}, &.{});
+    defer gpa.free(i);
+    try expectProgram(&.{ (8 << 3) | array_mark, 0 }, i);
+    const s = try arrayProgram(gpa, Type.str, &.{}, &.{});
+    defer gpa.free(s);
+    try expectProgram(&.{ (16 << 3) | array_mark, 1, 0 }, s);
 }
 
 fn expectProgram(want: []const u64, bytes: []const u8) !void {

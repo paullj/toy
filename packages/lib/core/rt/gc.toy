@@ -12,11 +12,12 @@
 # scanned word by word: it is the only memory read without a layout.
 #
 # Every object records the layout it was allocated with: 0 for one that holds no
-# reference, `container()` for a Vec or Map header, else a layout program (`GcLayout` in
-# the compiler) that names the offsets of its references. A marked object is traced when it
-# comes off the mark stack by running its program (`trace_cell`), or for a container header
-# by running its element layouts over the live elements (`trace_vec`, `trace_map`). Only
-# offsets are read, so the layouts would serve a moving collector too.
+# reference, `map_header()` for a Map header, else a layout program (`GcLayout` in the
+# compiler) that names the offsets of its references. A Vec header's program leads with
+# `array_mark()` and the element size, then the element's program. A marked object is
+# traced when it comes off the mark stack by running its program (`trace_cell`), or for a
+# container header by running its element layouts over the live elements (`trace_vec`,
+# `trace_map`). Only offsets are read, so the layouts would serve a moving collector too.
 #
 # The sweep is lazy: a collection only marks, then files each span, one with no marked cell
 # in a pool any class refills from, every other one on its class's unswept list, which
@@ -35,7 +36,7 @@ extern fn calloc(n: int, size: int) -> int
 extern fn free(p: int)
 extern fn memset(p: int, c: int, n: int) -> int
 
-# A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `container()` or the
+# A fresh zeroed cell of at least `size` bytes, traced by `layout`: 0, `map_header()` or the
 # address of a layout program. Every caller built with the inliner takes this body spliced
 # in (#211), so the fast path costs no call, and the size and layout it is passed fold: it
 # takes a cell of the first four classes, which step by 16 bytes, off its freelist. Every
@@ -449,11 +450,11 @@ fn drain(cb: int) {
         entry := word(mark_stack(cb)) + n * 16
         obj := word(entry)
         layout := word(entry + 8)
-        if layout == container() {
-            # A container header says which container it is: 0 at +32 for a Vec.
-            if word(obj + 32) == 0 { trace_vec(obj) } else { trace_map(obj) }
+        if layout == map_header() {
+            trace_map(obj)
         } else {
-            trace_cell(map + ((layout << 32) >> 32), obj)
+            prog := map + ((layout << 32) >> 32)
+            if (word(prog) & 7) == array_mark() { trace_vec(obj, prog) } else { trace_cell(prog, obj) }
         }
     }
 }
@@ -484,16 +485,19 @@ fn trace_cell(prog: int, base: int) {
     }
 }
 
-# A Vec header: {len@0, elems@16, elem_layout@40, elem_size@48}. The backing has no layout
-# of its own: only its first `len` elements are live, and each runs the element layout, if
-# the element type holds a reference.
-fn trace_vec(header: int) {
+# A Vec header: {len@0, elems@16}, and its program `array`: {array_mark | size << 3, the
+# element's program}. The backing has no layout of its own: only its first `len` elements
+# are live, and each runs the element's program, if the element type holds a reference.
+fn trace_vec(header: int, array: int) {
     elems := word(header + 16)
+    # An empty Vec has no backing. So has a free header, which keeps its layout and only its
+    # freelist link, in `len`: a stale root may lead here, and must not walk that many.
+    if elems == 0 { return }
     mark_word(elems)
-    prog := word(header + 40)
-    if prog == 0 { return }
+    prog := array + 8
+    if word(prog) == 0 { return }
     len := word(header)
-    size := word(header + 48)
+    size := word(array) >> 3
     i := 0
     # Most element types hold one reference (a str, a Ref, a closure's env), so a program of
     # one PTR is run in place rather than called per element.
@@ -512,19 +516,19 @@ fn trace_vec(header: int) {
     }
 }
 
-# A Map or Set header: {buckets@0, entries@8, len@24, key_layout@40, val_layout@48,
-# key_size@56, stride@64}. The entries are dense in insertion order, so the walk sees every
+# A Map or Set header: {buckets@0, entries@8, len@24, key_layout@32, val_layout@40,
+# key_size@48, stride@56}. The entries are dense in insertion order, so the walk sees every
 # live entry wherever its bucket probed to, and a key's buffer is reached only through it.
 fn trace_map(header: int) {
     mark_word(word(header))
     entries := word(header + 8)
     mark_word(entries)
-    keys := word(header + 40)
-    values := word(header + 48)
+    keys := word(header + 32)
+    values := word(header + 40)
     if keys == 0 && values == 0 { return }
     len := word(header + 24)
-    stride := word(header + 64)
-    key_size := word(header + 56)
+    stride := word(header + 56)
+    key_size := word(header + 48)
     i := 0
     while i < len {
         entry := entries + i * stride
@@ -700,15 +704,19 @@ fn set_layout(cell: int, rel: int) {
 
 # The 4-byte entry of `layout`. A program is kept as its offset from the stack map, which
 # the image lays out after every literal: negative, so its low half is never 0 or
-# `container()`. `stack_map()` is an address the code forms in place, where `text_base()`
+# `map_header()`. `stack_map()` is an address the code forms in place, where `text_base()`
 # is a call.
 fn relative(layout: int) -> int {
-    if layout > container() { return (layout - stack_map()) & 4294967295 }
+    if layout > map_header() { return (layout - stack_map()) & 4294967295 }
     return layout
 }
 
-# The layout of a Vec or Map header, `core/mem`'s `header_layout`.
-fn container() -> int { return 1 }
+# The layout of a Map header, `core/mem`'s `map_header`.
+fn map_header() -> int { return 1 }
+
+# The low 3 bits of a Vec header program's first word: END as an op, so no cell program
+# starts with it.
+fn array_mark() -> int { return 4 }
 
 # A stack-map count or root packs a u32 in a word's low half. The sentinel row's count
 # marks a frame no toy fn owns.

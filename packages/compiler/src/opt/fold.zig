@@ -36,7 +36,7 @@ const Known = union(enum) {
     bool: bool,
     /// A `cstr_ptr`: an address in the image, resolved at link time. No image maps its
     /// zero page, so it compares above any constant in it, which folds the
-    /// `layout > container()` test the spliced `gc.alloc` makes of a constant layout.
+    /// `layout > map_header()` test the spliced `gc.alloc` makes of a constant layout.
     addr,
 };
 
