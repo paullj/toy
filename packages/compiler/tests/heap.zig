@@ -527,7 +527,7 @@ test "heap: store_u32 writes 4 bytes and leaves its neighbours alone" {
     }
 }
 
-test "gc: a large object rooted only through its third page survives (every page is in the span table)" {
+test "gc: a large object rooted only through its third page survives (every page is in the page map)" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -538,6 +538,34 @@ test "gc: a large object rooted only through its third page survives (every page
         \\
     , &.{harness.dev_core_imports});
     try std.testing.expectEqual(@as(u8, 9), code);
+}
+
+test "gc: a 1 MiB object rooted only through its last page survives large-object churn" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-large-last-page",
+            \\import core/mem_selftest
+            \\fn main() -> int { return mem_selftest.large_last_page_survivor() }
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 9), code);
+    }
+}
+
+test "gc: a live heap past one arena keeps every cell across collections" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const code = try buildAndRunWith(gpa, io, ".toy-test-gc-arena-growth",
+        \\import core/mem_selftest
+        \\fn main() -> int { return mem_selftest.arena_growth() }
+        \\
+    , &.{ harness.dev_core_imports, "-O1" });
+    try std.testing.expectEqual(@as(u8, 1), code);
 }
 
 test "gc: spans a collection empties are reused by another size class, zeroed" {

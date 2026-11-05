@@ -1,0 +1,15 @@
+# Feature: an allocation the kernel cannot map panics with "out of memory" instead of
+# writing through the failed mapping's address (-1) and dying on SIGBUS. 2^58 bytes is
+# past any address space, so the mmap of the large object fails.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "out of memory\n"
+import std/vec
+
+fn main() -> int {
+    keep: Vec[int] = []
+    keep.push(3)
+    big := Vec[int].with_capacity(1 << 55)
+    big.push(1)
+    return keep.len() + big.len()
+}
