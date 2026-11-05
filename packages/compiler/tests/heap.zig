@@ -1025,3 +1025,67 @@ test "gc: refs a recursive fn holds across spliced allocations survive stress at
         try std.testing.expectEqual(@as(u8, 630 % 256), code);
     }
 }
+
+test "gc: noscan spans carry no layout table, so they hold more cells" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-noscan-capacity",
+            \\import core/mem_selftest
+            \\fn main() -> int { return mem_selftest.noscan_span_capacity() }
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
+}
+
+test "gc: an address held only in a noscan object keeps nothing alive" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-noscan-untraced",
+            \\import core/mem_selftest
+            \\fn main() -> int { return mem_selftest.noscan_body_untraced() }
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
+}
+
+test "gc: a backing's span kind comes from its element type" {
+    // One span for the Vec headers, one for the 2 KiB backing of `keep`, then the 48-byte
+    // cells: a noscan backing shares a span with the noscan cells, a container one cannot.
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cases = [_]struct { entry: []const u8, spans: u8 }{
+        .{ .entry = "int_backing_spans", .spans = 3 },
+        .{ .entry = "ref_backing_spans", .spans = 4 },
+    };
+    for (cases) |c| for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const src = try std.fmt.allocPrint(gpa, "import core/mem_selftest\nfn main() -> int {{ return mem_selftest.{s}() }}\n", .{c.entry});
+        defer gpa.free(src);
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-backing-kind", src, &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(c.spans, code);
+    };
+}
+
+test "gc: a pooled span reused by another kind keeps every live cell" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-span-kind-change",
+            \\import core/mem_selftest
+            \\fn main() -> int { return mem_selftest.span_kind_change() }
+            \\
+        , &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
+}

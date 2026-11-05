@@ -171,7 +171,7 @@ pub const gc_stackmap_base_hash: u64 = 0x57AC_C0DE_BA5E_0000;
 /// Bytes of the writable zero-fill `__bss` an image gets when any reloc targets `.data`.
 /// Only the GC control block lives there, whose fields `core/rt/gc` names by offset; a
 /// test below holds every one of them inside.
-pub const bss_size: u32 = 512;
+pub const bss_size: u32 = 1024;
 
 comptime {
     std.debug.assert(gc_stackmap_base_hash != symtab_base_hash and
@@ -192,8 +192,12 @@ test "every control block field core/rt/gc names fits in __bss" {
     const src = for (@import("bundled_std").modules) |m| {
         if (std.mem.eql(u8, m.path, "core/rt/gc")) break m.source;
     } else return error.TestUnexpectedResult;
+    // A per-list field has a head for each size class of each span kind.
+    try testing.expectEqual(classes, try returnedInt(src, "fn class_count() -> int { return "));
+    const lists = classes * try returnedInt(src, "fn list_count() -> int { return ");
     var fields: usize = 0;
     var end: usize = 0;
+    var used = [_]bool{false} ** (bss_size / 8);
     var lines = std.mem.tokenizeScalar(u8, src, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "fn ") or std.mem.indexOf(u8, line, "(cb: int") == null) continue;
@@ -205,13 +209,24 @@ test "every control block field core/rt/gc names fits in __bss" {
             const n = std.mem.indexOfScalar(u8, rest, ' ').?;
             off = try std.fmt.parseInt(usize, rest[0..n], 10);
         }
-        // A per-class field is one head for each size class.
-        const words: usize = if (std.mem.indexOf(u8, rest, "class * 8") != null) classes else 1;
+        const words: usize = if (std.mem.indexOf(u8, rest, "list * 8") != null) lists else 1;
         end = @max(end, off + words * 8);
+        try testing.expect(end <= bss_size);
+        for (used[off / 8 ..][0..words]) |*w| {
+            try testing.expect(!w.*);
+            w.* = true;
+        }
         fields += 1;
     }
     try testing.expect(fields >= 15);
-    try testing.expect(end <= bss_size);
+}
+
+/// The integer a one-line .toy fn returns, as in `fn f() -> int { return 13 }`, or the
+/// factor in `{ return 3 * class_count() }`.
+fn returnedInt(src: []const u8, head: []const u8) !usize {
+    const at = (std.mem.indexOf(u8, src, head) orelse return error.TestUnexpectedResult) + head.len;
+    const digits = std.mem.indexOfNone(u8, src[at..], "0123456789") orelse return error.TestUnexpectedResult;
+    return std.fmt.parseInt(usize, src[at..][0..digits], 10);
 }
 
 test "SymbolId.name is the single source of truth for name ownership" {

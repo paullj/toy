@@ -27,6 +27,10 @@ pub const Op = enum(u2) { end = 0, ptr = 1, @"switch" = 2, jump = 3 };
 /// fields. No program lies at address 1, so it can never name one.
 pub const map_header: u64 = 1;
 
+/// The layout word of a Vec or Map backing whose elements hold references, which only its
+/// header traces. Like `map_header`, it is below any program's address.
+pub const container: u64 = 2;
+
 /// The low 3 bits of the first word of a Vec header's program (`arrayProgram`). As an op
 /// it is END, so no cell program starts with it: an empty one is no program at all.
 pub const array_mark: u64 = 4;
@@ -218,21 +222,33 @@ fn bundledSource(path: []const u8) ![]const u8 {
 
 test "the .toy runtime mirrors the ops and the container layouts" {
     // The collector and core/mem are .toy and cannot import these, so each mirror is pinned
-    // by its text: trace_cell's op tests, both copies of the map header layout and the
-    // collector's array mark.
+    // by its text: trace_cell's op tests, both copies of the map header and container
+    // layouts and the collector's array mark.
     var buf: [64]u8 = undefined;
     const gc = try bundledSource("core/rt/gc");
     for ([_]Op{ .ptr, .@"switch", .jump }) |op| {
         const want = try std.fmt.bufPrint(&buf, "op == {d}", .{@intFromEnum(op)});
         try testing.expect(std.mem.indexOf(u8, gc, want) != null);
     }
-    const c = try std.fmt.bufPrint(&buf, "fn map_header() -> int {{ return {d} }}", .{map_header});
-    try testing.expect(std.mem.indexOf(u8, gc, c) != null);
-    const a = try std.fmt.bufPrint(&buf, "fn array_mark() -> int {{ return {d} }}", .{array_mark});
-    try testing.expect(std.mem.indexOf(u8, gc, a) != null);
+    try testing.expectEqual(map_header, try returnedInt(gc, "map_header"));
+    try testing.expectEqual(array_mark, try returnedInt(gc, "array_mark"));
+    try testing.expectEqual(container, try returnedInt(gc, "container"));
     const mem = try bundledSource("core/mem");
-    const h = try std.fmt.bufPrint(&buf, "fn map_header() -> int {{\n    return {d}\n}}", .{map_header});
-    try testing.expect(std.mem.indexOf(u8, mem, h) != null);
+    try testing.expectEqual(map_header, try returnedInt(mem, "map_header"));
+    try testing.expectEqual(container, try returnedInt(mem, "container"));
+}
+
+/// The integer `fn name() -> int` returns, on one line or several, so a reformat of the
+/// .toy source does not read as drift.
+fn returnedInt(src: []const u8, name: []const u8) !u64 {
+    var buf: [64]u8 = undefined;
+    const head = try std.fmt.bufPrint(&buf, "fn {s}() -> int {{", .{name});
+    const at = (std.mem.indexOf(u8, src, head) orelse return error.TestUnexpectedResult) + head.len;
+    const body = std.mem.trimStart(u8, src[at..], " \n");
+    if (!std.mem.startsWith(u8, body, "return ")) return error.TestUnexpectedResult;
+    const digits = body["return ".len..];
+    const n = std.mem.indexOfNone(u8, digits, "0123456789") orelse return error.TestUnexpectedResult;
+    return std.fmt.parseInt(u64, digits[0..n], 10);
 }
 
 test "core/mem and the collector agree on the Vec header" {
