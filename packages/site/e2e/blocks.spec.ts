@@ -24,7 +24,7 @@ async function hinted(page: Page, file: string) {
 
 // `delay` types at human speed: the client drops an in-flight signature request when the
 // cursor moves, so zero-delay typing would outrun every reply.
-async function typeAtEndOfLine(page: Page, b: ReturnType<typeof block>, lineText: string, text: string, delay = 0) {
+async function typeAtEndOfLine(page: Page, b: ReturnType<typeof block>, lineText: string | RegExp, text: string, delay = 0) {
 	await b.locator('.cm-line', { hasText: lineText }).first().click();
 	await page.keyboard.press('End');
 	await page.keyboard.type(text, { delay });
@@ -124,7 +124,7 @@ test('F12 jumps from a use to its definition', async ({ page }) => {
 
 test('signature help tracks the active argument', async ({ page }) => {
 	const b = await live(page, 'order.toy');
-	await typeAtEndOfLine(page, b, '}', '\nfn add(a: int, b: int) -> int { return a + b }');
+	await typeAtEndOfLine(page, b, /^}$/, '\nfn add(a: int, b: int) -> int { return a + b }');
 	await typeAtEndOfLine(page, b, 'quantity := 3', '\nsum := add(1, ', 60);
 	const sig = page.locator('.cm-lsp-signature-tooltip');
 	await expect(sig).toContainText('fn add(int, int) -> int');
@@ -203,7 +203,7 @@ test('inlay hints show what a closure captures and which argument a call mutates
 
 test('a diagnostic tooltip links its code and jumps to the related definition', async ({ page }) => {
 	const b = await live(page, 'order.toy');
-	await typeAtEndOfLine(page, b, '}', '\nfn add(a: int, b: int) -> int { return a + b }');
+	await typeAtEndOfLine(page, b, /^}$/, '\nfn add(a: int, b: int) -> int { return a + b }');
 	await typeAtEndOfLine(page, b, 'quantity := 3', '\n_sum := add(1)');
 	const mark = b.locator('.cm-lintRange-error');
 	await expect(mark).toHaveText('(1)');

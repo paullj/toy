@@ -112,24 +112,6 @@ code, pre, kbd, .font-mono {
 .btn-border { border: 1px solid var(--border); }
 .btn-border:hover { background: var(--code-bg); }
 
-/* Small inline button (e.g. theme switcher). */
-.theme-btn {
-	display: inline-flex;
-	align-items: center;
-	border-radius: 999px;
-	padding: 0.25rem 0.65rem;
-	background: var(--code-bg);
-	border: 1px solid var(--border);
-	color: var(--fg-muted);
-	transition: background-color 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
-}
-.theme-btn:hover {
-	background: color-mix(in srgb, var(--accent) 10%, var(--code-bg));
-	border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-	color: var(--accent);
-}
-.theme-btn:active { transform: scale(0.94); }
-
 /* Link cards: a hard offset shadow in the card's block colour reads as a stacked toy block. */
 .toy-card {
 	border: 1px solid var(--border);
