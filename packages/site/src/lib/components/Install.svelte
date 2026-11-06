@@ -13,6 +13,8 @@
 	const fromSource = `git clone https://github.com/paullj/toy-compiler
 cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 
+	const colors = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)'];
+
 	let current = $state(systems[0].id);
 	const os = $derived(systems.find((s) => s.id === current)!);
 
@@ -25,15 +27,22 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 </script>
 
 <div id="install" class="mt-8 max-w-xl scroll-mt-8">
-	<div role="tablist" aria-label="Operating system" class="flex gap-1.5">
-		{#each systems as s}
-			<button role="tab" aria-selected={current === s.id} class="pill" class:active={current === s.id} onclick={() => (current = s.id)}>
+	<div role="tablist" aria-label="Operating system" class="os-tabs">
+		{#each systems as s, i}
+			<button
+				role="tab"
+				aria-selected={current === s.id}
+				class="os-tab"
+				class:active={current === s.id}
+				style="--block: {colors[i]}"
+				onclick={() => (current = s.id)}
+			>
 				{s.label}
 			</button>
 		{/each}
 	</div>
 
-	<div class="mt-3 rounded-xl border" style="border-color: var(--border); background: var(--code-bg)" role="tabpanel">
+	<div class="install-box" role="tabpanel">
 		<div class="flex items-start gap-3 px-4 py-3 font-mono text-[0.75rem] leading-relaxed">
 			<span class="select-none" style="color: var(--fg-muted)">$</span>
 			<code class="min-w-0 flex-1 [overflow-wrap:anywhere] opacity-50" data-testid="install-command">{os.command}</code>
@@ -57,6 +66,40 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 </div>
 
 <style>
+	.os-tabs {
+		display: inline-flex;
+		border: 1.5px solid var(--border);
+		border-bottom: none;
+		border-radius: 0.6rem 0.6rem 0 0;
+		overflow: hidden;
+	}
+	.os-tab {
+		padding: 0.35rem 0.9rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--fg-muted);
+		background: var(--bg);
+		box-shadow: inset 0 3px 0 transparent;
+		transition: color 0.12s, background-color 0.12s, box-shadow 0.12s;
+	}
+	.os-tab + .os-tab {
+		border-left: 1.5px solid var(--border);
+	}
+	.os-tab:hover {
+		color: var(--fg);
+		box-shadow: inset 0 3px 0 var(--block);
+	}
+	.os-tab.active {
+		color: var(--fg);
+		background: color-mix(in srgb, var(--block) 18%, var(--code-bg));
+		box-shadow: inset 0 3px 0 var(--block);
+	}
+	.install-box {
+		border: 1.5px solid var(--border);
+		border-radius: 0 0.75rem 0.75rem 0.75rem;
+		background: var(--code-bg);
+		box-shadow: 3px 3px 0 var(--border);
+	}
 	.tag {
 		flex-shrink: 0;
 		border: 1px solid var(--border);
