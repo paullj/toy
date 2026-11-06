@@ -26,7 +26,7 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 	}
 </script>
 
-<div id="install" class="mt-8 max-w-xl scroll-mt-8">
+<div id="install" class="mt-8 scroll-mt-8">
 	<div role="tablist" aria-label="Operating system" class="os-tabs">
 		{#each systems as s, i}
 			<button
@@ -67,32 +67,38 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 
 <style>
 	.os-tabs {
-		display: inline-flex;
-		border: 1.5px solid var(--border);
-		border-bottom: none;
-		border-radius: 0.6rem 0.6rem 0 0;
-		overflow: hidden;
+		display: flex;
+		margin-bottom: -1.5px;
 	}
 	.os-tab {
+		position: relative;
+		border: 1.5px solid var(--border);
 		padding: 0.35rem 0.9rem;
 		font-size: 0.8rem;
 		font-weight: 600;
 		color: var(--fg-muted);
 		background: var(--bg);
-		box-shadow: inset 0 3px 0 transparent;
-		transition: color 0.12s, background-color 0.12s, box-shadow 0.12s;
+		transition: color 0.12s, background-color 0.12s, border-color 0.12s;
 	}
 	.os-tab + .os-tab {
-		border-left: 1.5px solid var(--border);
+		margin-left: -1.5px;
+	}
+	.os-tab:first-child {
+		border-top-left-radius: 0.6rem;
+	}
+	.os-tab:last-child {
+		border-top-right-radius: 0.6rem;
 	}
 	.os-tab:hover {
+		z-index: 1;
 		color: var(--fg);
-		box-shadow: inset 0 3px 0 var(--block);
+		border-color: var(--block);
 	}
 	.os-tab.active {
+		z-index: 2;
 		color: var(--fg);
-		background: color-mix(in srgb, var(--block) 18%, var(--code-bg));
-		box-shadow: inset 0 3px 0 var(--block);
+		background: color-mix(in srgb, var(--block) 18%, var(--bg));
+		border-color: var(--block);
 	}
 	.install-box {
 		border: 1.5px solid var(--border);
