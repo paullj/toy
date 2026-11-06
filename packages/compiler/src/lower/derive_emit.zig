@@ -33,33 +33,11 @@ const testing = std.testing;
 /// witness here would be a `conforms`/emitter mismatch). Returns a bool value.
 fn structEqAtSlots(b: *L.Builder, ty: Typecheck.Type, lslot: Ir.SlotId, rslot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
     switch (Typecheck.resolveConformanceMethod(b.in.methods, ty, "eq", b.in.prelude_ids.eq, null)) {
-        .one => |m| {
-            const callee = L.witnessCallee(b, m);
-            const args = try b.gpa.alloc(Ir.Operand, 2);
-            errdefer b.gpa.free(args);
-            args[0] = .{ .slot = lslot };
-            args[1] = .{ .slot = rslot };
-            return try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.bool);
-        },
+        .one => |m| return witnessEqAtSlots(b, m, lslot, rslot),
         .none, .ambiguous => {},
     }
     switch (Typecheck.resolveConformanceMethod(b.in.methods, ty, "cmp", b.in.prelude_ids.ord, null)) {
-        .one => |m| {
-            // `==` as `cmp(a,b) == Ordering.eq`: the witness returns `Ordering`, whose ret
-            // carries the enum type (the ret_slot ABI + `get_tag` layout). A DERIVED `cmp`
-            // (`fn_id == 0`) reads it from the recipe via `witnessRet` (derive-first).
-            const ret_ty = L.witnessRet(b, m);
-            const callee = L.witnessCallee(b, m);
-            const args = try b.gpa.alloc(Ir.Operand, 2);
-            args[0] = .{ .slot = lslot };
-            args[1] = .{ .slot = rslot };
-            const rslot_ord = try b.addSlot(ret_ty);
-            _ = try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = rslot_ord } }, null);
-            const base = try b.emit(.{ .slot_addr = rslot_ord }, Typecheck.Type.int);
-            const tag = try b.emit(.{ .get_tag = base }, Typecheck.Type.int);
-            const k = try b.emit(.{ .iconst = L.ord_eq }, Typecheck.Type.int);
-            return try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = tag, .rhs = k } }, Typecheck.Type.bool);
-        },
+        .one => |m| return cmpEqAtSlots(b, m, lslot, rslot),
         .none, .ambiguous => {
             // The synthesis barrier proved every aggregate field conforms before emitting
             // this unit, so a miss here is an internal invariant break — note-and-drop to
@@ -71,22 +49,66 @@ fn structEqAtSlots(b: *L.Builder, ty: Typecheck.Type, lslot: Ir.SlotId, rslot: I
     }
 }
 
-/// Eq of two aggregate KEYs already MATERIALIZED into slots: dispatch to the HASHABLE (pid 11)
-/// `eq` witness first (explicit `impl` — honored), else delegate to `structEqAtSlots` (pid 0
-/// `eq`, then the Ord-fills-Eq `cmp` fallback). The one authority the Map's key eq is.
-fn eqKeyAtSlots(b: *L.Builder, ty: Typecheck.Type, lslot: Ir.SlotId, rslot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
-    if (b.in.prelude_ids.hashable) |hp| switch (Typecheck.resolveConformanceMethod(b.in.methods, ty, "eq", hp, null)) {
-        .one => |m| {
-            const callee = L.witnessCallee(b, m);
-            const args = try b.gpa.alloc(Ir.Operand, 2);
-            errdefer b.gpa.free(args);
-            args[0] = .{ .slot = lslot };
-            args[1] = .{ .slot = rslot };
-            return try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.bool);
-        },
+fn witnessEqAtSlots(b: *L.Builder, m: Typecheck.Method, lslot: Ir.SlotId, rslot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
+    const callee = L.witnessCallee(b, m);
+    const args = try b.gpa.alloc(Ir.Operand, 2);
+    errdefer b.gpa.free(args);
+    args[0] = .{ .slot = lslot };
+    args[1] = .{ .slot = rslot };
+    return try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.bool);
+}
+
+/// `==` as `cmp(a,b) == Ordering.eq`: the witness returns `Ordering`, whose ret carries the
+/// enum type (the ret_slot ABI + `get_tag` layout). A DERIVED `cmp` (`fn_id == 0`) reads it
+/// from the recipe via `witnessRet` (derive-first).
+fn cmpEqAtSlots(b: *L.Builder, m: Typecheck.Method, lslot: Ir.SlotId, rslot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
+    const ret_ty = L.witnessRet(b, m);
+    const callee = L.witnessCallee(b, m);
+    const args = try b.gpa.alloc(Ir.Operand, 2);
+    args[0] = .{ .slot = lslot };
+    args[1] = .{ .slot = rslot };
+    const rslot_ord = try b.addSlot(ret_ty);
+    _ = try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = rslot_ord } }, null);
+    const base = try b.emit(.{ .slot_addr = rslot_ord }, Typecheck.Type.int);
+    const tag = try b.emit(.{ .get_tag = base }, Typecheck.Type.int);
+    const k = try b.emit(.{ .iconst = L.ord_eq }, Typecheck.Type.int);
+    return try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = tag, .rhs = k } }, Typecheck.Type.bool);
+}
+
+/// The witness an erased `(ty, kind)` unit calls for an aggregate key: its `Hashable`
+/// method, else its structural `Hash` (or `Eq`, else `Ord`'s `cmp`) witness. Null for a
+/// scalar key, which the unit hashes or compares inline, and for an aggregate with no
+/// witness. The emitter and the unit's cache key both read it, so the key names exactly
+/// the call the code makes.
+pub const KeyWitness = struct { m: Typecheck.Method, via_cmp: bool = false };
+
+pub fn erasedWitness(methods: []const Typecheck.Method, ids: Typecheck.PreludeProtocolIds, ty: Typecheck.Type, kind: Derive.ErasedKind) ?KeyWitness {
+    if (ty.kind != .@"struct" and ty.kind != .@"enum") return null;
+    const name: []const u8 = switch (kind) {
+        .hash => "hash",
+        .eq => "eq",
+    };
+    if (ids.hashable) |hp| switch (Typecheck.resolveConformanceMethod(methods, ty, name, hp, null)) {
+        .one => |m| return .{ .m = m },
         .none, .ambiguous => {},
     };
-    return structEqAtSlots(b, ty, lslot, rslot);
+    switch (Typecheck.resolveConformanceMethod(methods, ty, name, if (kind == .hash) ids.hash else ids.eq, null)) {
+        .one => |m| return .{ .m = m },
+        .none, .ambiguous => {},
+    }
+    if (kind == .eq) switch (Typecheck.resolveConformanceMethod(methods, ty, "cmp", ids.ord, null)) {
+        .one => |m| return .{ .m = m, .via_cmp = true },
+        .none, .ambiguous => {},
+    };
+    return null;
+}
+
+/// Eq of two aggregate KEYs already MATERIALIZED into slots: a call of the witness
+/// `erasedWitness` picks (the HASHABLE `eq`, else `Eq`'s, else the Ord-fills-Eq `cmp`). With
+/// none, `structEqAtSlots` reports the missing witness. The one authority the Map's key eq is.
+fn eqKeyAtSlots(b: *L.Builder, ty: Typecheck.Type, lslot: Ir.SlotId, rslot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
+    const w = erasedWitness(b.in.methods, b.in.prelude_ids, ty, .eq) orelse return structEqAtSlots(b, ty, lslot, rslot);
+    return if (w.via_cmp) cmpEqAtSlots(b, w.m, lslot, rslot) else witnessEqAtSlots(b, w.m, lslot, rslot);
 }
 
 /// The bool eq of struct field `i` (at byte `off`, type `fty`) between the two receiver
@@ -715,21 +737,16 @@ fn hashAtSlot(b: *L.Builder, ty: Typecheck.Type, slot: Ir.SlotId) error{OutOfMem
     }
 }
 
-/// Hash of an aggregate KEY already MATERIALIZED into `slot`: dispatch to the key's HASHABLE
-/// (pid 11) `hash` witness first (an explicit `impl has Hashable` — honored), else delegate to
-/// the structural Hash witness (`hashAtSlot`, pid 6). The one authority the Map's key hash is.
+/// Hash of an aggregate KEY already MATERIALIZED into `slot`: a call of the witness
+/// `erasedWitness` picks (the HASHABLE `hash`, else the structural `Hash` one). With none,
+/// `hashAtSlot` reports the missing witness. The one authority the Map's key hash is.
 fn hashKeyAtSlot(b: *L.Builder, ty: Typecheck.Type, slot: Ir.SlotId) error{OutOfMemory}!Ir.ValueId {
-    if (b.in.prelude_ids.hashable) |hp| switch (Typecheck.resolveConformanceMethod(b.in.methods, ty, "hash", hp, null)) {
-        .one => |m| {
-            const callee = L.witnessCallee(b, m);
-            const args = try b.gpa.alloc(Ir.Operand, 1);
-            errdefer b.gpa.free(args);
-            args[0] = .{ .slot = slot };
-            return try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.int);
-        },
-        .none, .ambiguous => {},
-    };
-    return hashAtSlot(b, ty, slot);
+    const w = erasedWitness(b.in.methods, b.in.prelude_ids, ty, .hash) orelse return hashAtSlot(b, ty, slot);
+    const callee = L.witnessCallee(b, w.m);
+    const args = try b.gpa.alloc(Ir.Operand, 1);
+    errdefer b.gpa.free(args);
+    args[0] = .{ .slot = slot };
+    return try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = Ir.none_slot } }, Typecheck.Type.int);
 }
 
 /// The int hash of struct field `i` (at byte `off`, type `fty`) of receiver base `self_base`
@@ -883,7 +900,8 @@ pub const ErasedKind = Derive.ErasedKind;
 /// instead of by-value self slots. The loaded pointer IS the key base, so the shared
 /// `deriveFieldHash`/`deriveFieldEq`/`hashStrAtPtr`/`strEqAtPtrs` walks apply unchanged —
 /// `field_addr(base, off)` reads through the passed pointer identically to a frame-slot
-/// base. Uncached and pure of `(ty, kind, layout)`, so a double-lower is byte-identical.
+/// base. Pure of `(ty, kind, layout)` and the witness `erasedWitness` picks, so a
+/// double-lower is byte-identical.
 /// Replicates the 3-line struct/enum folds rather than editing `lowerDeriveHash`/
 /// `lowerDeriveEq`, deliberately keeping the natural-derive corpus untouched.
 pub fn lowerErased(

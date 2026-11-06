@@ -87,7 +87,7 @@ const seed: u64 = 0x46_50_52_4e; // "FPRN"
 /// int descriptor byte, then (for an aggregate) its full index-free layout descriptor.
 /// The single home for the touched-type fold the (c)/(d)/(e) components all share, so a
 /// change to what an identity fold covers happens once, not four hand-mirrored times.
-fn foldTouched(h: *std.hash.Wyhash, ty: TouchedType) void {
+pub fn foldTouched(h: *std.hash.Wyhash, ty: TouchedType) void {
     h.update(&[_]u8{ @intFromEnum(ty.kind), type_layout_version, ty.int_desc });
     if (ty.kind == .@"struct" or ty.kind == .@"enum") AstWalk.updateLeaf(h, ty.layout);
 }
@@ -132,22 +132,7 @@ pub fn fingerprint(
     // target carries, so a shadow/unshadow that changes the bound symbol (e.g.
     // builtin `panic` vs a user `fn panic` of the same sig) flips the caller's
     // hash even though the sig is identical.
-    AstWalk.updateU32(&h, @intCast(callee_sigs.len));
-    for (callee_sigs) |s| {
-        h.update(&[_]u8{@intFromEnum(s.kind)});
-        AstWalk.updateLeaf(&h, s.name);
-        AstWalk.updateU32(&h, @intCast(s.params.len));
-        for (s.params) |p| h.update(&[_]u8{@intFromEnum(p.kind)});
-        h.update(&[_]u8{@intFromEnum(s.ret.kind)});
-        // A `mut` param changes how the caller passes that argument (#25). Gated, so a sig
-        // with no `mut` folds exactly what it folded before.
-        if (s.mut_mask != 0) {
-            h.update(&[_]u8{0xff}); // no SymKind ordinal is 0xff, so it cannot read as the next sig's kind
-            var mb: [8]u8 = undefined;
-            std.mem.writeInt(u64, &mb, s.mut_mask, .little);
-            h.update(&mb);
-        }
-    }
+    foldSigs(&h, callee_sigs);
 
     // (c) touched type layouts. A struct folds its full layout descriptor so an
     // edit to its fields (names/types/offsets/size) flips every using fn's hash.
@@ -186,6 +171,26 @@ pub fn fingerprint(
     }
 
     return h.final();
+}
+
+/// Fold callee identities and signatures, in order: the `(b)` component of `fingerprint`.
+pub fn foldSigs(h: *std.hash.Wyhash, sigs: []const Sig) void {
+    AstWalk.updateU32(h, @intCast(sigs.len));
+    for (sigs) |s| {
+        h.update(&[_]u8{@intFromEnum(s.kind)});
+        AstWalk.updateLeaf(h, s.name);
+        AstWalk.updateU32(h, @intCast(s.params.len));
+        for (s.params) |p| h.update(&[_]u8{@intFromEnum(p.kind)});
+        h.update(&[_]u8{@intFromEnum(s.ret.kind)});
+        // A `mut` param changes how the caller passes that argument (#25). Gated, so a sig
+        // with no `mut` folds exactly what it folded before.
+        if (s.mut_mask != 0) {
+            h.update(&[_]u8{0xff}); // no SymKind ordinal is 0xff, so it cannot read as the next sig's kind
+            var mb: [8]u8 = undefined;
+            std.mem.writeInt(u64, &mb, s.mut_mask, .little);
+            h.update(&mb);
+        }
+    }
 }
 
 /// The closure facts an owner's own code depends on that its body walk cannot see: the

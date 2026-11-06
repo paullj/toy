@@ -447,27 +447,26 @@ pub const Slot = struct {
     ir_instrs: usize = 0,
 };
 
-/// What one codegen unit lowers.
+/// What one codegen unit lowers. Every unit is cached under `unitKey`.
 pub const Body = union(enum) {
-    /// A body written in source: a base fn or an instance, cached under its AST
-    /// fingerprint, or a spec unit (`cached` false), its instance's body with some value
-    /// calls made direct, whose name each caller's key folds instead.
+    /// A body written in source: a base fn or an instance, or a spec unit, its instance's
+    /// body with some value calls made direct.
     source: Source,
-    /// A lambda unit, by its index in `in.closure.lambda_units`, lowered under its owner's
-    /// tables. Uncached: its body is part of its owner's fingerprint, so the owner's key
-    /// alone decides reuse.
-    lambda: u32,
-    /// A source-less auto-derive unit, cached under its recipe's fingerprint.
+    /// A lambda unit, lowered under its owner's tables.
+    lambda: Lambda,
+    /// A source-less auto-derive unit.
     derive: *const Derive.Derive,
-    /// An erased hash/eq unit. Uncached: it is pure over `(ty, kind, layout)` and
-    /// enumerated in canonical order, so it is `-jN`-deterministic without a key.
+    /// An erased hash/eq unit.
     erased: *const Typecheck.ErasedUnit,
-    /// A fn-value thunk: source-less, and uncached like an erased unit unless it wraps a
-    /// bundled runtime fn (`adapterKey`).
+    /// A fn-value thunk.
     adapter: *const Closure.Adapter,
 
     /// `guard_stack`: the entry calls the runtime's stack overflow guard first thing.
-    pub const Source = struct { decl: Ast.Index, is_entry: bool = false, guard_stack: bool = false, cached: bool = true };
+    pub const Source = struct { decl: Ast.Index, is_entry: bool = false, guard_stack: bool = false, spec: bool = false };
+
+    /// `unit` indexes `in.closure.lambda_units`; `owner` and `owner_sig` are the declaration
+    /// and signature of the body it is written in, whose content its key starts from.
+    pub const Lambda = struct { unit: u32, owner: Ast.Index, owner_sig: ?Fingerprint.Sig };
 };
 
 /// The read-only view one codegen job runs against; nothing in it is mutated during the
@@ -481,11 +480,13 @@ pub const Frozen = struct {
     profile: Profile,
     /// An instance's own concrete type-args and resolved `[T has P]` bounds, folded into its
     /// key so two instances of one template never share an entry and toggling a sibling
-    /// conformance invalidates exactly the dependent instances. Empty for every other unit.
+    /// conformance invalidates exactly the dependent instances. A lambda or spec unit of an
+    /// instance carries its instance's. Empty for every other unit.
     type_args: []const Typecheck.Type = &.{},
     conformances: []const Mono.ResolvedConformance = &.{},
-    /// A base fn's or instance's closure facts (`Fingerprint.ownerFacts`), folded into its key;
-    /// empty for every other unit and for a body with no env slot and no boxed local.
+    /// The closure facts (`Fingerprint.ownerFacts`) of the body a unit is cut from (its own, a
+    /// lambda's owner's, a spec unit's instance's), folded into its key; empty for a
+    /// source-less unit and for a body with no env slot and no boxed local.
     closure_facts: []const u8 = &.{},
     /// The program's other units, which the inliner reads callee IR from. Null lowers
     /// every call as a call.
@@ -579,7 +580,7 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
     const callees = scope.lookup();
     var irf = switch (fr.body) {
         .source => |s| return lowerFitted(gpa, in, cfg, .{ .source = .{ .decl = s.decl, .is_entry = s.is_entry } }, fr.sym, diags, stats, callees),
-        .lambda => |ui| return lowerFitted(gpa, in, cfg, .{ .lambda = ui }, fr.sym, diags, stats, callees),
+        .lambda => |l| return lowerFitted(gpa, in, cfg, .{ .lambda = l.unit }, fr.sym, diags, stats, callees),
         .derive => |d| try DeriveEmit.lower(gpa, in, d.*, fr.sym, diags),
         .erased => |u| try DeriveEmit.lowerErased(gpa, in, u.ty, u.kind, fr.sym, diags),
         .adapter => |a| try AdapterEmit.lowerAdapter(gpa, in, a.*, fr.sym, diags),
@@ -616,8 +617,8 @@ fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, opt_out: ?*OptOut) !Link
 }
 
 /// The per-unit codegen query: fold the unit's content key and serve it from the cache or
-/// lower it fresh, honoring `self.mode` (normal / force / verify); an uncached unit is
-/// lowered fresh every build. Writes ONLY the caller-owned `slot` (no locks).
+/// lower it fresh, honoring `self.mode` (normal / force / verify). Writes ONLY the
+/// caller-owned `slot` (no locks).
 ///
 /// REUSE = CONTENT-FP CACHE HIT, the SOLE driver. A `.normal` build serves the prior blob
 /// iff `cache.get(Key.codegen(...))` hits the unit's transitive content fingerprint; the
@@ -633,41 +634,14 @@ pub fn codegen(
     tmp_tag: usize,
     slot: *Slot,
 ) !void {
-    const key: ?Cache.Key = switch (fr.body) {
-        .source => |s| if (s.cached) try sourceKey(gpa, target, fr, s.decl, s.guard_stack) else null,
-        .derive => |d| try deriveKey(gpa, target, fr, d),
-        .adapter => |a| adapterKey(target, fr, a),
-        .lambda, .erased => null,
-    };
-    if (key) |k| return self.serve(gpa, io, k, tmp_tag, slot, fr);
-    var out: OptOut = .{};
-    const fc = lowerCode(gpa, fr, &out) catch |e| {
-        slot.diag = out.diag;
-        return e;
-    };
-    slot.* = .{ .fc = fc, .cached = false, .opt_stats = out.stats, .ir_instrs = out.ir_instrs };
+    return self.serve(gpa, io, try unitKey(gpa, target, fr), tmp_tag, slot, fr);
 }
 
-/// The key of an adapter around a bundled `core/rt` fn, or null for any other. Every
-/// program carries the runtime's adapters, so without a key each warm build would lower
-/// them again. The compiler build fixes the wrapped fn, its signature and anything the
-/// adapter can inline (the runtime calls only the runtime), and the cache is per build, so
-/// the kind and the names are the whole key. A user fn's adapter would also have to fold
-/// the bodies the inliner may splice in, so it stays uncached.
-fn adapterKey(target: []const u8, fr: *const Frozen, a: *const Closure.Adapter) ?Cache.Key {
-    if (!StdNames.isBundledRuntimeSym(a.target.name)) return null;
-    var h = std.hash.Wyhash.init(0x41_44_41_50); // "ADAP"
-    h.update(&[_]u8{@intFromEnum(a.kind)});
-    h.update(a.target.name);
-    return Key.codegen(target, h.final(), fr.profile, fr.sym);
-}
-
-/// The key of a body from source: its own content (`sourceFp`) and that of every callee
-/// the inliner can splice into it (`InlineUnits.Reach`), xor'd with the opt level and the
-/// unit's OWN emitted symbol (`Key.codegen` is the one place that fold lives).
-fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl: Ast.Index, guard_stack: bool) !Cache.Key {
-    var fp = try sourceFp(gpa, fr, decl);
-    if (guard_stack) fp = std.hash.Wyhash.hash(fp, "guard_stack");
+/// A unit's key: its own content (`unitFp`) and that of every callee the inliner can
+/// splice into it (`InlineUnits.Reach`), xor'd with the profile and the unit's OWN emitted
+/// symbol (`Key.codegen` is the one place that fold lives).
+pub fn unitKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen) !Cache.Key {
+    var fp = try unitFp(gpa, fr);
     var reach = try InlineUnits.Reach.init(gpa, fr);
     defer reach.deinit();
     if (reach.names.items.len != 0) {
@@ -681,20 +655,117 @@ fn sourceKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, decl
     return Key.codegen(target, fp, fr.profile, fr.sym);
 }
 
+/// What a unit's own code is a pure function of, besides the callees it inlines:
+///   * a body from source: its `sourceFp`; a spec unit also its direct targets.
+///   * a lambda unit: its owner's `sourceFp`, which covers the lambda's body, its rank (the
+///     owner's AST fixes every rank) and the env facts its owner writes, then the calls
+///     its own body makes, walked under its own signature.
+///   * a derive unit: its recipe (`deriveFp`).
+///   * an adapter: its kind, the symbol it calls and the layouts of the types it moves.
+///   * an erased unit: its kind, its key type's layout and the witness it calls.
+pub fn unitFp(gpa: std.mem.Allocator, fr: *const Frozen) !u64 {
+    switch (fr.body) {
+        .source => |s| {
+            var fp = try sourceFp(gpa, fr, s.decl, fr.in.sig);
+            if (s.guard_stack) fp = std.hash.Wyhash.hash(fp, "guard_stack");
+            if (s.spec) {
+                var h = std.hash.Wyhash.init(fp);
+                h.update("spec");
+                for (fr.in.closure.spec_targets) |t| {
+                    AstWalk.updateU32(&h, t.param);
+                    h.update(&[_]u8{ @intFromEnum(t.kind), @intFromEnum(t.sym.kind) });
+                    AstWalk.updateLeaf(&h, t.sym.name);
+                }
+                fp = h.final();
+            }
+            return fp;
+        },
+        .lambda => |l| {
+            const owner_fp = if (fr.units) |u| try u.cache.ownerFp(gpa, fr, l) else try sourceFp(gpa, fr, l.owner, l.owner_sig);
+            var h = std.hash.Wyhash.init(owner_fp);
+            h.update("lambda");
+            var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
+            defer sigs.deinit(gpa);
+            try AstWalk.walkCalls(gpa, &fr.in, fr.in.closure.lambda_units[l.unit].node, lambdaSig(fr, l), &sigs);
+            Fingerprint.foldSigs(&h, sigs.items);
+            return h.final();
+        },
+        .derive => |d| return deriveFp(gpa, fr, d),
+        .adapter => |a| return adapterFp(gpa, fr, a),
+        .erased => |u| return erasedFp(gpa, fr, u),
+    }
+}
+
+/// A lambda unit's own signature, which the `?` in its body widens into.
+pub fn lambdaSig(fr: *const Frozen, l: Body.Lambda) Fingerprint.Sig {
+    const u = fr.in.closure.lambda_units[l.unit];
+    return .{ .kind = .user_fn, .name = u.name, .params = u.sig.params, .ret = u.sig.ret };
+}
+
+/// Fold `ty`'s index-free layout descriptor (`AstWalk.appendTouched`) into `h`.
+fn foldType(gpa: std.mem.Allocator, h: *std.hash.Wyhash, fr: *const Frozen, ty: Typecheck.Type) !void {
+    var list: std.ArrayList(Fingerprint.TouchedType) = .empty;
+    defer {
+        AstWalk.freeTouched(gpa, list.items);
+        list.deinit(gpa);
+    }
+    try AstWalk.appendTouched(gpa, fr.in.layouts, fr.in.enum_layouts, ty, &list);
+    for (list.items) |t| Fingerprint.foldTouched(h, t);
+}
+
+/// An adapter is pure over its entry and the layouts of the types it moves
+/// (`AdapterEmit.lowerAdapter`).
+fn adapterFp(gpa: std.mem.Allocator, fr: *const Frozen, a: *const Closure.Adapter) !u64 {
+    var h = std.hash.Wyhash.init(0x41_44_41_50); // "ADAP"
+    h.update(&[_]u8{ @intFromEnum(a.kind), @intFromBool(a.mut_self), @intFromEnum(a.target.kind) });
+    AstWalk.updateLeaf(&h, a.target.name);
+    AstWalk.updateU32(&h, @intCast(a.sig.params.len));
+    for (a.sig.params) |p| try foldType(gpa, &h, fr, p);
+    try foldType(gpa, &h, fr, a.sig.ret);
+    try foldType(gpa, &h, fr, a.recv);
+    return h.final();
+}
+
+/// An erased unit is pure over its kind, its key type's layout and the witness it calls
+/// for an aggregate key (`DeriveEmit.erasedWitness`), with that witness's signature.
+fn erasedFp(gpa: std.mem.Allocator, fr: *const Frozen, u: *const Typecheck.ErasedUnit) !u64 {
+    var h = std.hash.Wyhash.init(0x45_52_41_53); // "ERAS"
+    h.update(&[_]u8{@intFromEnum(u.kind)});
+    try foldType(gpa, &h, fr, u.ty);
+    if (erasedCall(fr, u)) |c| {
+        h.update(&[_]u8{ 1, @intFromBool(c.via_cmp) });
+        Fingerprint.foldSigs(&h, &.{c.sig});
+        for (c.sig.params) |p| try foldType(gpa, &h, fr, p);
+        try foldType(gpa, &h, fr, c.sig.ret);
+    } else h.update(&[_]u8{0});
+    return h.final();
+}
+
+pub const ErasedCall = struct { sym: Link.SymName, sig: Fingerprint.Sig, via_cmp: bool };
+
+/// The witness erased unit `u` calls, with its symbol and signature, or null.
+pub fn erasedCall(fr: *const Frozen, u: *const Typecheck.ErasedUnit) ?ErasedCall {
+    const in = &fr.in;
+    const w = DeriveEmit.erasedWitness(in.methods, in.prelude_ids, u.ty, u.kind) orelse return null;
+    const sym = Typecheck.witnessSym(w.m, in.derives, in.instances, in.names) orelse return null;
+    const sig = Typecheck.witnessSig(w.m, in.derives, in.instances, in.sigs) orelse return null;
+    return .{ .sym = sym, .sig = .{ .kind = sym.kind, .name = sym.name, .params = sig.params, .ret = sig.ret, .mut_mask = sig.mut_mask }, .via_cmp = w.via_cmp };
+}
+
 /// A body's own content: its AST fingerprint over its callees' identities and signatures
 /// in walk order, the layouts it touches, an instance's type-args and bounds, its closure
-/// facts, and its lines when the profile tracks them.
-pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index) !u64 {
+/// facts, and its lines when the profile tracks them. `sig` is the body's signature.
+pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, sig: ?Fingerprint.Sig) !u64 {
     const in = &fr.in;
     var callee_sigs: std.ArrayList(Fingerprint.Sig) = .empty;
     defer callee_sigs.deinit(gpa);
-    try AstWalk.walkCalls(gpa, in, decl, in.sig, &callee_sigs);
+    try AstWalk.walkCalls(gpa, in, decl, sig, &callee_sigs);
     var touched: std.ArrayList(Fingerprint.TouchedType) = .empty;
     defer {
         AstWalk.freeTouched(gpa, touched.items);
         touched.deinit(gpa);
     }
-    try AstWalk.walkTouchedSig(gpa, in, decl, in.sig, &touched);
+    try AstWalk.walkTouchedSig(gpa, in, decl, sig, &touched);
     var type_args: std.ArrayList(Fingerprint.TouchedType) = .empty;
     defer {
         AstWalk.freeTouched(gpa, type_args.items);
@@ -717,63 +788,38 @@ pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index) !u64
     return fp;
 }
 
-/// [C2] checked: the first symbol a keyed unit's code `fc` relocates to that its key does
-/// not fold, or null. A miss serves a caller lowered against a stale callee, or one
-/// program's code to another that shares the cache (#35), so `--verify` fails on it.
-/// Exempt are a compiler builtin and a bundled `core/rt` fn (the compiler build fixes
-/// either's signature), the unit itself, its
-/// own lambdas and the adapters of what its key folds: each is named after the unit or
-/// the folded symbol and lowered fresh every build.
+/// [C2] checked: the first symbol a unit's code `fc` relocates to that its key does not
+/// fold, or null. A miss serves a caller lowered against a stale callee, or one program's
+/// code to another that shares the cache (#35), so `--verify` fails on it. Exempt are a
+/// compiler builtin and a bundled `core/rt` fn (the compiler build fixes either's
+/// signature), the unit itself, the lambda units of the body it is cut from (whose
+/// content that body's fingerprint holds) and the adapters of what its key folds.
 pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link.FnCode) !?[]const u8 {
-    var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
-    defer sigs.deinit(gpa);
-    var inlined: std.ArrayList([]const u8) = .empty;
-    defer inlined.deinit(gpa);
-    switch (fr.body) {
-        .source => |src| {
-            try AstWalk.walkCalls(gpa, &fr.in, src.decl, fr.in.sig, &sigs);
-            // An inlined body's calls are folded through that callee's own content.
-            var reach = try InlineUnits.Reach.init(gpa, fr);
-            defer reach.deinit();
-            for (reach.facts.items) |f| try inlined.appendSlice(gpa, f.calls);
-        },
-        else => {},
-    }
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    try InlineUnits.appendCallNames(gpa, fr, &names);
+    // An inlined body's calls are folded through that callee's own content.
+    var reach = try InlineUnits.Reach.init(gpa, fr);
+    defer reach.deinit();
+    for (reach.facts.items) |f| try names.appendSlice(gpa, f.calls);
+    const c = fr.in.closure;
+    const siblings: []const Closure.LambdaUnit = if (c.owner) |o| Closure.ownerUnits(c.lambda_units, o) else &.{};
     for (fc.relocs) |r| {
         const t: Link.SymName = switch (r.target) {
             .func, .import => |sn| sn,
             else => continue,
         };
         if (t.kind == .builtin or StdNames.isBundledRuntimeSym(t.name) or std.mem.eql(u8, t.name, fr.sym.name)) continue;
-        if (std.mem.startsWith(u8, t.name, fr.sym.name) and std.mem.startsWith(u8, t.name[fr.sym.name.len..], "$l")) continue;
         const base = for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
             if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];
         } else t.name;
-        if (folds(fr, sigs.items, base)) continue;
-        if (InlineUnits.containsName(inlined.items, base)) continue;
+        if (InlineUnits.containsName(names.items, base)) continue;
+        if (for (siblings) |u| {
+            if (std.mem.eql(u8, u.name, base)) break true;
+        } else false) continue;
         return t.name;
     }
     return null;
-}
-
-fn folds(fr: *const Frozen, sigs: []const Fingerprint.Sig, name: []const u8) bool {
-    for (sigs) |sg| if (std.mem.eql(u8, sg.name, name)) return true;
-    for (fr.conformances) |rc| for (rc.witness_syms) |ws| if (std.mem.eql(u8, ws, name)) return true;
-    switch (fr.body) {
-        .derive => |d| for (d.field_witnesses) |fw| switch (fw) {
-            .eq_call, .cmp_eq, .cmp_call, .hash_call, .display_call => |n| if (std.mem.eql(u8, n, name)) return true,
-            .inline_kind => {},
-        },
-        else => {},
-    }
-    return false;
-}
-
-/// The key of a source-less derive unit: a NON-AST fingerprint over the conforming type's
-/// index-free layout (the same descriptor the touched fold builds) and the resolved field
-/// witnesses, so a field-layout edit flips it. `symMix` separates it from every real fn.
-fn deriveKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen, d: *const Derive.Derive) !Cache.Key {
-    return Key.codegen(target, try deriveFp(gpa, fr, d), fr.profile, fr.sym);
 }
 
 /// A derive unit's own content, which its key and the key of every caller that inlines it
@@ -789,7 +835,7 @@ pub fn deriveFp(gpa: std.mem.Allocator, fr: *const Frozen, d: *const Derive.Deri
     return Fingerprint.deriveFingerprint(d.protocol_name, d.kind, conform, d.field_witnesses);
 }
 
-/// The cache/verify/fresh-lower state machine of a keyed unit, honoring `self.mode`:
+/// The cache/verify/fresh-lower state machine of a unit, honoring `self.mode`:
 ///   * `.verify` — always re-lower fresh and audit the packed bytes against a
 ///     reference (a cache HIT compares the stored blob for cache-soundness; a MISS
 ///     lowers a SECOND time and requires the two fresh lowerings agree, for pure

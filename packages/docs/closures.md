@@ -113,11 +113,10 @@ fn main() -> int {
   - At `-O1`, a closure that does not escape keeps its env in a slot of the frame that makes it (see Escape analysis).
 - **Calling a function value** is a `call_indirect`, with `env` as a hidden first argument.
 - **Units:** each lambda and local fn is its own function, `<owner>$l<rank>`. A named function used as a value gets a thunk `<fn>$fnval` that drops the env, as does an associated fn named through its type (`K.make`, `Box[int].new`), and a bound method an adapter (`$bound`, `$boundbox`). A specialized call (see Generics) gets a copy of its instance, `<instance>$sp<p>$<target>`.
-- **Incremental builds:** lambda units, specialized copies and adapters are never cached; every build lowers them again, while the other units are reused by their content fingerprint.
-  - A lambda's body is part of its owner's fingerprint, so a changed lambda already makes its owner's key change. Its own unit is lowered under the owner's tables (its captures, boxes and storage), and it has no key of its own.
-  - A specialized copy is its instance's body with some value calls made direct. Each caller's key folds the copy's name.
-  - Adapters and thunks are a few instructions each.
-  - The cost: a rebuild with no edit of `closures/escape_std_methods.toy` lowers 91 of its 152 units again. Keying these units on their owner's fingerprint plus their place in it would make them cacheable ([#39](https://github.com/paullj/toy/issues/39)).
+- **Incremental builds:** every unit is cached by its content fingerprint, so a rebuild with no edit lowers nothing.
+  - A lambda unit's key is its owner's fingerprint, then the calls its own body makes. The owner's fingerprint covers the lambda's body, its rank and the env layout the owner writes, so an edit to one lambda lowers its owner and every lambda of that owner again.
+  - A specialized copy's key is its instance's, then its targets. An adapter's key is the symbol it calls, its kind and the layouts of the values it moves, such as a bound method's receiver.
+  - Like any unit, each key also folds the bodies the inliner can splice in, so an edit to an inlined callee lowers these units again.
 
 ## Generics
 
@@ -268,7 +267,6 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 
 Open issues that touch this page. Each has a repro.
 
-- **Uncached closure units** ([#39](https://github.com/paullj/toy/issues/39)): lambda units, specialized copies and adapters are lowered again on every build (see Representation).
 - **Bound method values** ([#206](https://github.com/paullj/toy/issues/206)): a bound method value always gets a heap env, and its receiver stays boxed (see Escape analysis).
 - **Local fns that call each other** ([#47](https://github.com/paullj/toy/issues/47)): the earlier one's use of the later one is R0001 (see Local named functions).
 - **Constructors in a `then` lambda** ([#49](https://github.com/paullj/toy/issues/49)): a bare `Option.none` or `Result.ok(v)` there is T0016 unless the lambda's return is annotated (see Standard library).
