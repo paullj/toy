@@ -11,14 +11,13 @@
 
 	const nav = [
 		{ id: 'introduction', label: 'Introduction' },
-		{ id: 'types', label: 'Types' },
-		{ id: 'control-flow', label: 'Control flow' },
+		{ id: 'features', label: 'Features' },
 		{ id: 'tooling', label: 'Tooling' },
 		{ id: 'performance', label: 'Performance' },
 		{ id: 'learn', label: 'Learn' }
 	];
 
-	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)', 'var(--toy-yellow)'];
+	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)'];
 
 	const secondary = [
 		{ href: resolve('/tour/'), label: 'Tour →' },
@@ -231,39 +230,24 @@ fn main() -> int {
 				</div>
 			</section>
 
-			<section id="types" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="features" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[1]}"></span>02
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#types" class="transition-colors hover:text-[var(--accent)]">Types</a>
+						<a href="#features" class="transition-colors hover:text-[var(--accent)]">Features</a>
 					</h2>
-					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						Static types, mostly inferred. Generics compile to plain structs and functions, protocols describe behaviour, and there is no null.
-					</p>
+					<h3 id="types" class="mt-8 scroll-mt-8 text-lg">Types</h3>
 					<ExampleTabs examples={typeExamples} />
-				</div>
-			</section>
-
-			<section id="control-flow" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
-				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[2]}"></span>03
-				</div>
-				<div>
-					<h2 class="text-2xl">
-						<a href="#control-flow" class="transition-colors hover:text-[var(--accent)]">Control flow</a>
-					</h2>
-					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						<code class="code">match</code> must cover every case, pipes chain calls left to right, and closures share the variables they capture.
-					</p>
+					<h3 id="control-flow" class="mt-14 scroll-mt-8 text-lg">Control flow</h3>
 					<ExampleTabs examples={flowExamples} />
 				</div>
 			</section>
 
 			<section id="tooling" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[2]}"></span>03
 				</div>
 				<div>
 					<h2 class="text-2xl">
@@ -289,7 +273,7 @@ fn main() -> int {
 
 			<section id="performance" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
 				</div>
 				<div>
 					<h2 class="text-2xl">
@@ -308,7 +292,7 @@ fn main() -> int {
 			<!-- 06 Learn -->
 			<section id="learn" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[5]}"></span>06
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
 				</div>
 				<div>
 					<h2 class="text-2xl">
