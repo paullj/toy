@@ -13,12 +13,13 @@
 	const nav = [
 		{ id: 'introduction', label: 'Introduction' },
 		{ id: 'features', label: 'Features' },
+		{ id: 'stdlib', label: 'Standard library' },
 		{ id: 'tooling', label: 'Tooling' },
 		{ id: 'performance', label: 'Performance' },
 		{ id: 'learn', label: 'Learn' }
 	];
 
-	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)'];
+	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)', 'var(--toy-yellow)'];
 
 	const secondary = [
 		{ href: resolve('/tour/'), label: 'Tour →' },
@@ -90,6 +91,23 @@ pub fn pair(a: int, b: int) -> Result[int, str] {
 
 	const flowExamples = [
 		{
+			title: 'If',
+			blurb: '<code class="code">if</code> and <code class="code">match</code> are expressions, so they give a value. A function returns its last expression without <code class="code">return</code>.',
+			file: 'values.toy',
+			code: `fn sign(n: int) -> int {
+    if n > 0 { 1 } else if n < 0 { -1 } else { 0 }   # last expression is returned
+}
+
+fn main() -> int {
+    size := if sign(-5) < 0 { 10 } else { 20 }
+    bonus := match size {
+        10 -> 1,
+        _ -> 2,
+    }
+    size + bonus
+}`
+		},
+		{
 			title: 'Loops',
 			blurb: '<code class="code">for</code> walks a range or anything with an iterator. <code class="code">loop</code> is an expression, and a labeled <code class="code">break</code> can leave nested loops with a value.',
 			file: 'loops.toy',
@@ -113,15 +131,17 @@ fn main() -> int {
 }`
 		},
 		{
-			title: 'Pattern matching',
-			blurb: 'Enums hold one of several variants. <code class="code">match</code> destructures them, checked for exhaustiveness at compile time.',
+			title: 'Match',
+			blurb: 'Enums hold one of several variants. <code class="code">match</code> destructures them, joins arms with <code class="code">|</code>, filters with <code class="code">if</code> guards, and checks that every case is covered.',
 			file: 'shapes.toy',
-			code: `pub enum Shape { Circle(int), Square(int) }
+			code: `pub enum Shape { Circle(int), Square(int), Rect(int, int) }
 
 pub fn area(shape: Shape) -> int {
     match shape {
+        .Circle(n) | .Square(n) if n < 0 -> 0,   # or-pattern with a guard
         .Circle(r) -> 3 * r * r,
         .Square(side) -> side * side,
+        .Rect(w, h) -> w * h,
     }
 }`
 		},
@@ -173,6 +193,17 @@ fn area(shape: Shape) -> int {
 fn main() -> int {
     area(Shape.Square(4))
 }`;
+
+	const stdModules = [
+		{ name: 'std/io', what: 'print and read' },
+		{ name: 'std/str', what: 'string methods' },
+		{ name: 'std/vec', what: 'growable lists' },
+		{ name: 'std/map', what: 'hash maps' },
+		{ name: 'std/set', what: 'hash sets' },
+		{ name: 'std/fs', what: 'files' },
+		{ name: 'std/time', what: 'clocks and sleep' },
+		{ name: 'std/math', what: 'integer and float math' }
+	];
 
 	const callouts = [
 		{ href: resolve('/tour/'), kind: 'Tour', label: 'Take the tour →' },
@@ -265,11 +296,11 @@ fn main() -> int {
 							class="-mt-[2.1em] h-[4.2em] w-auto shrink-0 translate-y-[0.22em] select-none"
 						/>
 					</h1>
-					<p class="mt-5 text-base leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-5 max-w-[48ch] text-base leading-snug" style="color: var(--fg-muted)">
 						toy is a general purpose language which is statically typed, compiled, and garbage
 						collected.
 					</p>
-					<p class="mt-4 text-base leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-4 max-w-[48ch] text-base leading-snug" style="color: var(--fg-muted)">
 						It aims to be ergonomic and performant but the main goal is for me to learn about language
 						design and compiler development.
 					</p>
@@ -301,9 +332,34 @@ fn main() -> int {
 				</div>
 			</section>
 
-			<section id="tooling" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="stdlib" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[2]}"></span>03
+				</div>
+				<div>
+					<h2 class="text-2xl">
+						<a href="#stdlib" class="transition-colors hover:text-[var(--accent)]">Standard library</a>
+					</h2>
+					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
+						toy ships with a small standard library. Import a module with <code class="code">import std/vec</code>.
+					</p>
+					<ul class="mt-6 grid grid-cols-2 gap-x-6 gap-y-2.5 sm:grid-cols-4">
+						{#each stdModules as m}
+							<li class="flex flex-col">
+								<code class="font-mono text-[0.8rem] font-semibold">{m.name}</code>
+								<span class="text-[0.8rem]" style="color: var(--fg-muted)">{m.what}</span>
+							</li>
+						{/each}
+					</ul>
+					<p class="mt-5 text-sm">
+						<a href="https://github.com/paullj/toy-compiler/blob/main/packages/docs/std.md" class="link">and more</a>
+					</p>
+				</div>
+			</section>
+
+			<section id="tooling" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
 				</div>
 				<div>
 					<h2 class="text-2xl">
@@ -332,7 +388,7 @@ fn main() -> int {
 
 			<section id="performance" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
 				</div>
 				<div>
 					<h2 class="text-2xl">
@@ -351,7 +407,7 @@ fn main() -> int {
 			<!-- 06 Learn -->
 			<section id="learn" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[5]}"></span>06
 				</div>
 				<div>
 					<h2 class="text-2xl">
