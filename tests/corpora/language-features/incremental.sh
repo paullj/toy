@@ -39,21 +39,22 @@ pass=0; fail=0
 fail_one() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
 # $1 name  $2 base source  $3 edited source  $4 expect-strict-subset-cutoff (1/0)
+# $5 build flags (a profile), optional
 run_scenario() {
-  local name="$1" base="$2" edited="$3" expect_cutoff="$4"
+  local name="$1" base="$2" edited="$3" expect_cutoff="$4" flags="${5:-}"
   local d="$work/$name"; mkdir -p "$d"; local src="$d/prog.toy"
   ( cd "$d" && rm -rf .toy )
 
   printf '%s' "$base" > "$src"
-  ( cd "$d" && "$toyc" -o base.bin prog.toy >/dev/null 2>&1 ) \
+  ( cd "$d" && "$toyc" $flags -o base.bin prog.toy >/dev/null 2>&1 ) \
     || { fail_one "$name: cold build failed"; return; }
   local full_compiled
-  full_compiled="$( cd "$d" && "$toyc" -o /dev/null --codegen-stats --no-cache prog.toy 2>&1 )"; full_compiled="$(compiled_of "$full_compiled")"
+  full_compiled="$( cd "$d" && "$toyc" $flags -o /dev/null --codegen-stats --no-cache prog.toy 2>&1 )"; full_compiled="$(compiled_of "$full_compiled")"
 
   printf '%s' "$edited" > "$src"
   local inc_out
-  inc_out="$( cd "$d" && "$toyc" -o inc.bin --codegen-stats prog.toy 2>&1 )"
-  ( cd "$d" && "$toyc" -o force.bin --no-cache prog.toy >/dev/null 2>&1 ) \
+  inc_out="$( cd "$d" && "$toyc" $flags -o inc.bin --codegen-stats prog.toy 2>&1 )"
+  ( cd "$d" && "$toyc" $flags -o force.bin --no-cache prog.toy >/dev/null 2>&1 ) \
     || { fail_one "$name: force build failed"; return; }
 
   local ih fh
@@ -614,6 +615,186 @@ fn main() -> int {
     return unwrap_v(w)
 }
 ' 0
+
+# $1 scenario  $2 base exit  $3 warm exit: the edit reaches the warm binary.
+expect_exits() {
+  local d="$work/$1" b i
+  "$d/base.bin"; b=$?
+  "$d/inc.bin"; i=$?
+  if [ "$b" = "$2" ] && [ "$i" = "$3" ]; then
+    echo "  OK   $1: exit $b -> $i on the warm rebuild"
+    pass=$((pass + 1))
+  else
+    fail_one "$1: exit base=$b inc=$i, want $2 then $3 [STALE UNIT]"
+  fi
+}
+
+# 7) LAMBDA, SPEC AND ADAPTER UNITS (#39) — each is cached under a key built from content
+#    that already exists: a lambda under its owner's fingerprint, a spec unit under its
+#    instance's and its targets', an adapter under what it wraps and the layouts it moves,
+#    an erased unit under its key type and witness. Every edit below must reach the warm
+#    binary at -O0 and at --release (which inlines into these units), and equal a
+#    --no-cache build.
+lambda_base='fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    k := 3
+    f := fn(x: int) -> int { x + k }
+    g := fn(x: int) -> int { x * 2 }
+    return f(1) + g(2) + unrelated(0)
+}
+'
+lambda_body='fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    k := 3
+    f := fn(x: int) -> int { x + k + 10 }
+    g := fn(x: int) -> int { x * 2 }
+    return f(1) + g(2) + unrelated(0)
+}
+'
+# Swapping the lambdas swaps their ranks: `main$l0` now names the other body.
+lambda_reorder='fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    k := 3
+    g := fn(x: int) -> int { x * 3 }
+    f := fn(x: int) -> int { x + k }
+    return f(1) + g(2) + unrelated(0)
+}
+'
+capture_base='struct S { a: int }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    s := S { a: 5 }
+    f := fn(x: int) -> int { x + s.a }
+    return f(1) + unrelated(0)
+}
+'
+# The capture's layout moves `a`: the lambda reads it at a new offset.
+capture_layout='struct S { z: int, a: int }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    s := S { z: 30, a: 7 }
+    f := fn(x: int) -> int { x + s.a }
+    return f(1) + unrelated(0)
+}
+'
+spec_base='fn add(a: int, b: int) -> int { a + b }
+fn mul(a: int, b: int) -> int { a * b }
+fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(x, x) }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int { return apply(add, 3) + unrelated(0) }
+'
+spec_target_body='fn add(a: int, b: int) -> int { a + b + 1 }
+fn mul(a: int, b: int) -> int { a * b }
+fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(x, x) }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int { return apply(add, 3) + unrelated(0) }
+'
+spec_target_swap='fn add(a: int, b: int) -> int { a + b }
+fn mul(a: int, b: int) -> int { a * b }
+fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(x, x) }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int { return apply(mul, 3) + unrelated(0) }
+'
+bound_base='struct C { n: int }
+impl C { fn get(self) -> int { self.n } }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    c := C { n: 5 }
+    f := c.get
+    return f() + unrelated(0)
+}
+'
+# The receiver's layout behind the bound method moves `n`.
+bound_layout='struct C { z: int, n: int }
+impl C { fn get(self) -> int { self.n } }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    c := C { z: 40, n: 6 }
+    f := c.get
+    return f() + unrelated(0)
+}
+'
+fnval_base='fn add(a: int, b: int) -> int { a + b }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    g := add
+    return g(1, 2) + unrelated(0)
+}
+'
+fnval_body='fn add(a: int, b: int) -> int { a * 10 + b }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    g := add
+    return g(1, 2) + unrelated(0)
+}
+'
+erased_base='import std/map
+struct K { a: int, b: int }
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    m := Map[K, int].new()
+    m.set(K { a: 1, b: 2 }, 10)
+    return m.get(K { a: 1, b: 9 }).or(4) + unrelated(0)
+}
+'
+# The key gains a Hashable impl that ignores `b`: the erased eq and hash must call it.
+erased_impl='import std/map
+struct K { a: int, b: int }
+impl K has Hashable {
+    fn hash(self) -> int { self.a }
+    fn eq(self, o: K) -> bool { self.a == o.a }
+}
+fn unrelated(n: int) -> int { return n + n }
+fn main() -> int {
+    m := Map[K, int].new()
+    m.set(K { a: 1, b: 2 }, 10)
+    return m.get(K { a: 1, b: 9 }).or(4) + unrelated(0)
+}
+'
+for prof in "" "--release"; do
+  tag="${prof:+_release}"
+  run_scenario "lambda_body$tag" "$lambda_base" "$lambda_body" 1 "$prof"
+  expect_exits "lambda_body$tag" 8 18
+  run_scenario "lambda_reorder$tag" "$lambda_base" "$lambda_reorder" 1 "$prof"
+  expect_exits "lambda_reorder$tag" 8 10
+  run_scenario "capture_layout$tag" "$capture_base" "$capture_layout" 0 "$prof"
+  expect_exits "capture_layout$tag" 6 8
+  run_scenario "spec_target_body$tag" "$spec_base" "$spec_target_body" 1 "$prof"
+  expect_exits "spec_target_body$tag" 6 7
+  run_scenario "spec_target_swap$tag" "$spec_base" "$spec_target_swap" 1 "$prof"
+  expect_exits "spec_target_swap$tag" 6 9
+  run_scenario "bound_layout$tag" "$bound_base" "$bound_layout" 0 "$prof"
+  expect_exits "bound_layout$tag" 5 6
+  run_scenario "fnval_body$tag" "$fnval_base" "$fnval_body" 1 "$prof"
+  expect_exits "fnval_body$tag" 3 12
+  run_scenario "erased_impl$tag" "$erased_base" "$erased_impl" 0 "$prof"
+  expect_exits "erased_impl$tag" 4 10
+done
+
+# Profile switches over one warm cache: each profile's warm build of a closure-heavy
+# program equals its --no-cache build, and a second warm build lowers nothing.
+run_profile_switch() {
+  local d="$work/profiles"; mkdir -p "$d"
+  ( cd "$d" && rm -rf .toy )
+  cp "$root/tests/corpora/language-features/closures/escape_std_methods.toy" "$d/prog.toy"
+  local prof n=0 ok=1 out comp
+  for prof in "-O0" "-O1" "--release" "--gc-stress" "-O0" "--release --gc-stress" "-O1"; do
+    n=$((n + 1))
+    ( cd "$d" && "$toyc" $prof -o "w$n.bin" prog.toy >/dev/null 2>&1 ) || { fail_one "profiles: $prof warm build failed"; return; }
+    out="$( cd "$d" && "$toyc" $prof -o "x$n.bin" --codegen-stats prog.toy 2>&1 )"
+    ( cd "$d" && "$toyc" $prof -o "f$n.bin" --no-cache prog.toy >/dev/null 2>&1 ) || { fail_one "profiles: $prof force build failed"; return; }
+    if [ "$(texthash "$d/w$n.bin")" != "$(texthash "$d/f$n.bin")" ]; then
+      fail_one "profiles: SOUNDNESS — $prof warm __text != force __text [STALE-CACHE MISCOMPILE]"; ok=0
+    fi
+    comp="$(compiled_of "$out")"
+    if [ "$comp" != 0 ]; then fail_one "profiles: $prof no-edit rebuild compiled=$comp, want 0"; ok=0; fi
+  done
+  if [ "$ok" = 1 ]; then
+    echo "  OK   profiles: every profile switch SOUND; no-edit rebuilds compiled=0"
+    pass=$((pass + 1))
+  fi
+}
+run_profile_switch
 
 echo "--- incremental battery: $pass scenario(s) sound+cutoff, $fail failed ---"
 [ "$fail" -eq 0 ]

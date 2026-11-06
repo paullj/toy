@@ -400,14 +400,14 @@ const Plan = struct {
         const owner = p.ownerOf(u);
         const ob: ?*const Body = if (owner) |o| &tc.bodies.items[o] else null;
         const sym = p.symOf(u);
-        const inst: ?*const Mono.Instance = if (u == .body and ob.?.of == .instance) &tc.instances[ob.?.of.instance] else null;
+        const inst: ?*const Mono.Instance = if (ob) |b| (if (b.of == .instance) &tc.instances[b.of.instance] else null) else null;
         const body: Engine.Body = switch (u) {
             .body => blk: {
                 const is_entry = p.entry == @as(?u32, @intCast(i));
                 break :blk .{ .source = .{ .decl = ob.?.decl, .is_entry = is_entry, .guard_stack = is_entry and p.guard_stack } };
             },
-            .spec => .{ .source = .{ .decl = ob.?.decl, .cached = false } },
-            .lambda => |k| .{ .lambda = k },
+            .spec => .{ .source = .{ .decl = ob.?.decl, .spec = true } },
+            .lambda => |k| .{ .lambda = .{ .unit = k, .owner = ob.?.decl, .owner_sig = ob.?.sig } },
             .derive => |k| .{ .derive = &tc.derives[k] },
             .erased => |k| .{ .erased = &tc.erased_units[k] },
             .adapter => |k| .{ .adapter = &tc.adapters[k] },
@@ -453,7 +453,7 @@ const Plan = struct {
             .profile = profile,
             .type_args = if (inst) |x| x.args else &.{},
             .conformances = if (inst) |x| x.conformances else &.{},
-            .closure_facts = if (u == .body and i < p.closure_facts.len) p.closure_facts[i] else &.{},
+            .closure_facts = if (owner) |o| (if (o < p.closure_facts.len) p.closure_facts[o] else &.{}) else &.{},
             .units = .{ .ctx = p, .findFn = findBody, .cache = p.inline_cache },
         };
     }
@@ -921,7 +921,7 @@ test "each unit reads its owner's tables: an instance its own, a lambda its owne
         switch (u) {
             .body => |bi| {
                 try testing.expectEqual(@as(?Closure.Owner, bi), fr.in.closure.owner);
-                try testing.expect(fr.body.source.cached);
+                try testing.expect(!fr.body.source.spec);
                 switch (tc.bodies.items[bi].of) {
                     .base => |gid| {
                         try testing.expectEqual(tc.node_types[0].ptr, fr.in.nodes.types.ptr);
@@ -942,7 +942,7 @@ test "each unit reads its owner's tables: an instance its own, a lambda its owne
                 const inst = &tc.instances[plan.specs.units[k].inst];
                 try testing.expectEqual(inst.node_types.ptr, fr.in.nodes.types.ptr);
                 try testing.expectEqual(@as(usize, 1), fr.in.closure.spec_targets.len);
-                try testing.expect(!fr.body.source.cached);
+                try testing.expect(fr.body.source.spec);
                 try testing.expectEqualStrings(fr.sym.name, fr.in.sig.?.name);
             },
             .derive, .erased, .adapter => {
@@ -1096,4 +1096,220 @@ test "--verify names a reloc target the unit's key does not fold" {
             try testing.expectEqualStrings(case.target.name, got.?);
         } else try testing.expectEqual(@as(?[]const u8, null), got);
     }
+}
+
+/// Each named unit's cache key digest when `src` is built under `profile`. With `io`, `src`
+/// is checked as a program that can import std.
+fn unitKeys(gpa: std.mem.Allocator, io: ?std.Io, src: []const u8, profile: Profile, names: []const []const u8, out: []u64) !void {
+    const ck = if (io) |x| try Checked.createProgram(gpa, x, src) else try Checked.create(gpa, src);
+    defer ck.destroy(gpa);
+    var plan = try ck.plan(gpa, profile);
+    defer plan.deinit(gpa);
+    for (names, out) |name, *o| {
+        const i = for (plan.units, 0..) |u, k| {
+            if (std.mem.eql(u8, plan.symOf(u).name, name)) break k;
+        } else return error.NoSuchUnit;
+        const fr = plan.frozenFor(i);
+        o.* = (try Engine.unitKey(gpa, "aarch64-macos", &fr)).digest();
+    }
+}
+
+test "a lambda's key changes whenever its owner reorders its lambdas, so a stale rank only misses" {
+    const gpa = testing.allocator;
+    const base =
+        \\fn other() -> int { 7 }
+        \\fn main() -> int {
+        \\    f := fn(x: int) -> int { x + 1 }
+        \\    g := fn(x: int) -> int { x * 2 }
+        \\    f(1) + g(2) + other()
+        \\}
+        \\
+    ;
+    const swapped =
+        \\fn other() -> int { 7 }
+        \\fn main() -> int {
+        \\    g := fn(x: int) -> int { x * 2 }
+        \\    f := fn(x: int) -> int { x + 1 }
+        \\    f(1) + g(2) + other()
+        \\}
+        \\
+    ;
+    const unrelated =
+        \\fn other() -> int { 8 }
+        \\fn main() -> int {
+        \\    f := fn(x: int) -> int { x + 1 }
+        \\    g := fn(x: int) -> int { x * 2 }
+        \\    f(1) + g(2) + other()
+        \\}
+        \\
+    ;
+    const names = [_][]const u8{ "main$l0", "main$l1", "main.other" };
+    for ([_]Profile{ .debug, .release }) |profile| {
+        var a: [names.len]u64 = undefined;
+        var again: [names.len]u64 = undefined;
+        var b: [names.len]u64 = undefined;
+        var c: [names.len]u64 = undefined;
+        try unitKeys(gpa, null, base, profile, &names, &a);
+        try unitKeys(gpa, null, base, profile, &names, &again);
+        try unitKeys(gpa, null, swapped, profile, &names, &b);
+        try unitKeys(gpa, null, unrelated, profile, &names, &c);
+        try testing.expectEqualSlices(u64, &a, &again);
+        // `main$l0` names the other lambda after the swap: neither rank may hit.
+        for (a[0..2], b[0..2]) |x, y| try testing.expect(x != y);
+        try testing.expect(a[0] != b[1] and a[1] != b[0]);
+        try testing.expectEqual(a[2], b[2]);
+        // An edit outside the owner leaves its lambdas' keys alone.
+        try testing.expectEqualSlices(u64, a[0..2], c[0..2]);
+        try testing.expect(a[2] != c[2]);
+    }
+}
+
+/// The keys of `names` under `before` and `after`, at debug and release: `changed[i]` says
+/// whether the edit must move unit `i`'s key.
+fn expectKeyMoves(io: ?std.Io, before: []const u8, after: []const u8, comptime names: []const []const u8, changed: [names.len]bool) !void {
+    const gpa = testing.allocator;
+    for ([_]Profile{ .debug, .release }, [_][]const u8{ "debug", "release" }) |profile, pname| {
+        var a: [names.len]u64 = undefined;
+        var b: [names.len]u64 = undefined;
+        try unitKeys(gpa, io, before, profile, names, &a);
+        try unitKeys(gpa, io, after, profile, names, &b);
+        for (names, a, b, changed) |name, x, y, moves| {
+            errdefer std.debug.print("unit {s} at {s}\n", .{ name, pname });
+            try testing.expectEqual(moves, x != y);
+        }
+    }
+}
+
+test "a bound method's adapter key moves with its receiver's layout" {
+    const base =
+        \\struct C { n: int }
+        \\impl C { fn get(self) -> int { self.n } }
+        \\fn other() -> int { 7 }
+        \\fn main() -> int {
+        \\    c := C { n: 5 }
+        \\    f := c.get
+        \\    return f() + other()
+        \\}
+        \\
+    ;
+    const moved =
+        \\struct C { z: int, n: int }
+        \\impl C { fn get(self) -> int { self.n } }
+        \\fn other() -> int { 7 }
+        \\fn main() -> int {
+        \\    c := C { z: 40, n: 6 }
+        \\    f := c.get
+        \\    return f() + other()
+        \\}
+        \\
+    ;
+    const unrelated =
+        \\struct C { n: int }
+        \\impl C { fn get(self) -> int { self.n } }
+        \\fn other() -> int { 8 }
+        \\fn main() -> int {
+        \\    c := C { n: 5 }
+        \\    f := c.get
+        \\    return f() + other()
+        \\}
+        \\
+    ;
+    try expectKeyMoves(null, base, moved, &.{ "main.C.get$bound", "main.other" }, .{ true, false });
+    try expectKeyMoves(null, base, unrelated, &.{ "main.C.get$bound", "main.other" }, .{ false, true });
+}
+
+test "an erased hash/eq key moves when its key type's witness or layout changes" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const base =
+        \\import std/map
+        \\struct K { a: int, b: int }
+        \\fn main() -> int {
+        \\    m := Map[K, int].new()
+        \\    m.set(K { a: 1, b: 2 }, 10)
+        \\    return m.get(K { a: 1, b: 9 }).or(4)
+        \\}
+        \\
+    ;
+    const impl =
+        \\import std/map
+        \\struct K { a: int, b: int }
+        \\impl K has Hashable {
+        \\    fn hash(self) -> int { self.a }
+        \\    fn eq(self, o: K) -> bool { self.a == o.a }
+        \\}
+        \\fn main() -> int {
+        \\    m := Map[K, int].new()
+        \\    m.set(K { a: 1, b: 2 }, 10)
+        \\    return m.get(K { a: 1, b: 9 }).or(4)
+        \\}
+        \\
+    ;
+    const widened =
+        \\import std/map
+        \\struct K { a: int, b: int, c: int }
+        \\fn main() -> int {
+        \\    m := Map[K, int].new()
+        \\    m.set(K { a: 1, b: 2, c: 3 }, 10)
+        \\    return m.get(K { a: 1, b: 9, c: 3 }).or(4)
+        \\}
+        \\
+    ;
+    const names = &.{ "descriptor$hash$s0", "descriptor$eq$s0" };
+    try expectKeyMoves(threaded.io(), base, impl, names, .{ true, true });
+    try expectKeyMoves(threaded.io(), base, widened, names, .{ true, true });
+    try expectKeyMoves(threaded.io(), base, base, names, .{ false, false });
+}
+
+test "a spec unit's key moves with its instance's body, not with an unrelated edit" {
+    const base =
+        \\fn add(a: int, b: int) -> int { a + b }
+        \\fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(x, x) }
+        \\fn other() -> int { 7 }
+        \\fn main() -> int { return apply(add, 3) + other() }
+        \\
+    ;
+    const body =
+        \\fn add(a: int, b: int) -> int { a + b }
+        \\fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(f(x, x), x) }
+        \\fn other() -> int { 7 }
+        \\fn main() -> int { return apply(add, 3) + other() }
+        \\
+    ;
+    const unrelated =
+        \\fn add(a: int, b: int) -> int { a + b }
+        \\fn apply[T](f: fn(T, T) -> T, x: T) -> T { f(x, x) }
+        \\fn other() -> int { 8 }
+        \\fn main() -> int { return apply(add, 3) + other() }
+        \\
+    ;
+    const names = &.{"main.apply$int$sp0$main.add"};
+    try expectKeyMoves(null, base, body, names, .{true});
+    try expectKeyMoves(null, base, unrelated, names, .{false});
+}
+
+test "an owner's fingerprint is walked once for all its lambdas' keys" {
+    const gpa = testing.allocator;
+    const ck = try Checked.create(gpa,
+        \\fn main() -> int {
+        \\    f := fn(x: int) -> int { x + 1 }
+        \\    g := fn(x: int) -> int { x * 2 }
+        \\    h := fn(x: int) -> int { x - 3 }
+        \\    f(1) + g(2) + h(3)
+        \\}
+        \\
+    );
+    defer ck.destroy(gpa);
+    var plan = try ck.plan(gpa, .debug);
+    defer plan.deinit(gpa);
+    var lambdas: usize = 0;
+    for (plan.units, 0..) |u, i| if (u == .lambda) {
+        const fr = plan.frozenFor(i);
+        const owner = try Engine.sourceFp(gpa, &fr, fr.body.lambda.owner, fr.body.lambda.owner_sig);
+        try testing.expectEqual(owner, try plan.inline_cache.ownerFp(gpa, &fr, fr.body.lambda));
+        _ = try Engine.unitKey(gpa, "aarch64-macos", &fr);
+        lambdas += 1;
+    };
+    try testing.expectEqual(@as(usize, 3), lambdas);
+    try testing.expectEqual(@as(u32, 1), plan.inline_cache.owner_fps.count());
 }
