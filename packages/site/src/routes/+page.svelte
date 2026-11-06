@@ -78,18 +78,12 @@ impl Square has Area {
 			title: 'Result',
 			blurb: 'Errors are values. <code class="code">Result[T, E]</code> holds a value or an error, and <code class="code">?</code> passes the error up to the caller.',
 			file: 'digits.toy',
-			code: `enum DigitError { negative, too_big }
-
-pub fn digit(n: int) -> Result[int, DigitError] {
-    if n < 0 { return Result.err(DigitError.negative) }
-    if n > 9 { return Result.err(DigitError.too_big) }
-    Result.ok(n)
+			code: `pub fn digit(n: int) -> Result[int, str] {
+    if n > 9 { Result.err("not a digit") } else { Result.ok(n) }
 }
 
-pub fn pair(a: int, b: int) -> Result[int, DigitError] {
-    tens := digit(a)?          # returns the error early
-    ones := digit(b)?
-    Result.ok(tens * 10 + ones)
+pub fn pair(a: int, b: int) -> Result[int, str] {
+    Result.ok(digit(a)? * 10 + digit(b)?)   # ? returns the error early
 }`
 		}
 	];
@@ -349,7 +343,7 @@ fn main() -> int {
 					</p>
 					<Performance />
 					<p class="mt-5 text-sm">
-						<a href={resolve('/benchmarks/')} class="link">See every benchmark, commit by commit →</a>
+						<a href={resolve('/benchmarks/')} class="link">See more benchmarks →</a>
 					</p>
 				</div>
 			</section>
