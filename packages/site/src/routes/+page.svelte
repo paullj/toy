@@ -237,10 +237,10 @@ fn main() -> int {
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#types" class="transition-colors hover:text-[var(--accent)]">Types that stay out of the way</a>
+						<a href="#types" class="transition-colors hover:text-[var(--accent)]">Types</a>
 					</h2>
 					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						Static types with few annotations. Generics compile to plain structs and functions, protocols describe behaviour, and there is no null.
+						Static types, mostly inferred. Generics compile to plain structs and functions, protocols describe behaviour, and there is no null.
 					</p>
 					<ExampleTabs examples={typeExamples} />
 				</div>
@@ -252,10 +252,10 @@ fn main() -> int {
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#control-flow" class="transition-colors hover:text-[var(--accent)]">Control flow that reads top to bottom</a>
+						<a href="#control-flow" class="transition-colors hover:text-[var(--accent)]">Control flow</a>
 					</h2>
 					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						Code reads in the order it runs. <code class="code">match</code> covers every case, pipes chain calls left to right, and closures share the variables they capture.
+						<code class="code">match</code> must cover every case, pipes chain calls left to right, and closures share the variables they capture.
 					</p>
 					<ExampleTabs examples={flowExamples} />
 				</div>
@@ -267,18 +267,18 @@ fn main() -> int {
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#tooling" class="transition-colors hover:text-[var(--accent)]">Tooling from day one</a>
+						<a href="#tooling" class="transition-colors hover:text-[var(--accent)]">Tooling</a>
 					</h2>
 					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						Errors point at the exact code, say how to fix it, and carry a code that <code class="code">toy explain</code> documents. Add a <code class="code">Triangle</code> to <code class="code">Shape</code> and forget its arm:
+						Each error has a code that <code class="code">toy explain</code> documents. This is the error for a <code class="code">Triangle</code> added to <code class="code">Shape</code> without a match arm:
 					</p>
 					<div class="mt-2">
 						<CheckOutput />
 					</div>
 					<p class="mt-5 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						The same compiler runs as a language server, with hover, completion, go to definition and
-						inlay hints. Every example on this page is a live editor that uses it. Hover a name to see its
-						type, or break the code to see the error.
+						The compiler also runs as a language server, with hover, completion, go to definition and
+						inlay hints. The examples on this page are live editors that use it: hover a name to see its
+						type.
 					</p>
 					<p class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
 						<a href={resolve('/docs/errors/')} class="link">Every error code →</a>
@@ -293,10 +293,10 @@ fn main() -> int {
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Fast by default</a>
+						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Performance</a>
 					</h2>
 					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						toy compiles straight to native machine code with its own backend, linker and code signer. No VM, no interpreter.
+						toy compiles to native machine code with its own backend, linker and code signer.
 					</p>
 					<SpeedBars />
 					<p class="mt-5 text-sm">
