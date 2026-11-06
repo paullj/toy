@@ -34,18 +34,19 @@ pub fn Liveness(comptime Inst: type) type {
         /// The last position in each block where moves may go in-line: the first of its
         /// trailing branches, so a move never runs on one exit of a two-way branch only.
         last_split: []u32,
+        /// The memory of the per-block lists above, one buffer each: a block's list is a
+        /// slice of it, so a fn of many small blocks costs four allocations, not four per
+        /// block.
+        store: [4][]u32 = @splat(&.{}),
 
         pub fn deinit(l: *Self, gpa: std.mem.Allocator) void {
             gpa.free(l.from);
             gpa.free(l.to);
-            for (l.succs) |s| gpa.free(s);
             gpa.free(l.succs);
-            for (l.preds) |p| gpa.free(p);
             gpa.free(l.preds);
-            for (l.live_in) |s| gpa.free(s);
             gpa.free(l.live_in);
-            for (l.live_out) |s| gpa.free(s);
             gpa.free(l.live_out);
+            for (l.store) |buf| gpa.free(buf);
             gpa.free(l.depth);
             gpa.free(l.last_split);
             l.* = undefined;
@@ -123,29 +124,40 @@ pub fn Liveness(comptime Inst: type) type {
             const n_preds = try gpa.alloc(u32, n);
             defer gpa.free(n_preds);
             @memset(n_preds, 0);
+            var n_edges: usize = 0;
             for (f.blocks, 0..) |*b, bi| {
-                var list: std.ArrayList(u32) = .empty;
-                errdefer list.deinit(gpa);
                 var trailing: usize = b.insts.items.len;
                 while (trailing > 0 and b.insts.items[trailing - 1].branchTarget() != null) trailing -= 1;
-                for (b.insts.items[trailing..]) |i| {
-                    const t = i.branchTarget().?;
-                    try list.append(gpa, t);
-                    n_preds[t] += 1;
-                }
-                l.succs[bi] = try list.toOwnedSlice(gpa);
+                n_edges += b.insts.items.len - trailing;
                 l.last_split[bi] = if (b.insts.items.len == 0)
                     l.from[bi]
                 else
                     l.instPos(bi, @min(trailing, b.insts.items.len - 1));
             }
-            const fill = try gpa.alloc(u32, n);
-            defer gpa.free(fill);
-            @memset(fill, 0);
-            for (l.preds, n_preds) |*p, c| p.* = try gpa.alloc(u32, c);
+            l.store[0] = try gpa.alloc(u32, n_edges);
+            l.store[1] = try gpa.alloc(u32, n_edges);
+            var at: usize = 0;
+            for (f.blocks, 0..) |*b, bi| {
+                const start = at;
+                var k = b.insts.items.len;
+                while (k > 0 and b.insts.items[k - 1].branchTarget() != null) k -= 1;
+                for (b.insts.items[k..]) |i| {
+                    const t = i.branchTarget().?;
+                    l.store[0][at] = t;
+                    at += 1;
+                    n_preds[t] += 1;
+                }
+                l.succs[bi] = l.store[0][start..at];
+            }
+            at = 0;
+            for (l.preds, n_preds) |*p, c| {
+                p.* = l.store[1][at..][0..c];
+                at += c;
+            }
+            @memset(n_preds, 0);
             for (l.succs, 0..) |ss, bi| for (ss) |s| {
-                l.preds[s][fill[s]] = @intCast(bi);
-                fill[s] += 1;
+                l.preds[s][n_preds[s]] = @intCast(bi);
+                n_preds[s] += 1;
             };
         }
 
@@ -197,20 +209,12 @@ pub fn Liveness(comptime Inst: type) type {
             std.mem.sort(Pair, reads.items, {}, byReg);
             std.mem.sort(Pair, writes.items, {}, byReg);
 
-            const ins = try gpa.alloc(std.ArrayList(u32), n);
-            const outs = try gpa.alloc(std.ArrayList(u32), n);
-            for (ins, outs) |*i, *o| {
-                i.* = .empty;
-                o.* = .empty;
-            }
-            defer {
-                for (ins, outs) |*i, *o| {
-                    i.deinit(gpa);
-                    o.deinit(gpa);
-                }
-                gpa.free(ins);
-                gpa.free(outs);
-            }
+            // (block, register) in the order found, which is by register: bucketed by
+            // block afterwards, in that order, each block's list comes out sorted.
+            var ins: std.ArrayList(Pair) = .empty;
+            defer ins.deinit(gpa);
+            var outs: std.ArrayList(Pair) = .empty;
+            defer outs.deinit(gpa);
             // Per block, the last register found live in, live out, or written there; the
             // registers go in ascending order, so each list comes out sorted.
             const in_mark = try gpa.alloc(u32, n);
@@ -234,24 +238,42 @@ pub fn Liveness(comptime Inst: type) type {
                     const b = reads.items[r].b;
                     if (in_mark[b] == v) continue;
                     in_mark[b] = v;
-                    try ins[b].append(gpa, v);
+                    try ins.append(gpa, .{ .v = v, .b = b });
                     try work.append(gpa, b);
                 }
                 while (work.pop()) |b| for (l.preds[b]) |p| {
                     if (out_mark[p] != v) {
                         out_mark[p] = v;
-                        try outs[p].append(gpa, v);
+                        try outs.append(gpa, .{ .v = v, .b = p });
                     }
                     if (write_mark[p] == v or in_mark[p] == v) continue;
                     in_mark[p] = v;
-                    try ins[p].append(gpa, v);
+                    try ins.append(gpa, .{ .v = v, .b = p });
                     try work.append(gpa, p);
                 };
             }
-            for (ins, outs, l.live_in, l.live_out) |*i, *o, *li, *lo| {
-                li.* = try i.toOwnedSlice(gpa);
-                lo.* = try o.toOwnedSlice(gpa);
+            l.store[2] = try bucket(gpa, ins.items, l.live_in, in_mark);
+            l.store[3] = try bucket(gpa, outs.items, l.live_out, in_mark);
+        }
+
+        /// Stable counting sort of `pairs` by block into one buffer, with `lists[b]` the
+        /// slice of block `b`. `count` is scratch of one entry per block.
+        fn bucket(gpa: std.mem.Allocator, pairs: anytype, lists: [][]u32, count: []u32) error{OutOfMemory}![]u32 {
+            const buf = try gpa.alloc(u32, pairs.len);
+            @memset(count, 0);
+            for (pairs) |pr| count[pr.b] += 1;
+            var at: u32 = 0;
+            for (lists, count) |*list, *c| {
+                list.* = buf[at..][0..c.*];
+                const len = c.*;
+                c.* = at;
+                at += len;
             }
+            for (pairs) |pr| {
+                buf[count[pr.b]] = pr.v;
+                count[pr.b] += 1;
+            }
+            return buf;
         }
 
         /// Loop depth from natural loops: an edge to a block that dominates its source is a
