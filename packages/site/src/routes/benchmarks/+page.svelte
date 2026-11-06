@@ -200,14 +200,13 @@
 		{@const run = data.peers}
 		<section data-testid="peers">
 			<h2 class="section" style="--marker: var(--toy-red)">Against other languages</h2>
-			<p class="caveat note" role="note">
+			<p class="salt mb-4 p-5 text-sm leading-snug" role="note">
 				A pinch of salt applies here most of all. Each program is small and written by us, and the numbers come from one
 				run on one machine. Toy's bars use the latest bench record on <code class="code">main</code>, so they can be
 				newer than the other languages' runs.
 			</p>
 			<p class="note">
-				The same algorithm in each language, single-threaded, standard library only, each printing the same checksum. Toy
-				leads each chart. Sources:
+				The same algorithm in each language, single-threaded, standard library only, each printing the same checksum. Sources:
 				<a class="link" href="{REPO_URL}/tree/main/bench/peers">bench/peers</a>.
 			</p>
 			<dl class="peer-meta text-[0.75rem]" data-testid="peers-meta">
@@ -289,11 +288,6 @@
 		padding: 0.3rem 0.6rem;
 		background: var(--bg);
 		box-shadow: 2px 2px 0 var(--border);
-	}
-	.caveat {
-		border-left: 3px solid var(--toy-yellow);
-		padding-left: 0.75rem;
-		color: var(--fg);
 	}
 	.peer-meta {
 		display: grid;
