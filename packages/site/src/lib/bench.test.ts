@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, withLatestToy, type BenchRecord } from './bench';
+import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, withLatestToy, withoutHiddenPeers, type BenchRecord } from './bench';
 
 const machine = (id: string) => ({
 	id,
@@ -210,6 +210,24 @@ describe('peerCharts', () => {
 
 	it('gives each bar its ratio to toy', () => {
 		expect(peerCharts(run, 'wall_median_s')[0].bars.map((b) => b.vsToy)).toEqual([1, 0.125, 5]);
+	});
+});
+
+describe('withoutHiddenPeers', () => {
+	it('drops the js and python rows and toolchains, and keeps the rest', () => {
+		const run = parsePeers(
+			peerRun([
+				{ name: 'loops', lang: 'toy', wall: 0.8 },
+				{ name: 'loops', lang: 'js', wall: 1 },
+				{ name: 'loops', lang: 'python', wall: 4 },
+				{ name: 'loops', lang: 'go', wall: 0.9 }
+			])
+		);
+		run.toolchains = { ...run.toolchains, js: { version: 'node', flags: 'node' }, python: { version: 'py', flags: 'python3' } };
+		const shown = withoutHiddenPeers(run);
+		expect(shown.results.map((r) => r.lang)).toEqual(['toy', 'go']);
+		expect(Object.keys(shown.toolchains)).not.toContain('js');
+		expect(Object.keys(shown.toolchains)).not.toContain('python');
 	});
 });
 

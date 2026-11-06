@@ -5,7 +5,9 @@ import { expect, test, type Page } from '@playwright/test';
 const run = JSON.parse(readFileSync('e2e/fixtures/peers.json', 'utf8'));
 const names = [...new Set(run.results.map((r: { name: string }) => r.name))] as string[];
 type Result = { name: string; lang: string; source: string };
-const results = (name: string) => run.results.filter((r: Result) => r.name === name) as Result[];
+// The page hides these peers; the fixture keeps one so the test proves it.
+const HIDDEN = ['js', 'python'];
+const results = (name: string) => run.results.filter((r: Result) => r.name === name && !HIDDEN.includes(r.lang)) as Result[];
 const langs = (name: string) => results(name).map((r) => r.lang);
 
 // A tooltip of a chart the mouse crossed while scrolling can still be fading out.
@@ -70,6 +72,12 @@ test('wall time is the default; peak memory and the log scale redraw the charts'
 	await expect(page.getByRole('button', { name: 'Log' })).toHaveAttribute('aria-pressed', 'true');
 	await expect.poll(() => chart.locator('svg .lc-bar').first().getAttribute('d')).not.toBe(linear);
 	await expect(chart.locator('svg .lc-bar')).toHaveCount(langs('loops').length);
+});
+
+test('js and python are not shown', async ({ page }) => {
+	const peers = page.getByTestId('peers');
+	await expect(peers.locator('.sources a', { hasText: 'python' })).toHaveCount(0);
+	await expect(page.getByTestId('peers-meta')).not.toContainText(run.toolchains.python.version);
 });
 
 test('hovering a bar names its toolchain', async ({ page }) => {

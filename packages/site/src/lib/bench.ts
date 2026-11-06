@@ -215,6 +215,18 @@ export function parsePeers(text: string): PeerRun {
 	return run;
 }
 
+// Interpreted and JIT runtimes sit too far from the compiled peers to say much here.
+export const HIDDEN_PEERS = ['js', 'python'];
+
+export function withoutHiddenPeers(run: PeerRun): PeerRun {
+	const shown = (lang: string) => !HIDDEN_PEERS.includes(lang);
+	return {
+		...run,
+		toolchains: Object.fromEntries(Object.entries(run.toolchains).filter(([lang]) => shown(lang))),
+		results: run.results.filter((r) => shown(r.lang))
+	};
+}
+
 export type LatestToy = {
 	run: PeerRun;
 	/** The newest commit among the history records that replaced toy rows. */
