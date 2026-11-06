@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
+import { open } from './open';
 
 // The same fixture playwright.config.ts builds the page from.
 const run = JSON.parse(readFileSync('e2e/fixtures/peers.json', 'utf8'));
@@ -16,7 +17,7 @@ async function expectOneTip(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-	await page.goto('/benchmarks/');
+	await open(page, '/benchmarks/');
 });
 
 test('the peer view sits under the history with its caveat and run details', async ({ page }) => {

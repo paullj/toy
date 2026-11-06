@@ -1,5 +1,6 @@
 <script lang="ts">
 	import '../app.css';
+	import { onMount } from 'svelte';
 	import { ModeWatcher } from 'mode-watcher';
 	// Self-hosted fonts imported as URLs so we control @font-face (font-display)
 	// and can preload them — no post-paint swap, no external request.
@@ -13,6 +14,12 @@
 	import monoBold from '$lib/fonts/IoskeleyMono-Bold.woff2?url';
 
 	let { children } = $props();
+
+	// The e2e tests wait for this: a click or key sent before hydration misses its handler.
+	// A parent mounts after its children, so every page's handlers are in place by now.
+	onMount(() => {
+		document.documentElement.dataset.hydrated = '';
+	});
 
 	const faces = `
 @font-face{font-family:'Hanken Grotesk';font-style:normal;font-weight:400;font-display:optional;src:url(${sansRegular}) format('woff2')}

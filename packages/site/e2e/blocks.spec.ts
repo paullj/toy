@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { open } from './open';
 
 const BLOCKS = ['order.toy', 'shapes.toy', 'pair.toy', 'area.toy', 'values.toy', 'loops.toy', 'pipeline.toy', 'closures.toy', 'total.toy', 'digits.toy'];
 
@@ -51,8 +52,8 @@ async function hoverWord(page: Page, b: ReturnType<typeof block>, lineText: stri
 	await page.mouse.move(at.x, at.y);
 }
 
-test.beforeEach(async ({ page }) => {
-	await page.goto('/');
+test.beforeEach(async ({ page, javaScriptEnabled }) => {
+	await (javaScriptEnabled ? open(page, '/') : page.goto('/'));
 });
 
 test('every example becomes an editor and checks clean', async ({ page }) => {
@@ -226,7 +227,7 @@ test('a diagnostic tooltip links its code and jumps to the related definition', 
 });
 
 test('the diagnostics reference renders every code from the compiler', async ({ page }) => {
-	await page.goto('/docs/errors/');
+	await open(page, '/docs/errors/');
 	await expect(page.locator('section#T0039 h3')).toContainText('arity mismatch');
 	await expect(page.locator('section#R0001 h3')).toContainText('undeclared identifier');
 });

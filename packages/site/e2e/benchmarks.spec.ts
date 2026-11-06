@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { open } from './open';
 
 // The same fixture playwright.config.ts builds the page from.
 const records = readFileSync('e2e/fixtures/history.jsonl', 'utf8')
@@ -10,7 +11,7 @@ const names = [...new Set(records.map((r) => r.name as string))];
 const shas = [...new Set(records.map((r) => r.sha as string))];
 
 test.beforeEach(async ({ page }) => {
-	await page.goto('/benchmarks/');
+	await open(page, '/benchmarks/');
 });
 
 test('every benchmark in the history gets a chart with a line', async ({ page }) => {

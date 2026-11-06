@@ -50,11 +50,6 @@
 		input.focus();
 	});
 
-	// The e2e tests wait for this: input sent before hydration misses the handlers above.
-	$effect(() => {
-		document.documentElement.dataset.hydrated = '';
-	});
-
 	let active = $state<string>();
 	function updateActive() {
 		let cur: string | undefined;
