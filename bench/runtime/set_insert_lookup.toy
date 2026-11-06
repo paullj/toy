@@ -1,0 +1,21 @@
+# Set insert and lookup: int elements spread by a multiplier, added (some twice), then
+# tested both present and absent.
+# expect: stdout "24000000\n"
+# Millions of inserts into a growing set: collecting on each allocation is far too slow.
+# gc-stress: skip
+
+import std/set
+import std/io
+
+fn main() {
+    total := 0
+    for round in 0..60 {
+        s := Set[int].new()
+        for i in 0..300000 { s.add((i % 200000) * 7919 + round) }
+        for i in 0..400000 {
+            if s.contains(i * 7919 + round) { total += 1 }
+        }
+        total += s.len()
+    }
+    io.println(total)
+}

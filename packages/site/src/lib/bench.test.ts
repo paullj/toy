@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, vsToyLabel, withLatestToy, withoutHiddenPeers, type BenchRecord } from './bench';
+import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, unpeered, vsToyLabel, withLatestToy, withoutHiddenPeers, type BenchRecord } from './bench';
 
 const machine = (id: string) => ({
 	id,
@@ -213,6 +213,20 @@ describe('peerCharts', () => {
 	});
 });
 
+describe('unpeered', () => {
+	it('lists the runtime benchmarks of the history that have no peer chart, in history order', () => {
+		const records = lines(
+			rec('a', 'loops', 1),
+			rec('a', 'check', 1, { kind: 'compiler' }),
+			rec('b', 'loops', 1),
+			rec('b', 'n_body', 1),
+			rec('b', 'fasta', 1)
+		);
+		const charts = peerCharts(parsePeers(peerRun([{ name: 'loops', lang: 'toy', wall: 1 }, { name: 'loops', lang: 'c', wall: 1 }])), 'wall_median_s');
+		expect(unpeered(records, charts)).toEqual(['n_body', 'fasta']);
+	});
+});
+
 describe('withoutHiddenPeers', () => {
 	it('drops the js and python rows and toolchains, and keeps the rest', () => {
 		const run = parsePeers(
@@ -228,6 +242,19 @@ describe('withoutHiddenPeers', () => {
 		expect(shown.results.map((r) => r.lang)).toEqual(['toy', 'go']);
 		expect(Object.keys(shown.toolchains)).not.toContain('js');
 		expect(Object.keys(shown.toolchains)).not.toContain('python');
+	});
+
+	it('drops the toy row of a benchmark whose only peers are hidden or absent', () => {
+		const run = parsePeers(
+			peerRun([
+				{ name: 'loops', lang: 'toy', wall: 0.8 },
+				{ name: 'loops', lang: 'c', wall: 0.1 },
+				{ name: 'fasta', lang: 'toy', wall: 0.5 },
+				{ name: 'n_body', lang: 'toy', wall: 0.5 },
+				{ name: 'n_body', lang: 'python', wall: 9 }
+			])
+		);
+		expect(withoutHiddenPeers(run).results.map((r) => `${r.name}/${r.lang}`)).toEqual(['loops/toy', 'loops/c']);
 	});
 });
 

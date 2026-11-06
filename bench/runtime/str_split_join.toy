@@ -1,0 +1,22 @@
+# str split and join: a 1000-word line split on spaces and joined back with commas,
+# then split on the commas, round after round.
+# expect: stdout "28267200\n"
+# Many short-lived Vecs of strs: collecting on each allocation is far too slow.
+# gc-stress: skip
+
+import std/vec
+import std/str
+import std/io
+
+fn main() {
+    words: Vec[str] = []
+    for i in 0..1000 { words.push("w".concat((i * 7 % 1000).to_string())) }
+    text := " ".join(words)
+    total := 0
+    for _round in 0..4800 {
+        parts := text.split(" ")
+        csv := ",".join(parts)
+        total += csv.split(",").len() + csv.len()
+    }
+    io.println(total)
+}

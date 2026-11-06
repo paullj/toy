@@ -1,0 +1,41 @@
+# The Benchmarks Game binary-trees as published: a node is one heap cell holding its two
+# children (binary_trees keeps them in a Vec instead), min depth 4, a stretch tree one
+# deeper than the max, a long-lived tree of the max depth, and 2^(max - d + 4) trees of
+# each even depth d in between. Prints, on one line, each check value of the published
+# output in its order, for max depth 17.
+# expect: stdout "524287 4063232 4161536 4186112 4192256 4193792 4194176 4194272 262143\n"
+# Millions of allocations over a live tree: collecting on each one is far too slow.
+# gc-stress: skip
+
+import std/ref
+import std/io
+
+enum Tree { leaf, node(Ref[Tree], Ref[Tree]) }
+
+fn make(d: int) -> Tree {
+    if d == 0 { return Tree.leaf }
+    return Tree.node(Ref.new(make(d - 1)), Ref.new(make(d - 1)))
+}
+
+fn check(t: Tree) -> int {
+    return match t {
+        .leaf -> 1,
+        .node(l, r) -> 1 + check(l.get()) + check(r.get()),
+    }
+}
+
+fn main() {
+    min_depth := 4
+    max_depth := 17
+    line := check(make(max_depth + 1)).to_string()
+    long_lived := make(max_depth)
+    d := min_depth
+    while d <= max_depth {
+        iters := 1 << (max_depth - d + min_depth)
+        total := 0
+        for _i in 0..iters { total += check(make(d)) }
+        line = line.concat(" ").concat(total.to_string())
+        d += 2
+    }
+    io.println(line.concat(" ").concat(check(long_lived).to_string()))
+}

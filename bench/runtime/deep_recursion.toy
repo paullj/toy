@@ -1,0 +1,16 @@
+# Deep recursion: a non-tail recursive walk 100,000 calls deep, repeated, so the cost of
+# deep stacks (frame setup, stack growth) shows, not only call overhead.
+# expect: stdout "240319600\n"
+
+import std/io
+
+fn depth_sum(n: int, acc: int) -> int {
+    if n == 0 { return acc }
+    return n % 7 + depth_sum(n - 1, acc)
+}
+
+fn main() {
+    total := 0
+    for round in 0..800 { total += depth_sum(100000, round) }
+    io.println(total)
+}

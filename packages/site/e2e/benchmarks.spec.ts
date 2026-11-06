@@ -25,6 +25,16 @@ test('every benchmark in the history gets a chart with a line', async ({ page })
 	await expect(page.getByTestId('bench-summary').locator('tbody tr')).toHaveCount(names.length);
 });
 
+test('the change chart has a bar per benchmark with an earlier record, its name beside it', async ({ page }) => {
+	const machine = records.filter((r) => r.machine.id === records[0].machine.id);
+	const latest = machine.at(-1).sha;
+	const before = new Set(machine.filter((r) => r.sha !== latest).map((r) => r.name));
+	const changed = [...new Set(machine.filter((r) => r.sha === latest && before.has(r.name)).map((r) => r.name))];
+	const chart = page.getByTestId('bench-changes');
+	await expect(chart.locator('svg .lc-bar')).toHaveCount(changed.length);
+	for (const name of changed) await expect(chart).toContainText(name);
+});
+
 test('the latest commit is selected and links to GitHub', async ({ page }) => {
 	const latest = shas.at(-1)!;
 	const link = page.getByTestId('bench-selected').locator('a');

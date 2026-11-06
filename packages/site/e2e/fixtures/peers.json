@@ -273,6 +273,26 @@
       },
       "checksum": "500000550000",
       "checksum_ok": true
+    },
+    {
+      "name": "fasta",
+      "lang": "toy",
+      "source": "bench/runtime/fasta.toy",
+      "metrics": {
+        "instructions": 5051479171,
+        "cycles": 2424054588,
+        "max_rss_bytes": 1654784,
+        "peak_footprint_bytes": 1261976,
+        "wall_median_s": 0.856617583,
+        "wall_mean_s": 0.8456531998000001,
+        "wall_stddev_s": 0.06809226919750624,
+        "wall_min_s": 0.730703125,
+        "wall_max_s": 0.8999722920000001,
+        "user_s": 0.7342974,
+        "sys_s": 0.008478
+      },
+      "checksum": "-8083601942175639175",
+      "checksum_ok": true
     }
   ]
 }

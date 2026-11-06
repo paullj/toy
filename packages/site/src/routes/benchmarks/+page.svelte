@@ -16,6 +16,7 @@
 		series,
 		summary,
 		trend,
+		unpeered,
 		withLatestToy,
 		type MetricKey
 	} from '$lib/bench';
@@ -44,6 +45,8 @@
 	);
 	const rows = $derived(summary(records, metricKey));
 	const changes = $derived(selected ? changesAt(records, selected.sha, metricKey) : []);
+	// The axis draws its labels at 10px, about 6px a character; a fixed gutter clips the long compiler names.
+	const changesGutter = $derived(Math.max(0, ...changes.map((c) => c.name.length)) * 6 + 12);
 	const select = (sha: string) => (selectedChoice = sha);
 	const index = (v: number) => v.toFixed(1);
 
@@ -53,6 +56,7 @@
 	let peerLog = $state(false);
 	const latest = $derived(data.peers ? withLatestToy(data.peers, data.records) : undefined);
 	const peerRows = $derived(latest ? peerCharts(latest.run, peerMetricKey) : []);
+	const missingPeers = $derived(unpeered(data.records, peerRows));
 
 	const tabColors = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)'];
 	const tabColor = (i: number) => tabColors[i % tabColors.length];
@@ -162,17 +166,19 @@
 				{selected.subject} · {selected.date.toISOString().slice(0, 10)}. Click a point in any chart to pick another commit.
 			</p>
 			{#if changes.length}
-				<div class="h-48">
+				<!-- Horizontal, one row per benchmark: side by side, twenty-odd names overlap. -->
+				<div style="height: {changes.length * 22 + 30}px" data-testid="bench-changes">
 					<BarChart
 						data={changes}
-						x="name"
-						xDomain={changes.map((c) => c.name)}
+						y="name"
+						yDomain={changes.map((c) => c.name)}
+						orientation="horizontal"
 						series={[
 							{ key: 'worse', value: 'pct', data: changes.filter((c) => c.pct > 0), color: 'var(--bench-worse)' },
 							{ key: 'better', value: 'pct', data: changes.filter((c) => c.pct <= 0), color: 'var(--bench-better)' }
 						]}
-						padding={{ top: 8, right: 8, bottom: 22, left: 48 }}
-						props={{ yAxis: { format: (v: number) => `${v}%`, ticks: 4 }, bars: { stroke: 'none' } }}
+						padding={{ top: 8, right: 12, bottom: 22, left: changesGutter }}
+						props={{ xAxis: { format: (v: number) => `${v}%`, ticks: 4 }, bars: { stroke: 'none' } }}
 					/>
 				</div>
 			{:else}
@@ -258,6 +264,12 @@
 					</figure>
 				{/each}
 			</div>
+			{#if missingPeers.length}
+				<p class="note mt-8" data-testid="peers-missing">
+					No peer programs yet for
+					{#each missingPeers as name, i (name)}<span class="font-mono">{name}</span>{i < missingPeers.length - 1 ? ', ' : ''}{/each}.
+				</p>
+			{/if}
 		</section>
 	{/if}
 </div>

@@ -1,0 +1,19 @@
+# str concat: builds short strs from ints and concatenates them into lines, each concat
+# making a new str.
+# expect: stdout "100044510\n"
+# Millions of short-lived strs: collecting on each one is far too slow.
+# gc-stress: skip
+
+import std/io
+
+fn main() {
+    total := 0
+    for i in 0..2400000 {
+        line := "row "
+        for j in 0..5 {
+            line = line.concat((i + j).to_string()).concat(",")
+        }
+        total += line.len()
+    }
+    io.println(total)
+}

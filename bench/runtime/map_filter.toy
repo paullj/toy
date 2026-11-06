@@ -1,0 +1,21 @@
+# A map/filter chain over a Vec: each stage takes a lambda and builds a new Vec, and a
+# fold sums what is left.
+# expect: stdout "100791000000\n"
+
+import std/vec
+import std/io
+
+fn main() {
+    xs: Vec[int] = []
+    for i in 0..10000 { xs.push(i) }
+    total := 0
+    for round in 0..3600 {
+        total += xs
+            |> .map(fn(x) { x * 3 + round })
+            |> .filter(fn(x) { x % 2 == 0 })
+            |> .map(fn(x) { x / 2 })
+            |> .filter(fn(x) { x % 3 != 0 })
+            |> .fold(0, fn(a, x) { a + x })
+    }
+    io.println(total)
+}

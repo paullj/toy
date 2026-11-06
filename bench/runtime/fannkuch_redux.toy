@@ -1,0 +1,63 @@
+# The Benchmarks Game fannkuch-redux, the simple sequential algorithm: walk every
+# permutation of 0..n in the count-array order, flip each until its first element is 0,
+# and keep the alternating checksum of flip counts and the most flips. Prints
+# "<checksum> <max flips>" for n = 10 (the published n = 7 gives "228 16").
+# expect: stdout "73196 38\n"
+
+import std/vec
+import std/io
+
+fn fannkuch(n: int) -> Vec[int] {
+    perm1: Vec[int] = []
+    perm: Vec[int] = []
+    count: Vec[int] = []
+    for i in 0..n {
+        perm1.push(i)
+        perm.push(0)
+        count.push(0)
+    }
+    max_flips := 0
+    checksum := 0
+    perm_count := 0
+    r := n
+    while true {
+        while r != 1 {
+            count[r - 1] = r
+            r -= 1
+        }
+        for i in 0..n { perm[i] = perm1[i] }
+        flips := 0
+        k := perm[0]
+        while k != 0 {
+            lo := 0
+            hi := k
+            while lo < hi {
+                t := perm[lo]
+                perm[lo] = perm[hi]
+                perm[hi] = t
+                lo += 1
+                hi -= 1
+            }
+            flips += 1
+            k = perm[0]
+        }
+        if flips > max_flips { max_flips = flips }
+        checksum += if perm_count % 2 == 0 { flips } else { -flips }
+        while true {
+            if r == n { return [checksum, max_flips] }
+            perm0 := perm1[0]
+            for i in 0..r { perm1[i] = perm1[i + 1] }
+            perm1[r] = perm0
+            count[r] -= 1
+            if count[r] > 0 { break }
+            r += 1
+        }
+        perm_count += 1
+    }
+    return []
+}
+
+fn main() {
+    res := fannkuch(10)
+    io.println(res[0].to_string().concat(" ").concat(res[1].to_string()))
+}

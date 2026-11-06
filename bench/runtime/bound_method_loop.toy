@@ -1,0 +1,27 @@
+# The bound-method loop of #40: a bound method value made from a struct on every
+# iteration and passed to a fn, the shape whose env #206 keeps off the heap.
+# expect: stdout "7200000060000000\n"
+# Tens of millions of bound-method envs: collecting on each one is far too slow.
+# gc-stress: skip
+
+import std/io
+
+struct Acc { n: int }
+
+impl Acc {
+    fn plus(self, x: int) -> int { self.n + x }
+}
+
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+
+fn main() {
+    acc := Acc { n: 1 }
+    t := 0
+    i := 0
+    while i < 120000000 {
+        g := acc.plus
+        t = t + apply(g, i)
+        i = i + 1
+    }
+    io.println(t)
+}
