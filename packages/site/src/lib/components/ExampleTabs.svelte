@@ -49,15 +49,10 @@
 <style>
 	.stack {
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 	}
 	.stack > .panel {
 		grid-area: 1 / 1;
-		display: flex;
-		flex-direction: column;
-	}
-	.stack > .panel :global(figure) {
-		flex: 1;
-		margin-bottom: 0;
 	}
 	.off {
 		visibility: hidden;

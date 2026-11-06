@@ -39,10 +39,16 @@
 >
 	{#if filename}
 		<figcaption
-			class="flex items-center gap-2 border-b px-4 py-2 font-mono text-[0.7rem]"
+			class="flex items-center gap-2 border-b px-4 py-1.5 font-mono text-[0.7rem]"
 			style="border-color: var(--border); color: var(--fg-muted)"
 		>
 			{filename}
+			<span class="run ml-auto" data-tip="Running examples is not supported yet">
+				<button type="button" disabled aria-label="Run (not supported yet)">
+					<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor" /></svg>
+					Run
+				</button>
+			</span>
 		</figcaption>
 	{/if}
 	<div bind:this={host} class="overflow-x-auto">
@@ -55,3 +61,49 @@
 		{/if}
 	</div>
 </figure>
+
+<style>
+	.run {
+		position: relative;
+	}
+	.run button {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		border: 1.5px solid var(--border);
+		border-radius: 0.5rem;
+		padding: 0.1rem 0.55rem;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		background: var(--bg);
+		color: var(--fg-muted);
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	/* A disabled button gets no pointer events, so the wrapper shows the tooltip. */
+	.run::after {
+		content: attr(data-tip);
+		position: absolute;
+		right: 0;
+		bottom: calc(100% + 6px);
+		z-index: 10;
+		white-space: nowrap;
+		padding: 0.3rem 0.55rem;
+		border: 1.5px solid var(--border);
+		border-radius: 0.5rem;
+		background: var(--bg);
+		color: var(--fg);
+		font-family: var(--font-sans);
+		font-size: 0.75rem;
+		box-shadow: 2px 2px 0 var(--border);
+		opacity: 0;
+		pointer-events: none;
+		transform: translateY(2px);
+		transition: opacity 0.12s, transform 0.12s;
+	}
+	.run:hover::after {
+		opacity: 1;
+		transform: none;
+	}
+</style>
