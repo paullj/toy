@@ -103,6 +103,8 @@ jobs:
       # When `mise run bench` appends to bench/history.jsonl, on a scratch repo.
       - name: Bench history rules
         run: bash bench/record-test.sh
+      - name: Bench generator snapshots
+        run: bash bench/fixture-check.sh
 
   gc-stress:
     needs: changes

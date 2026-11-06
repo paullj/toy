@@ -1,0 +1,3 @@
+# expect: exit 213
+import mod_2
+fn main() -> int { return mod_2.entry(7) % 256 }

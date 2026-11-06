@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changesAt, commits, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, unpeered, vsToyLabel, withLatestToy, withoutHiddenPeers, type BenchRecord } from './bench';
+import { changesAt, commits, formatLinesPerSecond, machines, parseHistory, parsePeers, peerCharts, series, summary, trend, unpeered, vsToyLabel, withLatestToy, withoutHiddenPeers, type BenchRecord } from './bench';
 
 const machine = (id: string) => ({
 	id,
@@ -14,7 +14,7 @@ const machine = (id: string) => ({
 	load_avg_1m: 1
 });
 
-function rec(sha: string, name: string, instructions: number, opts: { kind?: string; id?: string; date?: string } = {}) {
+function rec(sha: string, name: string, instructions: number, opts: { kind?: string; id?: string; date?: string; lines?: number; wall?: number } = {}) {
 	return JSON.stringify({
 		sha,
 		subject: `commit ${sha}`,
@@ -23,7 +23,8 @@ function rec(sha: string, name: string, instructions: number, opts: { kind?: str
 		name,
 		kind: opts.kind ?? 'runtime',
 		runs: 5,
-		metrics: { instructions, cycles: 1, max_rss_bytes: 1, peak_footprint_bytes: 1, wall_median_s: 1, wall_mean_s: 1, wall_stddev_s: 0, user_s: 1, sys_s: 0 },
+		...(opts.lines === undefined ? {} : { lines: opts.lines }),
+		metrics: { instructions, cycles: 1, max_rss_bytes: 1, peak_footprint_bytes: 1, wall_median_s: opts.wall ?? 1, wall_mean_s: 1, wall_stddev_s: 0, user_s: 1, sys_s: 0 },
 		machine: machine(opts.id ?? 'm1')
 	});
 }
@@ -131,6 +132,26 @@ describe('derived views', () => {
 		const check = summary(m1, 'instructions').find((s) => s.name === 'check')!;
 		expect(check.fromPrevious).toBeUndefined();
 		expect(check.fromFirst).toBeUndefined();
+	});
+
+	it('gives a compiler benchmark its lines per second at the latest record, and none to the rest', () => {
+		const rows = summary(
+			lines(
+				rec('a', 'check', 1, { kind: 'compiler', lines: 1000, wall: 0.5 }),
+				rec('b', 'check', 1, { kind: 'compiler', lines: 1000, wall: 0.25 }),
+				rec('b', 'loops', 1),
+				rec('b', 'old_check', 1, { kind: 'compiler' })
+			),
+			'instructions'
+		);
+		expect(rows.map((r) => [r.name, r.linesPerSecond])).toEqual([
+			['check', 4000],
+			['loops', undefined],
+			['old_check', undefined]
+		]);
+		expect(formatLinesPerSecond(4000)).toBe('4.0k');
+		expect(formatLinesPerSecond(363012)).toBe('363.0k');
+		expect(formatLinesPerSecond(undefined)).toBe('–');
 	});
 
 	it('gives the change per benchmark at a commit', () => {
