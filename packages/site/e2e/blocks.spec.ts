@@ -7,6 +7,8 @@ function block(page: Page, file: string) {
 }
 
 async function live(page: Page, file: string) {
+	const tab = page.locator(`[role=tab][data-file="${file}"]`);
+	if (await tab.isVisible()) await tab.click();
 	const b = block(page, file);
 	await b.scrollIntoViewIfNeeded();
 	await expect(b.locator('.cm-editor')).toBeVisible();
