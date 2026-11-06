@@ -22,6 +22,7 @@
     "binaryen": "^132.0.0",
     "d3-scale": "4.0.2",
     "layerchart": "2.9.2",
+    "minisearch": "7.2.0",
     "svelte": "^5.20.0",
     "svelte-check": "^4.1.0",
     "tailwindcss": "^4.0.0",
