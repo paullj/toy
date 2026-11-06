@@ -3,7 +3,6 @@
 	import { BarChart, LineChart } from 'layerchart';
 	import BenchLine from '$lib/components/BenchLine.svelte';
 	import PeerBars from '$lib/components/PeerBars.svelte';
-	import squid from '$lib/images/squid-02-stacking.webp';
 	import {
 		benchmarks,
 		changesAt,
@@ -74,8 +73,7 @@
 		How fast toy runs programs and compiles them, commit by commit on <code class="code">main</code>. Each point is one
 		<code class="code">mise run bench</code> on one machine, so numbers from different machines do not compare.
 	</p>
-	<div class="salt mt-6 flex items-start gap-4 p-5" role="note" data-testid="bench-salt">
-		<img src={squid} alt="" width="40" height="60" class="h-14 w-auto shrink-0 select-none" />
+	<div class="salt mt-6 p-5" role="note" data-testid="bench-salt">
 		<p class="text-sm leading-snug">
 			<strong>Take these with a pinch of salt.</strong> toy is a hobby project, and these are small programs run on one
 			laptop. They show roughly how fast toy is and whether a change made it faster or slower. They do not rank
