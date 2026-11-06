@@ -156,13 +156,19 @@ const P = struct {
     }
 
     fn rewrite(p: *P) error{OutOfMemory}!void {
+        // In place: only a division by a power of two becomes more than one instruction.
+        var out: std.ArrayList(Inst) = .empty;
+        defer out.deinit(p.gpa);
         for (p.f.blocks) |*b| {
-            var out: std.ArrayList(Inst) = .empty;
-            errdefer out.deinit(p.gpa);
-            try out.ensureTotalCapacity(p.gpa, b.insts.items.len);
-            for (b.insts.items) |inst| try p.rewriteOne(&out, inst);
-            b.insts.deinit(p.gpa);
-            b.insts = out;
+            var k: usize = 0;
+            while (k < b.insts.items.len) {
+                out.clearRetainingCapacity();
+                try p.rewriteOne(&out, b.insts.items[k]);
+                if (out.items.len == 1) {
+                    b.insts.items[k] = out.items[0];
+                } else try b.insts.replaceRange(p.gpa, k, 1, out.items);
+                k += out.items.len;
+            }
         }
     }
 
@@ -383,23 +389,30 @@ const P = struct {
 
     /// Drop pure instructions whose virtual result nothing reads, until none is left. Uses
     /// are counted once and a dropped instruction gives its operands' back; sweeping each
-    /// block from the end frees a whole chain in one pass when its defs precede its uses,
-    /// and a later pass catches the rest.
+    /// block from the end frees a whole chain in one pass when its defs precede its uses.
+    /// Another pass runs only when a register lost its last use after the sweep had passed
+    /// its last definition.
     fn dropDead(p: *P) error{OutOfMemory}!void {
-        const uses = try p.gpa.alloc(u32, p.f.vregs.items.len);
+        const nv = p.f.vregs.items.len;
+        const uses = try p.gpa.alloc(u32, nv);
         defer p.gpa.free(uses);
         @memset(uses, 0);
-        for (p.f.blocks) |*b| for (b.insts.items) |*inst| {
+        // Per register, its last definition as (block, index), where the sweep meets it
+        // first.
+        const def_at = try p.gpa.alloc(DefAt, nv);
+        defer p.gpa.free(def_at);
+        @memset(def_at, .{});
+        for (p.f.blocks, 0..) |*b, bi| for (b.insts.items, 0..) |*inst, k| {
             var buf: [Mir.max_operands]Mir.Operand = undefined;
             for (inst.operands(&buf)) |o| {
-                if (o.kind != .def and o.reg.*.isVirtual()) uses[o.reg.*.index()] += 1;
+                if (!o.reg.*.isVirtual()) continue;
+                if (o.kind != .def) uses[o.reg.*.index()] += 1 else def_at[o.reg.*.index()] = .{ .block = @intCast(bi), .k = @intCast(k) };
             }
         };
         var dead: std.ArrayList(bool) = .empty;
         defer dead.deinit(p.gpa);
-        var changed = true;
-        while (changed) {
-            changed = false;
+        while (true) {
+            var again = false;
             var bi = p.f.blocks.len;
             while (bi > 0) {
                 bi -= 1;
@@ -415,13 +428,15 @@ const P = struct {
                     if (!d.isVirtual() or uses[d.index()] != 0) continue;
                     var buf: [Mir.max_operands]Mir.Operand = undefined;
                     for (inst.operands(&buf)) |o| {
-                        if (o.kind != .def and o.reg.*.isVirtual()) uses[o.reg.*.index()] -= 1;
+                        if (o.kind == .def or !o.reg.*.isVirtual()) continue;
+                        const v = o.reg.*.index();
+                        uses[v] -= 1;
+                        if (uses[v] == 0 and def_at[v].after(bi, k)) again = true;
                     }
                     dead.items[k] = true;
                     dropped = true;
                 }
                 if (!dropped) continue;
-                changed = true;
                 var w: usize = 0;
                 for (insts.items, dead.items) |inst, gone| {
                     if (gone) continue;
@@ -430,7 +445,26 @@ const P = struct {
                 }
                 insts.shrinkRetainingCapacity(w);
             }
+            if (!again) return;
+            @memset(def_at, .{});
+            for (p.f.blocks, 0..) |*b, b_i| for (b.insts.items, 0..) |*inst, k| {
+                var buf: [Mir.max_operands]Mir.Operand = undefined;
+                for (inst.operands(&buf)) |o| {
+                    if (o.kind == .def and o.reg.*.isVirtual()) def_at[o.reg.*.index()] = .{ .block = @intCast(b_i), .k = @intCast(k) };
+                }
+            };
         }
+    }
+};
+
+const DefAt = struct {
+    block: u32 = 0,
+    k: u32 = 0,
+
+    /// Whether this is past (block `bi`, index `k`) in code order, so a backward sweep at
+    /// that point has already passed it.
+    fn after(d: DefAt, bi: usize, k: usize) bool {
+        return d.block > bi or (d.block == bi and d.k > k);
     }
 };
 
@@ -843,4 +877,25 @@ test "peephole: a param slot only loaded keeps its words in registers from the p
         try testing.expectEqualDeep(Inst.Op{ .store = .{ .rt = Reg.gp(0), .mem = s0 } }, f.blocks[0].insts.items[0].op);
         try testing.expect(f.blocks[1].insts.items[0].op == .load);
     }
+}
+
+test "peephole: dead code goes even when each use sits in a block before its def" {
+    const gpa = testing.allocator;
+    var f = try testFunc(gpa, 5, 6);
+    defer f.deinit(gpa);
+    const v = Reg.virt;
+    // A chain v3 <- v2 <- v1 <- v0 laid out against the backward sweep: freeing each
+    // link frees a def the sweep has already passed. v4 is a lone dead def in block 4
+    // whose only use, v5, is dead in block 0.
+    try add(gpa, &f, 4, .{ .load = .{ .rt = v(0), .mem = Mem.frame(.{ .slot = 0 }, 0) } });
+    try add(gpa, &f, 4, .{ .alu = .{ .op = .mul, .rd = v(4), .rn = v(0), .rm = v(0) } });
+    try add(gpa, &f, 3, .{ .alu = .{ .op = .mul, .rd = v(1), .rn = v(0), .rm = v(0) } });
+    try add(gpa, &f, 2, .{ .alu = .{ .op = .mul, .rd = v(2), .rn = v(1), .rm = v(1) } });
+    try add(gpa, &f, 1, .{ .alu = .{ .op = .mul, .rd = v(3), .rn = v(2), .rm = v(2) } });
+    try add(gpa, &f, 0, .{ .alu = .{ .op = .mul, .rd = v(5), .rn = v(4), .rm = v(4) } });
+    try run(gpa, &f, .{});
+
+    try testing.expectEqual(@as(usize, 1), f.blocks[4].insts.items.len);
+    try testing.expect(f.blocks[4].insts.items[0].op == .load);
+    for (0..4) |b| try testing.expectEqual(@as(usize, 0), f.blocks[b].insts.items.len);
 }

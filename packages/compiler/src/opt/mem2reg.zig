@@ -190,24 +190,40 @@ const Cfg = struct {
     }
 };
 
-const Bits = struct {
-    words: []u64,
-    w: usize,
+const Pair = struct { b: Ir.BlockId, p: u32 };
 
-    fn init(gpa: std.mem.Allocator, rows: usize, cols: usize) error{OutOfMemory}!Bits {
-        const w = (cols + 63) / 64;
-        const words = try gpa.alloc(u64, rows * w);
-        @memset(words, 0);
-        return .{ .words = words, .w = w };
+/// Per block, a list of promoted slot indices, ascending; all blocks share one buffer.
+/// Sparse, not a bit or a value per block per slot: a long fn has many of both, and few
+/// slots are live at any one block.
+const Rows = struct {
+    start: []u32,
+    items: []u32,
+
+    /// `pairs` grouped by block, stably: pairs in slot order give rows in slot order.
+    fn init(gpa: std.mem.Allocator, n: usize, pairs: []const Pair) error{OutOfMemory}!Rows {
+        const start = try gpa.alloc(u32, n + 1);
+        errdefer gpa.free(start);
+        @memset(start, 0);
+        for (pairs) |pr| start[pr.b + 1] += 1;
+        for (1..n + 1) |i| start[i] += start[i - 1];
+        const items = try gpa.alloc(u32, pairs.len);
+        errdefer gpa.free(items);
+        const fill = try gpa.dupe(u32, start[0..n]);
+        defer gpa.free(fill);
+        for (pairs) |pr| {
+            items[fill[pr.b]] = pr.p;
+            fill[pr.b] += 1;
+        }
+        return .{ .start = start, .items = items };
     }
-    fn row(b: Bits, r: usize) []u64 {
-        return b.words[r * b.w ..][0..b.w];
+
+    fn deinit(r: *Rows, gpa: std.mem.Allocator) void {
+        gpa.free(r.start);
+        gpa.free(r.items);
     }
-    fn get(b: Bits, r: usize, c: usize) bool {
-        return b.words[r * b.w + c / 64] >> @intCast(c % 64) & 1 != 0;
-    }
-    fn set(b: Bits, r: usize, c: usize) void {
-        b.words[r * b.w + c / 64] |= @as(u64, 1) << @intCast(c % 64);
+
+    fn of(r: Rows, b: usize) []const u32 {
+        return r.items[r.start[b]..r.start[b + 1]];
     }
 };
 
@@ -272,54 +288,11 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
         },
         else => {},
     };
-    const Access = struct {
-        fn of(po: []const u32, op: Ir.Op) ?u32 {
-            const addr = switch (op) {
-                .load => |l| l.addr,
-                .store => |st| st.addr,
-                else => return null,
-            };
-            if (addr >= po.len or po[addr] == no_slot) return null;
-            return po[addr];
-        }
-    };
 
-    // Liveness of each promoted slot at block entry.
-    const gen = try Bits.init(gpa, n, np);
-    defer gpa.free(gen.words);
-    const kill = try Bits.init(gpa, n, np);
-    defer gpa.free(kill.words);
-    const live = try Bits.init(gpa, n, np);
-    defer gpa.free(live.words);
-    for (func.blocks, 0..) |b, bi| for (b.instrs) |ins| {
-        const p = Access.of(prom_of, ins.op) orelse continue;
-        switch (ins.op) {
-            .load => if (!kill.get(bi, p)) gen.set(bi, p),
-            .store => kill.set(bi, p),
-            else => unreachable,
-        }
-    };
-    @memcpy(live.words, gen.words);
-    var changed = true;
-    while (changed) {
-        changed = false;
-        var i = n;
-        while (i > 0) {
-            i -= 1;
-            const b = cfg.rpo[i];
-            var s: [2]Ir.BlockId = undefined;
-            const k = walk.successors(func.blocks[b].term, &s);
-            for (0..live.w) |w| {
-                var out: u64 = 0;
-                for (s[0..k]) |x| out |= live.row(x)[w];
-                const in = gen.row(b)[w] | (out & ~kill.row(b)[w]);
-                if (in != live.row(b)[w]) {
-                    live.row(b)[w] = in;
-                    changed = true;
-                }
-            }
-        }
-    }
+    var live_in = try liveIn(gpa, func, cfg, prom_of, np);
+    defer live_in.deinit(gpa);
+    const edges = try Edges.init(gpa, cfg, &live_in);
+    defer gpa.free(edges.start);
 
     var st: State = .{ .gpa = gpa, .func = func, .slots = slot_list.items, .initial = try gpa.alloc(Ir.ValueId, np) };
     defer {
@@ -332,28 +305,40 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
     try st.remap.ensureTotalCapacity(gpa, func.values.len);
     for (0..func.values.len) |v| st.remap.appendAssumeCapacity(@intCast(v));
 
-    const param = try gpa.alloc(Ir.ValueId, n * np);
+    // Per live-in entry, the block param that carries it, or `none`.
+    const param = try gpa.alloc(Ir.ValueId, live_in.items.len);
     defer gpa.free(param);
     @memset(param, none);
     for (0..n) |b| {
         if (b == func.entry or cfg.predsOf(@intCast(b)).len < 2) continue;
-        for (0..np) |p| if (live.get(b, p)) {
-            param[b * np + p] = try st.value(func.slots[slot_list.items[p]].type);
-        };
+        for (live_in.start[b]..live_in.start[b + 1]) |i| {
+            param[i] = try st.value(func.slots[slot_list.items[live_in.items[i]]].type);
+        }
     }
 
-    const out = try gpa.alloc(Ir.ValueId, n * np);
+    // Per edge and slot live into its dest, the slot's value at the end of the source
+    // block, or `none`.
+    const out = try gpa.alloc(Ir.ValueId, edges.len());
     defer gpa.free(out);
     @memset(out, none);
+    const cur = try gpa.alloc(Ir.ValueId, np);
+    defer gpa.free(cur);
+    @memset(cur, none);
+    var touched: std.ArrayList(u32) = .empty;
+    defer touched.deinit(gpa);
     for (cfg.rpo) |b| {
-        const cur = out[b * np ..][0..np];
+        for (touched.items) |p| cur[p] = none;
+        touched.clearRetainingCapacity();
         const preds = cfg.predsOf(b);
-        for (cur, 0..) |*c, p| {
-            c.* = param[b * np + p];
-            if (c.* == none and preds.len == 1) c.* = out[preds[0] * np + p];
+        for (live_in.start[b]..live_in.start[b + 1]) |i| {
+            const p = live_in.items[i];
+            cur[p] = param[i];
+            if (cur[p] == none and preds.len == 1) cur[p] = out[edges.at(&live_in, b, 0, i)];
+            try touched.append(gpa, p);
         }
         for (func.blocks[b].instrs) |ins| {
-            const p = Access.of(prom_of, ins.op) orelse continue;
+            const p = promotedSlot(prom_of, ins.op) orelse continue;
+            try touched.append(gpa, p);
             switch (ins.op) {
                 .load => {
                     if (cur[p] == none) cur[p] = try st.entryValue(p);
@@ -363,23 +348,35 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
                 else => unreachable,
             }
         }
+        var succ: [2]Ir.BlockId = undefined;
+        const k = walk.successors(func.blocks[b].term, &succ);
+        for (succ[0..k]) |x| {
+            // Preds are distinct and ascending: a search, since a join may have many.
+            const j = std.sort.binarySearch(Ir.BlockId, cfg.predsOf(x), b, struct {
+                fn order(key: Ir.BlockId, y: Ir.BlockId) std.math.Order {
+                    return std.math.order(key, y);
+                }
+            }.order).?;
+            for (live_in.start[x]..live_in.start[x + 1]) |i| out[edges.at(&live_in, x, j, i)] = cur[live_in.items[i]];
+        }
     }
 
-    for (0..n) |b| for (0..np) |p| if (param[b * np + p] != none) {
-        for (cfg.predsOf(@intCast(b))) |q| {
-            if (out[q * np + p] == none) out[q * np + p] = try st.entryValue(p);
+    for (0..n) |b| for (live_in.start[b]..live_in.start[b + 1]) |i| if (param[i] != none) {
+        for (0..cfg.predsOf(@intCast(b)).len) |j| {
+            const o = &out[edges.at(&live_in, b, j, i)];
+            if (o.* == none) o.* = try st.entryValue(live_in.items[i]);
         }
     };
 
-    changed = true;
+    var changed = true;
     while (changed) {
         changed = false;
-        for (0..n) |b| for (0..np) |p| {
-            const v = param[b * np + p];
+        for (0..n) |b| for (live_in.start[b]..live_in.start[b + 1]) |i| {
+            const v = param[i];
             if (v == none or st.remap.items[v] != v) continue;
             var same: Ir.ValueId = none;
-            const trivial = for (cfg.predsOf(@intCast(b))) |q| {
-                const a = st.resolve(out[q * np + p]);
+            const trivial = for (0..cfg.predsOf(@intCast(b)).len) |j| {
+                const a = st.resolve(out[edges.at(&live_in, b, j, i)]);
                 if (a == v or a == same) continue;
                 if (same != none) break false;
                 same = a;
@@ -396,9 +393,10 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
     var added_pred: std.ArrayList(Ir.BlockId) = .empty;
     defer added_pred.deinit(gpa);
     for (0..n) |b| {
+        const lo = live_in.start[b];
+        const hi = live_in.start[b + 1];
         var k: usize = 0;
-        for (0..np) |p| {
-            const v = param[b * np + p];
+        for (param[lo..hi]) |v| {
             if (v != none and st.remap.items[v] == v) k += 1;
         }
         if (k == 0) continue;
@@ -407,8 +405,7 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
         const params = try gpa.alloc(Ir.ValueId, blk.params.len + k);
         @memcpy(params[0..blk.params.len], blk.params);
         var j = blk.params.len;
-        for (0..np) |p| {
-            const v = param[b * np + p];
+        for (param[lo..hi]) |v| {
             if (v == none or st.remap.items[v] != v) continue;
             params[j] = v;
             j += 1;
@@ -416,16 +413,15 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
         gpa.free(blk.params);
         blk.params = params;
 
-        for (cfg.predsOf(@intCast(b))) |q| {
+        for (cfg.predsOf(@intCast(b)), 0..) |q, qi| {
             // Lower leaves unit args off the end of a `br`, so the new args go after the
             // dest's own params, not after the args it happens to carry.
             const args = try gpa.alloc(Ir.Operand, orig + k);
             @memset(args[0..orig], .none);
             var a: usize = orig;
-            for (0..np) |p| {
-                const v = param[b * np + p];
+            for (param[lo..hi], lo..) |v, i| {
                 if (v == none or st.remap.items[v] != v) continue;
-                args[a] = .{ .value = st.resolve(out[q * np + p]) };
+                args[a] = .{ .value = st.resolve(out[edges.at(&live_in, b, qi, i)]) };
                 a += 1;
             }
             const pred = &func.blocks[q];
@@ -456,14 +452,14 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
         const lead = if (b == func.entry) st.prefix.items else &.{};
         var kept: usize = lead.len;
         for (blk.instrs) |ins| {
-            if (Access.of(prom_of, ins.op) == null) kept += 1;
+            if (promotedSlot(prom_of, ins.op) == null) kept += 1;
         }
         if (lead.len == 0 and kept == blk.instrs.len) continue;
         const instrs = try gpa.alloc(Ir.Instr, kept);
         @memcpy(instrs[0..lead.len], lead);
         var j = lead.len;
         for (blk.instrs) |ins| {
-            if (Access.of(prom_of, ins.op) != null) continue;
+            if (promotedSlot(prom_of, ins.op) != null) continue;
             instrs[j] = ins;
             j += 1;
         }
@@ -487,6 +483,112 @@ fn promoteSlots(gpa: std.mem.Allocator, func: *Ir.Function, cfg: *const Cfg, pro
         }
     }.map);
     stats.slots_promoted += np;
+}
+
+/// The layout of per-edge values: for each block, each predecessor (in `Cfg` order) and
+/// each slot live into the block, one entry. Only edges a live slot crosses take room.
+const Edges = struct {
+    start: []u32,
+
+    fn init(gpa: std.mem.Allocator, cfg: *const Cfg, live_in: *const Rows) error{OutOfMemory}!Edges {
+        const n = live_in.start.len - 1;
+        const start = try gpa.alloc(u32, n + 1);
+        start[0] = 0;
+        for (0..n) |b| start[b + 1] = start[b] + @as(u32, @intCast(live_in.of(b).len * cfg.predsOf(@intCast(b)).len));
+        return .{ .start = start };
+    }
+
+    fn len(e: Edges) usize {
+        return e.start[e.start.len - 1];
+    }
+
+    /// The entry of live-in entry `i` of block `b` on the edge from its `j`-th predecessor.
+    fn at(e: Edges, live_in: *const Rows, b: usize, j: usize, i: usize) usize {
+        const row = live_in.start[b + 1] - live_in.start[b];
+        return e.start[b] + j * row + (i - live_in.start[b]);
+    }
+};
+
+/// The promoted index of the slot a load or store goes through, or null when the op is
+/// not one or its slot stays in memory.
+fn promotedSlot(prom_of: []const u32, op: Ir.Op) ?u32 {
+    const addr = switch (op) {
+        .load => |l| l.addr,
+        .store => |st| st.addr,
+        else => return null,
+    };
+    if (addr >= prom_of.len or prom_of[addr] == no_slot) return null;
+    return prom_of[addr];
+}
+
+/// Per block, the promoted slots live into it: read before any store in it, on some
+/// path from its entry. Per slot, a walk back through predecessors from each block that
+/// reads it first, stopping at blocks that store it, so the work is the size of the live
+/// sets rather than blocks times slots.
+fn liveIn(gpa: std.mem.Allocator, func: *const Ir.Function, cfg: *const Cfg, prom_of: []const u32, np: usize) error{OutOfMemory}!Rows {
+    const n = func.blocks.len;
+    var gen: std.ArrayList(Pair) = .empty;
+    defer gen.deinit(gpa);
+    var kill: std.ArrayList(Pair) = .empty;
+    defer kill.deinit(gpa);
+    const gen_mark = try gpa.alloc(u32, np);
+    defer gpa.free(gen_mark);
+    const kill_mark = try gpa.alloc(u32, np);
+    defer gpa.free(kill_mark);
+    @memset(gen_mark, no_slot);
+    @memset(kill_mark, no_slot);
+    for (func.blocks, 0..) |b, bi_usize| {
+        const bi: Ir.BlockId = @intCast(bi_usize);
+        for (b.instrs) |ins| {
+            const p = promotedSlot(prom_of, ins.op) orelse continue;
+            if (kill_mark[p] == bi) continue;
+            if (ins.op == .store) {
+                kill_mark[p] = bi;
+                try kill.append(gpa, .{ .b = bi, .p = p });
+            } else if (gen_mark[p] != bi) {
+                gen_mark[p] = bi;
+                try gen.append(gpa, .{ .b = bi, .p = p });
+            }
+        }
+    }
+    const bySlot = struct {
+        fn less(_: void, x: Pair, y: Pair) bool {
+            return x.p < y.p or (x.p == y.p and x.b < y.b);
+        }
+    }.less;
+    std.mem.sort(Pair, gen.items, {}, bySlot);
+    std.mem.sort(Pair, kill.items, {}, bySlot);
+
+    const in_mark = try gpa.alloc(u32, n);
+    defer gpa.free(in_mark);
+    const stop_mark = try gpa.alloc(u32, n);
+    defer gpa.free(stop_mark);
+    @memset(in_mark, no_slot);
+    @memset(stop_mark, no_slot);
+    var live: std.ArrayList(Pair) = .empty;
+    defer live.deinit(gpa);
+    var work: std.ArrayList(Ir.BlockId) = .empty;
+    defer work.deinit(gpa);
+    var g: usize = 0;
+    var k: usize = 0;
+    while (g < gen.items.len) {
+        const p = gen.items[g].p;
+        while (k < kill.items.len and kill.items[k].p < p) k += 1;
+        while (k < kill.items.len and kill.items[k].p == p) : (k += 1) stop_mark[kill.items[k].b] = p;
+        while (g < gen.items.len and gen.items[g].p == p) : (g += 1) {
+            const b = gen.items[g].b;
+            in_mark[b] = p;
+            try live.append(gpa, .{ .b = b, .p = p });
+            try work.append(gpa, b);
+        }
+        while (work.pop()) |b| for (cfg.predsOf(b)) |q| {
+            if (in_mark[q] == p or stop_mark[q] == p) continue;
+            in_mark[q] = p;
+            try live.append(gpa, .{ .b = q, .p = p });
+            try work.append(gpa, q);
+        };
+    }
+    return Rows.init(gpa, n, live.items);
 }
 
 /// Splices each split-edge block in right after its predecessor and renumbers: blocks
@@ -754,4 +856,33 @@ test "mem2reg: a reference slot becomes a value of its reference type; a mistype
     try testing.expectEqual(@as(Ir.ValueId, 1), func.blocks[entry.term.cond_br.t].term.br.args[0].value);
     // s1 keeps its store and load.
     try testing.expectEqual(@as(usize, 3), countMemOps(&func));
+}
+
+test "mem2reg: memory grows with the blocks and slots, not their product" {
+    // 1500 blocks in a chain, each with its own slot: a table of blocks x slots is 2.25M
+    // entries, past the buffer, while every slot is live in one block only.
+    const n = 1500;
+    const buf = try testing.allocator.alloc(u8, 6 << 20);
+    defer testing.allocator.free(buf);
+    var fba = std.heap.FixedBufferAllocator.init(buf);
+    const gpa = fba.allocator();
+    var b: Build = .{ .gpa = gpa };
+    for (0..n) |i| {
+        const v: Ir.ValueId = @intCast(4 * i);
+        const s: Ir.SlotId = @intCast(i);
+        const instrs = [_]Ir.Instr{ sa(v, s), iconst(v + 1, @intCast(i)), sto(v, v + 1), ld(v + 2, v) };
+        if (i + 1 < n) {
+            try b.block(&.{}, &instrs, .{ .br = .{ .dest = @intCast(i + 1), .args = &.{} } });
+        } else try b.block(&.{}, &instrs, .{ .ret = .{ .value = v + 2 } });
+    }
+    const slot_types: [n]Ir.Type = @splat(Ir.Type.int);
+    const types: [4 * n]Ir.Type = @splat(Ir.Type.int);
+    var func = try b.finish(&slot_types, &.{}, &types);
+    func.exit = n - 1;
+
+    var st: Opt.Stats = .{};
+    try testing.expect(try run(gpa, &func, &st));
+    try testing.expectEqual(@as(usize, n), st.slots_promoted);
+    try testing.expectEqual(@as(usize, 0), countMemOps(&func));
+    try testing.expectEqual(@as(Ir.ValueId, 4 * (n - 1) + 1), func.blocks[n - 1].term.ret.value);
 }

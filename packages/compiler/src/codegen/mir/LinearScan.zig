@@ -4,19 +4,19 @@
 //!
 //! STAGES. `Liveness` numbers the code and finds what is live into and out of each block.
 //! `buildIntervals` turns that into one interval per virtual register (with lifetime holes)
-//! and a fixed interval per physical register an instruction pins: argument and result
-//! registers, and every register a call clobbers. `allocate` walks the intervals by start,
-//! giving each a register that is free for as long as possible, and when none is free for
-//! its whole life, splits it: the piece that gets no register lives in the register's
-//! spill slot until just before its next use. Split positions prefer block boundaries
-//! outside loops, so reloads and stores land on loop entries and exits rather than in
-//! loop bodies. `assignSlots` gives every spilled register a slot, sharing slots between
-//! registers whose lives do not overlap. `rewrite` replaces every virtual register by its
-//! location's register, puts moves where a register's pieces meet inside a block, and
-//! resolves the edges: where a value's location at the end of a predecessor differs from
-//! its location at the start of a successor, a parallel move (`Moves`) goes on the edge,
-//! in the predecessor before its jump, at the head of a successor with one predecessor,
-//! or in a new block that splits a critical edge.
+//! and a fixed interval per physical register an instruction pins (argument and result
+//! registers), plus the list of calls with the registers each clobbers. `allocate` walks
+//! the intervals by start, giving each a register that is free for as long as possible, and
+//! when none is free for its whole life, splits it: the piece that gets no register lives
+//! in the register's spill slot until just before its next use. Split positions prefer
+//! block boundaries outside loops, so reloads and stores land on loop entries and exits
+//! rather than in loop bodies. `assignSlots` gives every spilled register a slot, sharing
+//! slots between registers whose lives do not overlap. `rewrite` replaces every virtual
+//! register by its location's register, puts moves where a register's pieces meet inside a
+//! block, and resolves the edges: where a value's location at the end of a predecessor
+//! differs from its location at the start of a successor, a parallel move (`Moves`) goes on
+//! the edge, in the predecessor before its jump, at the head of a successor with one
+//! predecessor, or in a new block that splits a critical edge.
 //!
 //! The values the selector's block-argument moves copy are ordinary intervals here, and
 //! a hint asks for the copy's source register, so most such moves vanish. A copy's source
@@ -107,10 +107,18 @@ pub fn LinearScan(comptime Target: type) type {
             live: Live,
             /// Every piece. Piece `v` is the first piece of virtual register `v`.
             intervals: std.ArrayList(Interval) = .empty,
-            /// Per virtual register, its pieces in position order.
+            /// Per virtual register that has been split, its pieces in position order
+            /// (`piecesOf`). Most registers never are, and get no list.
             pieces: []std.ArrayList(u32) = &.{},
-            /// Per physical register, where instructions pin it.
+            /// Per physical register, where instructions pin it, except the clobbers of
+            /// calls, which are in `calls`.
             fixed: [64]Interval = @splat(.{ .vreg = Interval.fixed }),
+            /// Every call in code order, with the allocatable registers it clobbers. A
+            /// call clobbers about forty registers: one entry here, not a range in forty
+            /// fixed intervals that every allocation then searches.
+            calls: std.ArrayList(Call) = .empty,
+            /// Every register some call in `calls` clobbers.
+            clobbered: Mir.RegSet = 0,
             safepoints: std.ArrayList(u32) = .empty,
             /// Per virtual register: a physical register a copy pairs it with, the
             /// register a copy reads it from and the copy's position, or the register a
@@ -132,6 +140,7 @@ pub fn LinearScan(comptime Target: type) type {
                 for (a.pieces) |*p| p.deinit(gpa);
                 gpa.free(a.pieces);
                 for (&a.fixed) |*it| it.deinit(gpa);
+                a.calls.deinit(gpa);
                 a.safepoints.deinit(gpa);
                 gpa.free(a.hint_phys);
                 gpa.free(a.hint_vreg);
@@ -142,9 +151,15 @@ pub fn LinearScan(comptime Target: type) type {
                 gpa.free(a.slot_of);
             }
 
+            const tracked_set: Mir.RegSet = blk: {
+                var set: Mir.RegSet = 0;
+                for (Target.allocatable(.gpr)) |r| set |= Mir.regBit(r);
+                for (Target.allocatable(.fpr)) |r| set |= Mir.regBit(r);
+                break :blk set;
+            };
+
             fn tracked(r: Mir.Reg) bool {
-                for (Target.allocatable(r.physClass())) |x| if (x == r) return true;
-                return false;
+                return tracked_set & Mir.regBit(r) != 0;
             }
 
             fn classOf(a: *const A, it: *const Interval) Mir.RegClass {
@@ -199,8 +214,14 @@ pub fn LinearScan(comptime Target: type) type {
                             } else try a.fixedDef(r, p + 1, &phys_live);
                         };
                         if (call) |c| {
-                            var set = (c.defs | c.clobbers);
+                            // A clobbered register live after the call is one it writes:
+                            // its fixed interval starts here.
+                            const pinned = c.defs | (c.clobbers & phys_live);
+                            var set = pinned;
                             while (set != 0) : (set &= set - 1) try a.fixedDef(@enumFromInt(@ctz(set)), p + 1, &phys_live);
+                            const clobbered = c.clobbers & ~pinned & tracked_set;
+                            if (clobbered != 0) try a.calls.append(gpa, .{ .pos = p + 1, .regs = clobbered });
+                            a.clobbered |= clobbered;
                             var uses = c.uses;
                             while (uses != 0) : (uses &= uses - 1) try a.fixedUse(@enumFromInt(@ctz(uses)), from, p, &phys_live);
                             if (c.safepoint) try a.safepoints.append(gpa, p);
@@ -221,10 +242,8 @@ pub fn LinearScan(comptime Target: type) type {
                     if (bi != 0 and phys_live != 0) return error.Unallocatable;
                 }
                 std.mem.reverse(u32, a.safepoints.items);
-                for (a.intervals.items, 0..) |*it, v| {
-                    it.finish();
-                    if (!it.isEmpty()) try a.pieces[v].append(gpa, @intCast(v));
-                }
+                std.mem.reverse(Call, a.calls.items);
+                for (a.intervals.items) |*it| it.finish();
                 for (&a.fixed) |*it| it.finish();
             }
 
@@ -283,6 +302,7 @@ pub fn LinearScan(comptime Target: type) type {
                 const ci: u32 = @intCast(a.intervals.items.len);
                 try a.intervals.append(a.gpa, child);
                 const list = &a.pieces[child.vreg];
+                if (list.items.len == 0) try list.append(a.gpa, child.vreg);
                 const at = std.mem.indexOfScalar(u32, list.items, idx).? + 1;
                 try list.insert(a.gpa, at, ci);
                 return ci;
@@ -345,7 +365,7 @@ pub fn LinearScan(comptime Target: type) type {
 
             fn allocate(a: *A) Error!void {
                 // Sorted once, not inserted one by one: each insert shifts the list.
-                for (a.pieces) |p| if (p.items.len != 0) try a.unhandled.append(a.gpa, p.items[0]);
+                for (0..a.pieces.len) |v| if (!a.intervals.items[v].isEmpty()) try a.unhandled.append(a.gpa, @intCast(v));
                 std.mem.sort(u32, a.unhandled.items, a, struct {
                     fn later(c: *A, x: u32, y: u32) bool {
                         const sx = c.intervals.items[x].start();
@@ -421,6 +441,39 @@ pub fn LinearScan(comptime Target: type) type {
                 return out;
             }
 
+            /// Per register of `regs`, the first position from its start where `cur` is
+            /// live and an instruction pins the register, or `none`.
+            fn pinnedFrom(a: *const A, cur: *const Interval, regs: []const Mir.Reg) [64]u32 {
+                var at: [64]u32 = @splat(none);
+                const from = cur.start();
+                var want: Mir.RegSet = 0;
+                for (regs) |r| {
+                    want |= Mir.regBit(r);
+                    const it = &a.fixed[@intFromEnum(r)];
+                    if (it.isEmpty()) continue;
+                    if (it.nextIntersection(cur, from)) |x| at[@intFromEnum(r)] = x;
+                }
+                // The first call inside `cur` that clobbers a register is where a call
+                // first pins it. A search per range of `cur`, not a walk over every call
+                // in its span: a long-lived value may span thousands of calls in its holes.
+                want &= a.clobbered;
+                const calls = a.calls.items;
+                var k: usize = 0;
+                for (cur.ranges.items) |r| {
+                    if (want == 0) break;
+                    k += std.sort.lowerBound(Call, calls[k..], r.from, Call.order);
+                    while (want != 0 and k < calls.len and calls[k].pos < r.to) : (k += 1) {
+                        var hit = want & calls[k].regs;
+                        want &= ~calls[k].regs;
+                        while (hit != 0) : (hit &= hit - 1) {
+                            const n = @ctz(hit);
+                            at[n] = @min(at[n], calls[k].pos);
+                        }
+                    }
+                }
+                return at;
+            }
+
             fn tryAllocateFree(a: *A, ci: u32) Error!bool {
                 const cur = &a.intervals.items[ci];
                 const class = a.classOf(cur);
@@ -438,9 +491,10 @@ pub fn LinearScan(comptime Target: type) type {
                         free[r] = @min(free[r], x);
                     }
                 }
+                const pinned = a.pinnedFrom(cur, regs);
                 for (regs) |r| {
-                    if (a.fixed[@intFromEnum(r)].nextIntersection(cur, cur.start())) |x|
-                        free[@intFromEnum(r)] = @min(free[@intFromEnum(r)], x);
+                    const n = @intFromEnum(r);
+                    free[n] = @min(free[n], pinned[n]);
                 }
                 if (a.safepointCrossed(cur)) |s| for (regs) |r| {
                     free[@intFromEnum(r)] = @min(free[@intFromEnum(r)], s);
@@ -492,12 +546,11 @@ pub fn LinearScan(comptime Target: type) type {
                     const r = @intFromEnum(it.reg.?);
                     use_pos[r] = @min(use_pos[r], it.firstUseFrom(from) orelse none);
                 }
+                const pinned = a.pinnedFrom(cur, regs);
                 for (regs) |r| {
                     const n = @intFromEnum(r);
-                    if (a.fixed[n].nextIntersection(cur, cur.start())) |x| {
-                        block_pos[n] = @min(block_pos[n], x);
-                        use_pos[n] = @min(use_pos[n], x);
-                    }
+                    block_pos[n] = @min(block_pos[n], pinned[n]);
+                    use_pos[n] = @min(use_pos[n], pinned[n]);
                 }
                 if (a.safepointCrossed(cur)) |s| for (regs) |r| {
                     const n = @intFromEnum(r);
@@ -584,9 +637,19 @@ pub fn LinearScan(comptime Target: type) type {
                 try a.pushUnhandled(try a.splitAt(tail, pos));
             }
 
+            fn piecesOf(a: *const A, v: u32) []const u32 {
+                const list = a.pieces[v].items;
+                if (list.len != 0) return list;
+                if (a.intervals.items[v].isEmpty()) return &.{};
+                // Piece `v`'s own `vreg` is `v`, so it serves as the one-element list. The
+                // slice points into `intervals`, which stops growing once allocation ends,
+                // and every caller runs after that.
+                return @as(*const [1]u32, &a.intervals.items[v].vreg);
+            }
+
             /// The piece of `v` that covers `pos`, if `v` is live there.
             fn pieceAt(a: *const A, v: u32, pos: u32) ?u32 {
-                const ps = a.pieces[v].items;
+                const ps = a.piecesOf(v);
                 // The pieces are disjoint and in order: the last one starting at or
                 // before `pos` is the only one that may cover it.
                 const k = std.sort.upperBound(u32, ps, PosCtx{ .a = a, .pos = pos }, PosCtx.order);
@@ -625,16 +688,17 @@ pub fn LinearScan(comptime Target: type) type {
                 const Span = struct { v: u32, from: u32, to: u32 };
                 var spans: std.ArrayList(Span) = .empty;
                 defer spans.deinit(gpa);
-                for (a.pieces, 0..) |p, v| {
-                    if (p.items.len == 0) continue;
-                    const any = for (p.items) |pi| {
+                for (0..nv) |v| {
+                    const p = a.piecesOf(@intCast(v));
+                    if (p.len == 0) continue;
+                    const any = for (p) |pi| {
                         if (a.intervals.items[pi].spilled) break true;
                     } else false;
                     if (!any) continue;
                     try spans.append(gpa, .{
                         .v = @intCast(v),
-                        .from = a.intervals.items[p.items[0]].start(),
-                        .to = a.intervals.items[p.items[p.items.len - 1]].end(),
+                        .from = a.intervals.items[p[0]].start(),
+                        .to = a.intervals.items[p[p.len - 1]].end(),
                     });
                 }
                 std.mem.sort(Span, spans.items, {}, struct {
@@ -735,9 +799,10 @@ pub fn LinearScan(comptime Target: type) type {
                 const Inline = struct { pos: u32, move: Moves.Move };
                 var inline_moves: std.ArrayList(Inline) = .empty;
                 defer inline_moves.deinit(gpa);
-                for (a.pieces, 0..) |p, v| {
-                    if (p.items.len < 2) continue;
-                    for (p.items[1..], p.items[0 .. p.items.len - 1]) |pi, prev| {
+                for (a.pieces, 0..) |list, v| {
+                    const p = list.items;
+                    if (p.len < 2) continue;
+                    for (p[1..], p[0 .. p.len - 1]) |pi, prev| {
                         // A piece that starts at a def (odd) or a label takes no value
                         // in-line: the def writes it, the edges bring it.
                         const s = a.intervals.items[pi].start();
@@ -808,9 +873,12 @@ pub fn LinearScan(comptime Target: type) type {
                 var next_inline: usize = 0;
                 var pending: std.ArrayList(Moves.Move) = .empty;
                 defer pending.deinit(gpa);
+                // Each block is rewritten into `out` and copied back, so its list keeps
+                // its memory: one buffer for the fn, not one per block.
+                var out: std.ArrayList(Inst) = .empty;
+                defer out.deinit(gpa);
                 for (f.blocks, 0..) |*blk, bi| {
-                    var out: std.ArrayList(Inst) = .empty;
-                    errdefer out.deinit(gpa);
+                    out.clearRetainingCapacity();
                     const insts = blk.insts.items;
                     const head_line = if (insts.len > 0) insts[0].line else @as(u32, 0);
                     try a.emitMoves(&out, &head_moves[bi], head_line);
@@ -840,8 +908,8 @@ pub fn LinearScan(comptime Target: type) type {
                         while (next_edge < edge_blocks.items.len and edge_blocks.items[next_edge].pred == bi and edge_blocks.items[next_edge].inst == k) : (next_edge += 1)
                             edge_blocks.items[next_edge].new_inst = out.items.len - 1;
                     }
-                    blk.insts.deinit(gpa);
-                    blk.insts = out;
+                    blk.insts.clearRetainingCapacity();
+                    try blk.insts.appendSlice(gpa, out.items);
                 }
                 std.debug.assert(next_inline == inline_moves.items.len);
 
@@ -864,6 +932,17 @@ pub fn LinearScan(comptime Target: type) type {
 
 /// A copy's other register, and the position to look its location up at.
 const CopyHint = struct { v: u32, pos: u32 };
+
+/// The position a call writes its clobbered registers at (one after the call's own), and
+/// those registers.
+const Call = struct {
+    pos: u32,
+    regs: Mir.RegSet,
+
+    fn order(pos: u32, c: Call) std.math.Order {
+        return std.math.order(pos, c.pos);
+    }
+};
 
 /// A small target for unit tests: three allocatable registers, one of them callee-saved,
 /// so a handful of values already forces splits and spills.
@@ -1547,4 +1626,38 @@ test "linear scan: a value evicted back to an earlier block boundary reloads no 
     const got = try Machine.run(gpa, &f, res.maps);
     defer gpa.free(got);
     try testing.expectEqualSlices(u64, want, got);
+}
+
+test "linear scan: a call in a later range of a value clobbers its register; one in a hole does not" {
+    const gpa = testing.allocator;
+    var f = try TF.init(gpa, 1);
+    defer f.deinit(gpa);
+    const m = try f.newVReg(gpa, .gpr, null);
+    const n = try f.newVReg(gpa, .gpr, null);
+    const insts = &f.blocks[0].insts;
+    // `m` lives across both calls and takes the one callee-saved register. `n` is dead
+    // across the first call and live across the second, which only the search of its
+    // second range finds.
+    try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = m, .imm = 1 } } });
+    try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = n, .imm = 2 } } });
+    try insts.append(gpa, .{ .op = .{ .use = n } });
+    try insts.append(gpa, .{ .op = .{ .call = .{} } });
+    try insts.append(gpa, .{ .op = .{ .imm = .{ .rd = n, .imm = 3 } } });
+    try insts.append(gpa, .{ .op = .{ .call = .{} } });
+    try insts.append(gpa, .{ .op = .{ .use = n } });
+    try insts.append(gpa, .{ .op = .{ .use = m } });
+    try insts.append(gpa, .{ .op = .ret });
+    var before = try cloneFunc(gpa, &f);
+    defer before.deinit(gpa);
+    const want = try Machine.run(gpa, &before, null);
+    defer gpa.free(want);
+
+    var frame: Mir.Frame = .{ .layout = undefined };
+    var res = try LinearScan(TestTarget).run(gpa, &f, &frame);
+    defer res.deinit(gpa);
+    const got = try Machine.run(gpa, &f, res.maps);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u64, want, got);
+    try testing.expectEqual(Mir.Reg.gp(19), f.blocks[0].insts.items[0].op.imm.rd);
+    try testing.expectEqual(@as(u32, 1), frame.spills);
 }
