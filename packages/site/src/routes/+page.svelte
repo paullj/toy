@@ -2,6 +2,8 @@
 	import { resolve } from '$app/paths';
 	import { useEventListener } from 'runed';
 	import Code from '$lib/components/Code.svelte';
+	import Install from '$lib/components/Install.svelte';
+	import SpeedBars from '$lib/components/SpeedBars.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import icon from '$lib/images/icon.webp';
 	import squid from '$lib/images/squid-07-standing.webp';
@@ -9,11 +11,12 @@
 	const nav = [
 		{ id: 'introduction', label: 'Introduction' },
 		{ id: 'features', label: 'Features' },
+		{ id: 'performance', label: 'Performance' },
 		{ id: 'install', label: 'Install' },
 		{ id: 'learn', label: 'Learn' }
 	];
 
-	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)'];
+	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)'];
 
 	const secondary = [
 		{ href: resolve('/tour/'), label: 'Tour →' },
@@ -252,26 +255,46 @@ fn main() -> int {
 				</div>
 			</section>
 
-			<!-- 03 Install -->
-			<section id="install" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<!-- 03 Performance -->
+			<section id="performance" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[2]}"></span>03
+				</div>
+				<div>
+					<h2 class="text-2xl">
+						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Performance</a>
+					</h2>
+					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						toy compiles straight to native machine code with its own backend, linker and code signer. No
+						VM, no interpreter.
+					</p>
+					<SpeedBars />
+					<p class="mt-4 text-sm">
+						<a href={resolve('/benchmarks/')} class="link">See every benchmark, commit by commit →</a>
+					</p>
+				</div>
+			</section>
+
+			<!-- 04 Install -->
+			<section id="install" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
 				</div>
 				<div>
 					<h2 class="text-2xl">
 						<a href="#install" class="transition-colors hover:text-[var(--accent)]">Install</a>
 					</h2>
 					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						toy currently has to be built from
-						<a href="https://github.com/paullj/toy-compiler" class="link">source</a>.
+						One command to install the <code class="code">toy</code> compiler.
 					</p>
+					<Install />
 				</div>
 			</section>
 
-			<!-- 04 Learn -->
+			<!-- 05 Learn -->
 			<section id="learn" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
-					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
 				</div>
 				<div>
 					<h2 class="text-2xl">
