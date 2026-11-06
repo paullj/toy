@@ -1,0 +1,60 @@
+# The Benchmarks Game spectral-norm: the spectral norm of the infinite matrix
+# A(i, j) = 1 / ((i + j)(i + j + 1) / 2 + i + 1), by 10 rounds of the power method on
+# A^T A over its top-left n x n corner. Prints the norm for n = 2800, as the shortest
+# digits that read back as the same float (the published n = 100 gives 1.274219991).
+# expect: stdout "1.2742241526045428\n"
+
+import std/vec
+import std/math
+import std/io
+
+fn a(i: int, j: int) -> float {
+    d: float = ((i + j) * (i + j + 1) / 2 + i + 1).into()
+    return 1.0 /. d
+}
+
+fn mul_av(v: Vec[float], out: Vec[float]) {
+    n := v.len()
+    for i in 0..n {
+        s := 0.0
+        for j in 0..n { s +.= a(i, j) *. v[j] }
+        out[i] = s
+    }
+}
+
+fn mul_atv(v: Vec[float], out: Vec[float]) {
+    n := v.len()
+    for i in 0..n {
+        s := 0.0
+        for j in 0..n { s +.= a(j, i) *. v[j] }
+        out[i] = s
+    }
+}
+
+fn mul_atav(v: Vec[float], out: Vec[float], tmp: Vec[float]) {
+    mul_av(v, tmp)
+    mul_atv(tmp, out)
+}
+
+fn main() {
+    n := 2800
+    u: Vec[float] = []
+    v: Vec[float] = []
+    tmp: Vec[float] = []
+    for _i in 0..n {
+        u.push(1.0)
+        v.push(0.0)
+        tmp.push(0.0)
+    }
+    for _round in 0..10 {
+        mul_atav(u, v, tmp)
+        mul_atav(v, u, tmp)
+    }
+    vbv := 0.0
+    vv := 0.0
+    for i in 0..n {
+        vbv +.= u[i] *. v[i]
+        vv +.= v[i] *. v[i]
+    }
+    io.println(math.sqrt(vbv /. vv))
+}

@@ -4,10 +4,11 @@ import { open } from './open';
 
 // The same fixture playwright.config.ts builds the page from.
 const run = JSON.parse(readFileSync('e2e/fixtures/peers.json', 'utf8'));
-const names = [...new Set(run.results.map((r: { name: string }) => r.name))] as string[];
 type Result = { name: string; lang: string; source: string };
 // The page hides these peers; the fixture keeps one so the test proves it.
 const HIDDEN = ['js', 'python'];
+// The fixture's fasta has only a toy row, so it gets no chart.
+const names = [...new Set(run.results.filter((r: Result) => r.lang !== 'toy' && !HIDDEN.includes(r.lang)).map((r: Result) => r.name))] as string[];
 const results = (name: string) => run.results.filter((r: Result) => r.name === name && !HIDDEN.includes(r.lang)) as Result[];
 const langs = (name: string) => results(name).map((r) => r.lang);
 
@@ -60,6 +61,18 @@ test('every benchmark gets one bar chart with a bar per language and source link
 			await expect(chart.locator('.sources a', { hasText: r.lang })).toHaveAttribute('href', `https://github.com/paullj/toy/blob/main/${r.source}`);
 		}
 	}
+});
+
+test('a benchmark without peer programs gets no chart and is listed by name', async ({ page }) => {
+	await expect(page.locator('figure[data-peer="fasta"]')).toHaveCount(0);
+	// n_body has a history but no peer row; fasta has only a toy row and no history.
+	const missing = page.getByTestId('peers-missing');
+	await expect(missing).toHaveText('No peer programs yet for n_body.');
+	const below = await page.evaluate(() => {
+		const last = [...document.querySelectorAll('figure[data-peer]')].at(-1)!;
+		return !!(last.compareDocumentPosition(document.querySelector('[data-testid="peers-missing"]')!) & Node.DOCUMENT_POSITION_FOLLOWING);
+	});
+	expect(below).toBe(true);
 });
 
 test('wall time is the default; peak memory and the log scale redraw the charts', async ({ page }) => {

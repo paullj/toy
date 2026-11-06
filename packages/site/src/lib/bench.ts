@@ -218,12 +218,14 @@ export function parsePeers(text: string): PeerRun {
 // Interpreted and JIT runtimes sit too far from the compiled peers to say much here.
 export const HIDDEN_PEERS = ['js', 'python'];
 
+/** Also drops the toy row of a benchmark left with no peer: a lone bar compares nothing. */
 export function withoutHiddenPeers(run: PeerRun): PeerRun {
 	const shown = (lang: string) => !HIDDEN_PEERS.includes(lang);
+	const peered = new Set(run.results.filter((r) => r.lang !== 'toy' && shown(r.lang)).map((r) => r.name));
 	return {
 		...run,
 		toolchains: Object.fromEntries(Object.entries(run.toolchains).filter(([lang]) => shown(lang))),
-		results: run.results.filter((r) => shown(r.lang))
+		results: run.results.filter((r) => shown(r.lang) && peered.has(r.name))
 	};
 }
 
@@ -280,6 +282,13 @@ export function peerCharts(run: PeerRun, metric: MetricKey): { name: string; bar
 			}))
 		};
 	});
+}
+
+export function unpeered(records: BenchRecord[], charts: { name: string }[]): string[] {
+	const charted = new Set(charts.map((c) => c.name));
+	return benchmarks(records)
+		.filter((b) => b.kind === 'runtime' && !charted.has(b.name))
+		.map((b) => b.name);
 }
 
 const BETTER: Record<MetricKey, string> = {

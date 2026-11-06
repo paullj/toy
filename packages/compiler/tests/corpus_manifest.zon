@@ -5,5 +5,5 @@
     .{ .path = "tests/corpora/regression", .mode = .expect, .unit = .single_file, .count = 11 },
     .{ .path = "tests/corpora/opt", .mode = .expect, .unit = .single_file, .count = 12 },
     .{ .path = "bench/compiler/medium", .mode = .expect, .unit = .module_dir, .count = 1 },
-    .{ .path = "bench/runtime", .mode = .expect, .unit = .single_file, .count = 5 },
+    .{ .path = "bench/runtime", .mode = .expect, .unit = .single_file, .count = 21 },
 }

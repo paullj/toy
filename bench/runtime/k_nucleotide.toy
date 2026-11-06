@@ -1,0 +1,88 @@
+# The Benchmarks Game k-nucleotide: count every k-length run of the Homo sapiens
+# section that fasta (n = 200000) writes, in a hash table per k, then sort the 1- and
+# 2-mers by count, and look up the counts of GGT, GGTA, GGTATT, GGTATTTTAATT and
+# GGTATTTTAATTTATAGT. The sequence is made in-process rather than read from stdin, and a
+# k-mer key packs its letters 2 bits each into an int, as many published programs do,
+# since str has no slicing (#249). Prints the five counts and a hash of the sorted tables.
+# expect: stdout "11765 3572 380 7 7 6020359792898973761\n"
+# Hash tables that grow over a live 1,000,000-element sequence: collecting on each allocation is far too slow.
+# gc-stress: skip
+
+import std/vec
+import std/map
+import std/io
+
+struct Rng { last: int }
+
+impl Rng {
+    fn next(mut self, max: float) -> float {
+        self.last = (self.last * 3877 + 29573) % 139968
+        l: float = self.last.into()
+        return max *. l /. 139968.0
+    }
+}
+
+struct Count { key: int, n: int }
+
+# fasta's Homo sapiens section, a c g t as 0 1 2 3: its generator draws 3n numbers for
+# the IUB section first, so this one starts from the state they leave.
+fn homo_sapiens(n: int) -> Vec[int] {
+    rng := Rng { last: 42 }
+    for _i in 0..3 * n { rng.next(1.0) }
+    probs := [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+    cum: Vec[float] = []
+    acc := 0.0
+    for p in probs {
+        acc +.= p
+        cum.push(acc)
+    }
+    seq: Vec[int] = []
+    for _i in 0..5 * n {
+        x := rng.next(1.0)
+        k := 0
+        while k < 3 && x >=. cum[k] { k += 1 }
+        seq.push(k)
+    }
+    return seq
+}
+
+fn frequencies(seq: Vec[int], k: int) -> Map[int, int] {
+    counts := Map[int, int].new()
+    mask := (1 << (2 * k)) - 1
+    key := 0
+    for i in 0..seq.len() {
+        key = ((key << 2) | seq[i]) & mask
+        if i >= k - 1 { counts.set(key, counts.get(key).or(0) + 1) }
+    }
+    return counts
+}
+
+fn encode(s: str) -> int {
+    key := 0
+    for i in 0..s.len() {
+        b: int = s.byte_at(i).into()
+        c := if b == 65 { 0 } else if b == 67 { 1 } else if b == 71 { 2 } else { 3 }
+        key = (key << 2) | c
+    }
+    return key
+}
+
+fn sorted_hash(h: int, seq: Vec[int], k: int) -> int {
+    rows: Vec[Count] = []
+    for key, n in frequencies(seq, k) { rows.push(Count { key: key, n: n }) }
+    rows.sort_by(fn(a, b) { a.n > b.n || (a.n == b.n && a.key < b.key) })
+    out := h
+    for r in rows { out = (out *% 31 +% r.key) *% 31 +% r.n }
+    return out
+}
+
+fn main() {
+    seq := homo_sapiens(200000)
+    h := sorted_hash(sorted_hash(0, seq, 1), seq, 2)
+    line := ""
+    for s in ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"] {
+        n := frequencies(seq, s.len()).get(encode(s)).or(0)
+        line = line.concat(n.to_string()).concat(" ")
+    }
+    io.println(line.concat(h.to_string()))
+}

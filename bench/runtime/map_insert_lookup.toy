@@ -1,0 +1,21 @@
+# Map insert and lookup: int keys spread by a multiplier, inserted, then looked up
+# both hit and miss.
+# expect: stdout "1200018000000\n"
+# Millions of inserts into a growing map: collecting on each allocation is far too slow.
+# gc-stress: skip
+
+import std/map
+import std/io
+
+fn main() {
+    total := 0
+    for round in 0..60 {
+        m := Map[int, int].new()
+        for i in 0..200000 { m.set(i * 7919 + round, i) }
+        for i in 0..400000 {
+            total += m.get(i * 7919 + round).or(1)
+        }
+        total += m.len()
+    }
+    io.println(total)
+}

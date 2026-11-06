@@ -27,8 +27,9 @@ min..max, user/sys time and peak memory, with the change of instructions, wall t
 peak memory against the latest `main` record of the same machine in `bench/history.jsonl`
 (see History).
 
-A full run takes under a minute today. Close other heavy programs first; the numbers
-are only comparable between runs on the same machine.
+A full run takes about 70 s once the ReleaseFast toy is built, and 2 to 3 minutes with
+that build. Close other heavy programs first; the numbers are only comparable between
+runs on the same machine.
 
 ## Layout
 
@@ -49,11 +50,26 @@ are only comparable between runs on the same machine.
 | `peers/` | peer programs, `peers/<lang>/<name>.<ext>`, their runner and toolchain pins |
 | `results/peers.json` | the last committed peer run |
 
+## The runtime set
+
+| Group | Benchmarks |
+|---|---|
+| first set | `loops` (calls and a tight loop), `binary_trees` (a small binary-trees with `Vec` children), `alloc` (the #75 program at 1M iterations), `closures` (closures, a bound method and a map/filter/fold chain together), `strings` (`str` and a `Map` word count together) |
+| Benchmarks Game | `binary_trees_spec`, `fannkuch_redux`, `n_body`, `spectral_norm`, `mandelbrot`, `fasta`, `k_nucleotide` |
+| micro | `closure_calls`, `bound_method_loop` (the #40 loop), `map_filter`, `str_concat`, `str_split_join`, `vec_push_index`, `map_insert_lookup`, `set_insert_lookup`, `deep_recursion` |
+
+The Benchmarks Game programs follow the published algorithms of the simple, single-threaded
+entries, without SIMD, at a smaller input. Each prints one checksum line rather than the
+published output: the bench runner and the corpus compare one line. Where a program
+departs from the published one, the comment at its top says how and why: `mandelbrot`
+and `fasta` hash the bytes they would write, `k_nucleotide` makes its input in-process
+and keys its tables by an int that packs the k-mer, since `str` has no slicing (#249).
+
 ## Add a benchmark
 
 A runtime benchmark:
 
-1. Write `runtime/<name>.toy`. It takes no input, runs about 0.5 to 1 s at `--release`,
+1. Write `runtime/<name>.toy`. It takes no input, runs about 0.4 to 0.9 s at `--release`,
    and prints one checksum line that depends on all the work, so no pass can delete it.
    Give it a `# expect: stdout "<checksum>\n"` line so the corpus checks it in CI.
 2. Add `{ "name": "<name>", "kind": "runtime", "source": "runtime/<name>.toy" }` to
@@ -113,6 +129,8 @@ chart per benchmark, and hides that view when the file is absent.
 
 To add a peer, write `peers/<lang>/<name>.<ext>` for a runtime benchmark `<name>`. A
 benchmark with no peer in a language, where a peer would mean nothing, is skipped for it.
+A benchmark with no peer in any language is skipped whole, and the site lists it by name
+under the peer view, with no chart.
 
 ## History
 

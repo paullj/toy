@@ -1,0 +1,48 @@
+# The Benchmarks Game mandelbrot: the n x n bitmap of the Mandelbrot set over
+# [-1.5, 0.5] x [-1, 1], 50 iterations and escape radius 2, packed 8 pixels to a byte as
+# in its PBM output. Prints a hash of the bitmap bytes for n = 2800, not the bitmap.
+# expect: stdout "-2515542443043534267\n"
+
+import std/io
+
+fn main() {
+    n := 2800
+    size: float = n.into()
+    h := 0
+    byte_acc := 0
+    bit_num := 0
+    for y in 0..n {
+        fy: float = y.into()
+        ci := 2.0 *. fy /. size -. 1.0
+        for x in 0..n {
+            fx: float = x.into()
+            cr := 2.0 *. fx /. size -. 1.5
+            zr := 0.0
+            zi := 0.0
+            tr := 0.0
+            ti := 0.0
+            i := 0
+            while i < 50 && tr +. ti <=. 4.0 {
+                zi = 2.0 *. zr *. zi +. ci
+                zr = tr -. ti +. cr
+                tr = zr *. zr
+                ti = zi *. zi
+                i += 1
+            }
+            byte_acc = byte_acc << 1
+            if tr +. ti <=. 4.0 { byte_acc = byte_acc | 1 }
+            bit_num += 1
+            if bit_num == 8 {
+                h = h *% 31 +% byte_acc
+                byte_acc = 0
+                bit_num = 0
+            } else if x == n - 1 {
+                byte_acc = byte_acc << (8 - n % 8)
+                h = h *% 31 +% byte_acc
+                byte_acc = 0
+                bit_num = 0
+            }
+        }
+    }
+    io.println(h)
+}

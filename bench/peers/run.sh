@@ -4,9 +4,10 @@
 #   usage: bench/peers/run.sh [--runs N] [FILTER]
 # FILTER is a regex matched against "<benchmark>/<lang>", e.g. "loops" or "/rust".
 # Wall time comes from hyperfine (N timed runs after one warmup), instructions, cycles
-# and peak memory from one `/usr/bin/time -l` run, the same as bench/run.sh. A full run
-# with every checksum right writes bench/results/peers.json; otherwise the results go to
-# a temp file. A checksum mismatch fails the run.
+# and peak memory from one `/usr/bin/time -l` run, the same as bench/run.sh. A benchmark
+# with no peer program is skipped. A full run with every checksum right writes
+# bench/results/peers.json; otherwise the results go to a temp file. A checksum mismatch
+# fails the run.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +20,7 @@ filter=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -r|--runs) runs="${2:?--runs needs a count}"; shift 2 ;;
-    -h|--help) sed -n '2,9s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) filter="$1"; shift ;;
   esac
 done
@@ -86,6 +87,15 @@ while IFS= read -r b; do
   toy_src="$bench/$(jq -r .source <<<"$b")"
   checksum="$(expected_checksum "$toy_src")"
   [ -n "$checksum" ] || { echo "  $name: no '# expect: stdout' checksum line"; exit 2; }
+  # Toy alone compares nothing; the site draws no chart for it.
+  has_peer=false
+  for lang in "${langs[@]:1}"; do
+    if [ -f "$(peer_src "$lang" "$name")" ]; then has_peer=true; fi
+  done
+  if ! $has_peer; then
+    echo "  $name: no peers"
+    continue
+  fi
   for lang in "${langs[@]}"; do
     if [ -n "$filter" ] && ! [[ "$name/$lang" =~ $filter ]]; then continue; fi
     if [ "$lang" != toy ] && [ ! -f "$(peer_src "$lang" "$name")" ]; then

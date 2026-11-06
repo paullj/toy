@@ -1,0 +1,104 @@
+# The Benchmarks Game fasta: three DNA sequences in 60-column FASTA, the ALU repeat
+# (2n bytes), then IUB codes (3n) and Homo sapiens frequencies (5n) picked by the
+# linear congruential generator from cumulative probabilities. Prints a hash of every
+# byte of that output for n = 4000000, headers and newlines included, not the output.
+# expect: stdout "3466501030127733449\n"
+
+import std/vec
+import std/str
+import std/io
+
+struct Rng { last: int }
+
+impl Rng {
+    fn next(mut self, max: float) -> float {
+        self.last = (self.last * 3877 + 29573) % 139968
+        l: float = self.last.into()
+        return max *. l /. 139968.0
+    }
+}
+
+struct Out { h: int, col: int }
+
+impl Out {
+    fn byte(mut self, b: int) { self.h = self.h *% 31 +% b }
+    fn line(mut self, s: str) {
+        for i in 0..s.len() { self.byte(s.byte_at(i).into()) }
+        self.byte(10)
+    }
+    # Wraps at 60 columns as the published program's lines do.
+    fn seq(mut self, b: int) {
+        self.byte(b)
+        self.col += 1
+        if self.col == 60 {
+            self.byte(10)
+            self.col = 0
+        }
+    }
+    fn end(mut self) {
+        if self.col > 0 { self.byte(10) }
+        self.col = 0
+    }
+}
+
+fn repeat_fasta(mut o: Out, header: str, s: str, n: int) {
+    o.line(header)
+    len := s.len()
+    pos := 0
+    for _i in 0..n {
+        o.seq(s.byte_at(pos).into())
+        pos += 1
+        if pos == len { pos = 0 }
+    }
+    o.end()
+}
+
+fn codes(s: str) -> Vec[int] {
+    v: Vec[int] = []
+    for i in 0..s.len() { v.push(s.byte_at(i).into()) }
+    return v
+}
+
+fn cumulative(probs: Vec[float]) -> Vec[float] {
+    acc := 0.0
+    out: Vec[float] = []
+    for p in probs {
+        acc +.= p
+        out.push(acc)
+    }
+    return out
+}
+
+fn random_fasta(mut o: Out, mut r: Rng, header: str, chars: Vec[int], probs: Vec[float], n: int) {
+    o.line(header)
+    cum := cumulative(probs)
+    last := cum.len() - 1
+    for _i in 0..n {
+        x := r.next(1.0)
+        k := 0
+        while k < last && x >=. cum[k] { k += 1 }
+        o.seq(chars[k])
+    }
+    o.end()
+}
+
+fn main() {
+    n := 4000000
+    alu := "".join([
+        "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG",
+        "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA",
+        "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT",
+        "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA",
+        "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG",
+        "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC",
+        "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA",
+    ])
+    iub_probs := [0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+    homo_probs := [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+    rng := Rng { last: 42 }
+    o := Out { h: 0, col: 0 }
+    repeat_fasta(o, ">ONE Homo sapiens alu", alu, 2 * n)
+    random_fasta(o, rng, ">TWO IUB ambiguity codes", codes("acgtBDHKMNRSVWY"), iub_probs, 3 * n)
+    random_fasta(o, rng, ">THREE Homo sapiens frequency", codes("acgt"), homo_probs, 5 * n)
+    io.println(o.h)
+}

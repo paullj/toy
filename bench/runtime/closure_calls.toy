@@ -1,0 +1,22 @@
+# Closures made and called: each iteration makes an adder that captures a number and,
+# through twice, a lambda that captures the adder, and calls both through fn params.
+# expect: stdout "959463629\n"
+# Tens of millions of closure envs: collecting on each one is far too slow.
+# gc-stress: skip
+
+import std/io
+
+fn make_adder(n: int) -> fn(int) -> int { fn(x) { x + n } }
+
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+
+fn twice(f: fn(int) -> int) -> fn(int) -> int { fn(x) { f(f(x)) } }
+
+fn main() {
+    total := 0
+    for i in 0..36000000 {
+        add := make_adder(i % 1000)
+        total = (total + apply(add, i) + apply(twice(add), 1)) % 1000000007
+    }
+    io.println(total)
+}
