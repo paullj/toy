@@ -2,9 +2,10 @@
 	import { resolve } from '$app/paths';
 	import { useEventListener } from 'runed';
 	import CheckOutput from '$lib/components/CheckOutput.svelte';
+	import Code from '$lib/components/Code.svelte';
 	import ExampleTabs from '$lib/components/ExampleTabs.svelte';
 	import Install from '$lib/components/Install.svelte';
-	import SpeedBars from '$lib/components/SpeedBars.svelte';
+	import Performance from '$lib/components/Performance.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import icon from '$lib/images/icon.webp';
 	import squid from '$lib/images/squid-07-standing.webp';
@@ -64,18 +65,59 @@ impl Square has Area {
 }`
 		},
 		{
-			title: 'No null',
-			blurb: '<code class="code">Option[T]</code> and <code class="code">Result[T, E]</code> are ordinary enums. The postfix <code class="code">?</code> unwraps a value or returns early on the empty case.',
+			title: 'Option',
+			blurb: 'There is no null. <code class="code">Option[T]</code> is an ordinary enum, and the postfix <code class="code">?</code> returns early on the empty case.',
 			file: 'total.toy',
 			code: `pub fn total(a: Option[int], b: Option[int]) -> Option[int] {
     x := a?
     y := b?
     Option.some(x + y)
 }`
+		},
+		{
+			title: 'Result',
+			blurb: 'Errors are values. <code class="code">Result[T, E]</code> holds a value or an error, and <code class="code">?</code> passes the error up to the caller.',
+			file: 'digits.toy',
+			code: `enum DigitError { negative, too_big }
+
+pub fn digit(n: int) -> Result[int, DigitError] {
+    if n < 0 { return Result.err(DigitError.negative) }
+    if n > 9 { return Result.err(DigitError.too_big) }
+    Result.ok(n)
+}
+
+pub fn pair(a: int, b: int) -> Result[int, DigitError] {
+    tens := digit(a)?          # returns the error early
+    ones := digit(b)?
+    Result.ok(tens * 10 + ones)
+}`
 		}
 	];
 
 	const flowExamples = [
+		{
+			title: 'Loops',
+			blurb: '<code class="code">for</code> walks a range or anything with an iterator. <code class="code">loop</code> is an expression, and a labeled <code class="code">break</code> can leave nested loops with a value.',
+			file: 'loops.toy',
+			code: `import std/vec
+
+fn main() -> int {
+    total := 0
+    for i in 1..5 {            # 1, 2, 3, 4
+        total += i
+    }
+    for x in [4, 5, 6] {
+        total += x
+    }
+    # loop is an expression: break hands it a value
+    first := @outer loop {
+        for j in 0..10 {
+            if j * j > total { break @outer j }
+        }
+    }
+    return first
+}`
+		},
 		{
 			title: 'Pattern matching',
 			blurb: 'Enums hold one of several variants. <code class="code">match</code> destructures them, checked for exhaustiveness at compile time.',
@@ -105,27 +147,38 @@ fn main() -> int {
 		},
 		{
 			title: 'Closures',
-			blurb: 'A lambda <code class="code">fn(x) { .. }</code> captures the variables it names by reference. <code class="code">add(10, _)</code> is short for a lambda, <code class="code">|> .m()</code> pipes into a method, and a <code class="code">mut</code> parameter writes to the caller\'s variable.',
+			blurb: 'A lambda captures the variables it names by reference. <code class="code">add(10, _)</code> is short for a lambda, and a <code class="code">mut</code> parameter writes to the caller\'s variable.',
 			file: 'closures.toy',
-			code: `import std/vec
-
-fn add(a: int, b: int) -> int { a + b }
+			code: `fn add(a: int, b: int) -> int { a + b }
 fn bump(mut n: int) { n += 1 }
+fn twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
 
 fn main() -> int {
     count := 0
-    total := [5, 1, 4, 2, 3]
-        |> .filter(fn(x) { x > 2 })
-        |> .map(add(10, _))    # fn(x) { add(10, x) }
-        |> .fold(0, fn(sum, x) {
-            count += 1         # shared with main, not a copy
-            sum + x
-        })
-    bump(count)                # count is now 4
+    tick := fn(x: int) -> int {
+        count += 1             # shared with main, not a copy
+        x + count
+    }
+    add10 := add(10, _)        # fn(x) { add(10, x) }
+    total := twice(tick, 0) + add10(5)
+    bump(count)                # count is now 3
     return total + count
 }`
 		}
 	];
+
+	const triangle = `enum Shape { Circle(int), Square(int), Triangle(int, int) }
+
+fn area(shape: Shape) -> int {
+    match shape {
+        .Circle(r) -> 3 * r * r,
+        .Square(side) -> side * side,
+    }
+}
+
+fn main() -> int {
+    area(Shape.Square(4))
+}`;
 
 	const callouts = [
 		{ href: resolve('/tour/'), kind: 'Tour', label: 'Take the tour →' },
@@ -218,11 +271,11 @@ fn main() -> int {
 							class="-mt-[2.1em] h-[4.2em] w-auto shrink-0 translate-y-[0.22em] select-none"
 						/>
 					</h1>
-					<p class="mt-5 max-w-[48ch] text-base leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-5 text-base leading-snug" style="color: var(--fg-muted)">
 						toy is a general purpose language which is statically typed, compiled, and garbage
 						collected.
 					</p>
-					<p class="mt-4 max-w-[48ch] text-base leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-4 text-base leading-snug" style="color: var(--fg-muted)">
 						It aims to be ergonomic and performant but the main goal is for me to learn about language
 						design and compiler development.
 					</p>
@@ -238,9 +291,18 @@ fn main() -> int {
 					<h2 class="text-2xl">
 						<a href="#features" class="transition-colors hover:text-[var(--accent)]">Features</a>
 					</h2>
-					<h3 id="types" class="mt-8 scroll-mt-8 text-lg">Types</h3>
+					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
+						A short look at the language. Every example is a live editor, so you can change it and see the result of the checks.
+					</p>
+					<h3 id="types" class="mt-10 scroll-mt-8 text-lg">Types</h3>
+					<p class="mt-1.5 text-sm leading-snug" style="color: var(--fg-muted)">
+						toy is statically typed, and most types are inferred.
+					</p>
 					<ExampleTabs examples={typeExamples} />
 					<h3 id="control-flow" class="mt-14 scroll-mt-8 text-lg">Control flow</h3>
+					<p class="mt-1.5 text-sm leading-snug" style="color: var(--fg-muted)">
+						Branches, loops and ways to pass values and functions around.
+					</p>
 					<ExampleTabs examples={flowExamples} />
 				</div>
 			</section>
@@ -253,13 +315,16 @@ fn main() -> int {
 					<h2 class="text-2xl">
 						<a href="#tooling" class="transition-colors hover:text-[var(--accent)]">Tooling</a>
 					</h2>
-					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						Each error has a code that <code class="code">toy explain</code> documents. This is the error for a <code class="code">Triangle</code> added to <code class="code">Shape</code> without a match arm:
+					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
+						Each error has a code that <code class="code">toy explain</code> documents. Here a <code class="code">Triangle</code> is added to <code class="code">Shape</code> without a match arm. The editor marks the error as you type, and <code class="code">toy check</code> reports the same error:
 					</p>
+					<div class="mt-2">
+						<Code code={triangle} filename="triangle.toy" />
+					</div>
 					<div class="mt-2">
 						<CheckOutput />
 					</div>
-					<p class="mt-5 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-5 text-sm leading-snug" style="color: var(--fg-muted)">
 						The compiler also runs as a language server, with hover, completion, go to definition and
 						inlay hints. The examples on this page are live editors that use it: hover a name to see its
 						type.
@@ -279,10 +344,10 @@ fn main() -> int {
 					<h2 class="text-2xl">
 						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Performance</a>
 					</h2>
-					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						toy compiles to native machine code with its own backend, linker and code signer.
+					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
+						toy compiles to native machine code with its own backend, linker and code signer. The compiler is incremental: a rebuild only compiles the functions that changed.
 					</p>
-					<SpeedBars />
+					<Performance />
 					<p class="mt-5 text-sm">
 						<a href={resolve('/benchmarks/')} class="link">See every benchmark, commit by commit →</a>
 					</p>
@@ -298,7 +363,7 @@ fn main() -> int {
 					<h2 class="text-2xl">
 						<a href="#learn" class="transition-colors hover:text-[var(--accent)]">Learn</a>
 					</h2>
-					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
+					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
 						Ready to go deeper? Walk the language tour, browse the reference, or read the source.
 					</p>
 

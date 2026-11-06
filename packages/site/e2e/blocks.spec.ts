@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const BLOCKS = ['order.toy', 'shapes.toy', 'pair.toy', 'area.toy', 'pipeline.toy', 'closures.toy', 'total.toy'];
+const BLOCKS = ['order.toy', 'shapes.toy', 'pair.toy', 'area.toy', 'loops.toy', 'pipeline.toy', 'closures.toy', 'total.toy', 'digits.toy'];
 
 function block(page: Page, file: string) {
 	return page.locator('figure', { has: page.locator('figcaption', { hasText: file }) });
@@ -62,6 +62,13 @@ test('every example becomes an editor and checks clean', async ({ page }) => {
 		await expect(b.locator('.cm-editor[data-checked]')).toBeVisible();
 		await expect(b.locator('.cm-lintRange, .cm-lintPoint')).toHaveCount(0);
 	}
+});
+
+test('the tooling example marks its missing match arm', async ({ page }) => {
+	// `.first()`: the `toy check triangle.toy` output below it names the same file.
+	const b = block(page, 'triangle.toy').first();
+	await b.scrollIntoViewIfNeeded();
+	await expect(b.locator('.cm-lintRange-error')).toHaveText('match shape');
 });
 
 test('hovering a binding shows its inferred type', async ({ page }) => {
@@ -138,8 +145,8 @@ test('hover tells how a closure holds a name, what a _ makes, and who mutates an
 	const tip = page.locator('.cm-lsp-hover-tooltip');
 	const cases = [
 		{ line: 'count += 1', word: 'count', note: 'captured: shared' },
-		{ line: '.map(add(10, _))', word: '_', note: 'capture: fn(int) -> int' },
-		{ line: '# count is now 4', word: 'count', note: 'mutated by bump' }
+		{ line: 'add10 := add(10, _)', word: '_', note: 'capture: fn(int) -> int' },
+		{ line: '# count is now 3', word: 'count', note: 'mutated by bump' }
 	];
 	for (const c of cases) {
 		// Off the editor first: a pointer that lands on the last tooltip keeps it open.
@@ -155,7 +162,7 @@ test('inlay hints show what a closure captures and which argument a call mutates
 	// Lines are matched on text the hints do not split: a line's text includes its hints.
 	// `like` is a line without hints.
 	const cases = [
-		{ line: '.fold(0,', like: '.filter(', label: 'captures count (shared)', tooltip: 'count: shared', before: 'fn(sum, x) ', after: '{' },
+		{ line: 'tick := fn(', like: 'add10 :=', label: 'captures count (shared)', tooltip: 'count: shared', before: '-> int ', after: '{' },
 		{ line: /^\s*bump\(/, like: 'count += 1', label: 'mut', tooltip: 'mutated by bump', before: '    bump(', after: 'count)' }
 	];
 	const height = (text: string | RegExp) =>
@@ -189,7 +196,7 @@ test('inlay hints show what a closure captures and which argument a call mutates
 	await page.keyboard.press('ControlOrMeta+a');
 	await page.keyboard.press('ControlOrMeta+c');
 	const text: string = await page.evaluate(() => (window as any).copied);
-	expect(text).toContain('|> .fold(0, fn(sum, x) {\n');
+	expect(text).toContain('tick := fn(x: int) -> int {\n');
 	expect(text).toContain('\n    bump(count) ');
 	expect(text).not.toContain('captures');
 });
