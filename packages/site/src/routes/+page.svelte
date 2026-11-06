@@ -308,7 +308,7 @@ fn main() -> int {
 						<a href="#features" class="transition-colors hover:text-[var(--accent)]">Features</a>
 					</h2>
 					<p class="mt-3 text-sm leading-snug" style="color: var(--fg-muted)">
-						A short look at the language. Every example is a live editor, so you can change it and see the result of the checks.
+						A short look at the language, from its type system to how code branches and loops.
 					</p>
 					<h3 id="types" class="mt-10 scroll-mt-8 text-lg">Types</h3>
 					<p class="mt-1.5 text-sm leading-snug" style="color: var(--fg-muted)">
