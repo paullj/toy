@@ -60,9 +60,10 @@ const pre_emit: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "output", .short = 'o', .value = .string, .value_name = "PATH", .help = "Output path for the built binary (default: .toy/<stamp>/<profile>/<name>)" },
     target_opt,
 } ++ roots_opts ++ link_opts;
+// -j: N>=1; the parser rejects -j0/negatives as a bad value via the Range.
+const jobs_opt: Spec.Option = .{ .short = 'j', .value = .{ .int = .{ .min = 1, .max = null } }, .value_name = "N", .help = "Worker threads (N>=1; -j1 = serial; default the cpu count)" };
 const post_emit: []const Spec.Option = &[_]Spec.Option{
-    // -j: N>=1; the parser rejects -j0/negatives as a bad value via the Range.
-    .{ .short = 'j', .value = .{ .int = .{ .min = 1, .max = null } }, .value_name = "N", .help = "Build worker threads (N>=1; -j1 = serial; default cpu-based)" },
+    jobs_opt,
     .{ .long = "release", .action = .set_true, .conflicts = &.{"profile"}, .help = "Build with the release profile (same as --profile release)" },
     .{ .long = "profile", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Name) }, .value_name = "NAME", .help = "Build profile: debug runs no IR passes, release runs them all (default debug)" },
     // -O is short-only => Parsed field `O`; -O0 / -O1 / -O 1 all parse, -O2 rejected.
@@ -110,7 +111,7 @@ const files_pos: []const Spec.Positional = &.{
 /// severity overrides; `--deny-warnings` promotes any surviving warning to an error
 /// for the exit gate; `--exit-zero` forces a 0 exit even with errors (editors that read
 /// the stream, not the status); `--watch` is a forward-compatible no-op stub; `--color`,
-/// `--target` and `--timings` mirror the shared spellings.
+/// `--target`, `-j` and `--timings` mirror the shared spellings.
 const check_opts: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "format", .value = .{ .@"enum" = &.{ "human", "ndjson" } }, .value_name = "FORM", .help = "Diagnostic output form (human snippets or line-delimited JSON; default human)" },
 } ++ sev_opts ++ &[_]Spec.Option{
@@ -118,6 +119,7 @@ const check_opts: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "watch", .action = .set_true, .help = "Re-check on file changes (not yet implemented; accepted as a no-op)" },
     .{ .long = "color", .value = .{ .@"enum" = &.{ "auto", "always", "never" } }, .value_name = "WHEN", .help = "Colorize output (default auto: on when stdout is a tty)" },
     target_opt,
+    jobs_opt,
     .{ .long = "timings", .action = .set_true, .help = "Print the per-stage wall-clock profile" },
 } ++ roots_opts ++ link_opts ++ dev_core_opt;
 

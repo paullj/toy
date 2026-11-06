@@ -104,8 +104,9 @@ pub const Key = struct {
 /// discover actually touched (it is NOT carried forward blindly): a file dropped from
 /// the graph drops out of the manifest, and a re-read file overwrites its entry.
 /// A lock-free atomic-bool spinlock: 0.16's `std.Io.Mutex` needs an `Io` to block, but
-/// the critical sections it guards are tiny (an appendSlice, a hashmap upsert), so a
-/// spinlock keeps its users Io-free and safe under the parallel codegen fan-out.
+/// the critical sections it guards are tiny (an arena copy of one frame, a hashmap
+/// upsert), so a spinlock keeps its users Io-free and safe under the parallel codegen
+/// fan-out.
 pub const SpinLock = struct {
     state: std.atomic.Value(bool) = .init(false),
 
@@ -133,11 +134,9 @@ pub const Pack = struct {
     const hdr_len = 5 * @sizeOf(u64);
     const rec_len = 3 * @sizeOf(u64); // [digest][offset][len]
 
-    /// A staged blob's location in `blobs`. Offsets are realloc-stable (unlike a
-    /// slice into `blobs`), so the index maps digest -> rec_index and `lookup`
-    /// reconstructs the slice from `blobs.items[off..off+len]`. This sidesteps the
-    /// dangling-slice hazard of caching slices into a growing buffer.
-    const Rec = struct { digest: u64, off: usize, len: usize };
+    /// A staged frame. `frame` points into `frames`, whose chunks never move, so a
+    /// slice `lookup` hands out stays valid while other threads keep appending.
+    const Rec = struct { digest: u64, frame: []const u8 };
 
     /// One warm-discover manifest record: the last build's snapshot of a module file.
     /// `path` is the file's CANONICAL path (the same physical-identity key discover
@@ -194,11 +193,15 @@ pub const Pack = struct {
     };
 
     gpa: std.mem.Allocator,
-    /// Concatenated `[checksum][payload]` frames: prior entries carried forward by
-    /// `load`, then fresh entries staged by `put`. Written verbatim as the pack's
-    /// blob region by `flush`. Owned; freed in `deinit`.
-    blobs: std.ArrayListUnmanaged(u8) = .empty,
-    /// Parallel record of each frame's (digest, off, len) in `blobs`. Owned.
+    /// The `[checksum][payload]` frames: prior entries carried forward by `load`, then
+    /// fresh entries staged by `put`. An arena rather than one growing buffer: a buffer
+    /// that reallocs frees the bytes a concurrent `get` is still copying, and copies the
+    /// whole store under the lock while every other codegen worker spins. Only used
+    /// under the lock (an arena is not thread-safe).
+    frames: std.heap.ArenaAllocator.State = .{},
+    /// The total length of the staged frames, the capacity `flush` reserves.
+    frames_len: usize = 0,
+    /// Each frame's (digest, frame). Owned.
     recs: std.ArrayListUnmanaged(Rec) = .empty,
     /// digest -> index into `recs` (last writer wins on a duplicate digest, which is
     /// safe: same digest => same content => same bytes). Owned.
@@ -214,7 +217,7 @@ pub const Pack = struct {
     /// Owns its keys; guarded by `lock` (discover is serial today, but the lock keeps
     /// it safe if a future change parallelizes load).
     manifest_cur: std.StringHashMapUnmanaged(ManifestEntry) = .{},
-    /// Guards `blobs`/`recs`/`index` against the codegen fan-out's concurrent `put`s.
+    /// Guards `frames`/`recs`/`index` against the codegen fan-out's concurrent `put`s.
     spin: SpinLock = .{},
 
     pub fn init(gpa: std.mem.Allocator) Pack {
@@ -230,7 +233,7 @@ pub const Pack = struct {
     }
 
     pub fn deinit(self: *Pack) void {
-        self.blobs.deinit(self.gpa);
+        self.frames.promote(self.gpa).deinit();
         self.recs.deinit(self.gpa);
         self.index.deinit(self.gpa);
         freeManifest(self.gpa, &self.manifest_prev);
@@ -251,7 +254,7 @@ pub const Pack = struct {
     /// Bulk-read the pack for `dir` into the in-memory store. A missing/short/bad
     /// pack leaves the store empty (a clean cold build), NEVER an error: a torn or
     /// foreign pack must degrade to a full rebuild, not a hard failure or false hit.
-    /// Prior entries are copied into `blobs` so `flush` carries them forward (matching
+    /// Prior entries are copied into `frames` so `flush` carries them forward (matching
     /// the per-file path, where old entries persisted across builds).
     pub fn load(self: *Pack, gpa: std.mem.Allocator, io: Io, dir: []const u8) void {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -309,7 +312,10 @@ pub const Pack = struct {
         // blob region wipes codegen entries; the manifest (already parsed + checksum-
         // validated above) can stay, since every warm-serve still re-checks the
         // lex/parse cache via `lookup` (which now misses) and falls back to a re-read.
-        self.blobs.clearRetainingCapacity();
+        var arena = self.frames.promote(self.gpa);
+        _ = arena.reset(.retain_capacity);
+        self.frames = arena.state;
+        self.frames_len = 0;
         self.recs.clearRetainingCapacity();
         self.index.clearRetainingCapacity();
     }
@@ -397,38 +403,45 @@ pub const Pack = struct {
     /// Stage an already-framed `[checksum][payload]` slice. NOT thread-locked: `load`
     /// is single-threaded; concurrent `put` callers go through `append` (which locks).
     fn stageLocked(self: *Pack, gpa: std.mem.Allocator, digest: u64, framed: []const u8) !void {
-        const off = self.blobs.items.len;
-        try self.blobs.appendSlice(gpa, framed);
+        const frame = try self.allocFrame(framed.len);
+        @memcpy(frame, framed);
+        try self.record(gpa, digest, frame);
+    }
+
+    fn allocFrame(self: *Pack, len: usize) ![]u8 {
+        var arena = self.frames.promote(self.gpa);
+        defer self.frames = arena.state;
+        return arena.allocator().alloc(u8, len);
+    }
+
+    fn record(self: *Pack, gpa: std.mem.Allocator, digest: u64, frame: []const u8) !void {
         const rec_i = self.recs.items.len;
-        try self.recs.append(gpa, .{ .digest = digest, .off = off, .len = framed.len });
+        try self.recs.append(gpa, .{ .digest = digest, .frame = frame });
         try self.index.put(gpa, digest, rec_i);
+        self.frames_len += frame.len;
     }
 
     /// Memory lookup of an entry's `[checksum][payload]` frame, or null on a miss.
-    /// Mutex-guarded because `put` can grow `blobs`/`recs` concurrently in the fan-out
-    /// (each KEY is written by one job, but distinct keys race the shared buffers).
+    /// Locked because `put` grows `recs`/`index` concurrently in the fan-out; the frame
+    /// itself never moves, so it stays valid after the lock is released.
     fn lookup(self: *Pack, digest: u64) ?[]const u8 {
         self.lock();
         defer self.unlock();
         const rec_i = self.index.get(digest) orelse return null;
-        const r = self.recs.items[rec_i];
-        return self.blobs.items[r.off .. r.off + r.len];
+        return self.recs.items[rec_i].frame;
     }
 
-    /// Stage `[checksum][payload]` for `digest` (mutex-guarded: the codegen fan-out
+    /// Stage `[checksum][payload]` for `digest` (spinlock-guarded: the codegen fan-out
     /// appends from many threads). The payload is COPIED, so the caller may free it.
     fn append(self: *Pack, digest: u64, payload: []const u8) !void {
         var header: [checksum_len]u8 = undefined;
         std.mem.writeInt(u64, &header, std.hash.Wyhash.hash(checksum_seed, payload), .little);
         self.lock();
         defer self.unlock();
-        const off = self.blobs.items.len;
-        try self.blobs.ensureUnusedCapacity(self.gpa, header.len + payload.len);
-        self.blobs.appendSliceAssumeCapacity(&header);
-        self.blobs.appendSliceAssumeCapacity(payload);
-        const rec_i = self.recs.items.len;
-        try self.recs.append(self.gpa, .{ .digest = digest, .off = off, .len = header.len + payload.len });
-        try self.index.put(self.gpa, digest, rec_i);
+        const frame = try self.allocFrame(header.len + payload.len);
+        @memcpy(frame[0..header.len], &header);
+        @memcpy(frame[header.len..], payload);
+        try self.record(self.gpa, digest, frame);
     }
 
     /// Write the merged pack ONCE: header + index + blob region, via a temp file +
@@ -451,7 +464,7 @@ pub const Pack = struct {
         gpa: std.mem.Allocator,
         index: *const std.AutoHashMapUnmanaged(u64, usize),
         recs: []const Rec,
-        blobs: []const u8,
+        frames_len: usize,
         blob_out: *std.ArrayList(u8),
     ) !struct { idx_bytes: []u8, idx_ck: u64 } {
         const n: usize = index.count();
@@ -473,15 +486,15 @@ pub const Pack = struct {
         // Offsets are RELATIVE to this section's blob region (where blob_out currently
         // starts), so each section's index is self-contained and load can split the two.
         const base = blob_out.items.len;
-        try blob_out.ensureUnusedCapacity(gpa, blobs.len);
+        try blob_out.ensureUnusedCapacity(gpa, frames_len);
         var off: usize = 0;
         for (order, 0..) |r, i| {
-            blob_out.appendSliceAssumeCapacity(blobs[r.off..][0..r.len]);
+            blob_out.appendSliceAssumeCapacity(r.frame);
             const rec = idx_bytes[i * rec_len ..][0..rec_len];
             std.mem.writeInt(u64, rec[0..8], r.digest, .little);
             std.mem.writeInt(u64, rec[8..16], @intCast(off), .little);
-            std.mem.writeInt(u64, rec[16..24], @intCast(r.len), .little);
-            off += r.len;
+            std.mem.writeInt(u64, rec[16..24], @intCast(r.frame.len), .little);
+            off += r.frame.len;
         }
         std.debug.assert(blob_out.items.len - base == off);
         return .{ .idx_bytes = idx_bytes, .idx_ck = std.hash.Wyhash.hash(checksum_seed, idx_bytes) };
@@ -528,10 +541,10 @@ pub const Pack = struct {
     }
 
     fn flushLocked(self: *Pack, io: Io, dir: []const u8) !void {
-        var blob_out: std.ArrayList(u8) = try .initCapacity(self.gpa, self.blobs.items.len);
+        var blob_out: std.ArrayList(u8) = try .initCapacity(self.gpa, self.frames_len);
         defer blob_out.deinit(self.gpa);
 
-        const cg = try layoutSection(self.gpa, &self.index, self.recs.items, self.blobs.items, &blob_out);
+        const cg = try layoutSection(self.gpa, &self.index, self.recs.items, self.frames_len, &blob_out);
         defer self.gpa.free(cg.idx_bytes);
 
         const man = try self.layoutManifest();
@@ -663,8 +676,9 @@ pub fn put(c: Cache, comptime T: type, io: Io, key: Key, tmp_tag: usize, items: 
     // under `key.digest()`. No file is written here — the merged pack is flushed
     // ONCE at build end. Each key is written by exactly one job and never read back
     // this build, so a same-build append never needs to be visible to a concurrent
-    // get (the within-build atomicity the temp-file+rename gave is unneeded). The
-    // append is mutex-guarded so the fan-out's workers share one buffer safely.
+    // get (the within-build atomicity the temp-file+rename gave is unneeded). Each
+    // frame is copied into an arena under the spinlock and never moves, so a get still
+    // copying a carried-forward frame is safe while other workers append.
     if (c.pack) |p| {
         try p.append(key.digest(), payload);
         return;
@@ -1175,4 +1189,42 @@ test "Pack: a corrupt manifest FRAMING (bad n_manifest) degrades the whole pack 
         try testing.expect(cache.manifestGet("m.toy") == null); // manifest gone
         try testing.expect((try cache.get(u8, gpa, io, k1)) == null); // codegen ALSO cold — never a false hit
     }
+}
+
+test "Pack: a frame from lookup stays valid while later puts grow the store" {
+    const gpa = std.testing.allocator;
+    var pack = Pack.init(gpa);
+    defer pack.deinit();
+    const first = [_]u8{0x5a} ** 64;
+    try pack.append(1, &first);
+    const frame = pack.lookup(1).?;
+    var big: [4096]u8 = undefined;
+    for (2..600) |d| {
+        @memset(&big, @truncate(d));
+        try pack.append(d, &big);
+    }
+    try std.testing.expectEqualSlices(u8, &first, frame[checksum_len..]);
+}
+
+test "Pack: parallel puts and gets agree" {
+    const gpa = std.testing.allocator;
+    var pack = Pack.init(gpa);
+    defer pack.deinit();
+    const per = 300;
+    const W = struct {
+        fn run(p: *Pack, t: usize) void {
+            var buf: [512]u8 = undefined;
+            for (0..per) |i| {
+                const d = t * per + i + 1;
+                @memset(&buf, @truncate(d));
+                p.append(d, buf[0 .. 16 + i]) catch unreachable;
+                const f = p.lookup(d).?;
+                std.debug.assert(f.len == checksum_len + 16 + i and f[checksum_len] == @as(u8, @truncate(d)));
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, W.run, .{ &pack, t });
+    for (threads) |th| th.join();
+    try std.testing.expectEqual(@as(usize, 8 * per), pack.index.count());
 }

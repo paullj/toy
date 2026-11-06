@@ -5255,7 +5255,6 @@ test "a build-only flag on check is named as one, and each bad flag is reported 
         .{ .argv = &.{ "check", "--no-cache", path }, .line = "error: '--no-cache' is a build option; 'check' does not take it\n" },
         .{ .argv = &.{ "check", "-o", dir_name ++ "/out", path }, .line = "error: '-o' is a build option; 'check' does not take it\n" },
         .{ .argv = &.{ "check", "--output=x", path }, .line = "error: '--output' is a build option; 'check' does not take it\n" },
-        .{ .argv = &.{ "check", "-j4", path }, .line = "error: '-j' is a build option; 'check' does not take it\n" },
         .{ .argv = &.{ "check", "-O1", path }, .line = "Try 'toy --help' for more information.\n" },
         .{ .argv = &.{ "check", "-Z1", path }, .line = "error: unknown flag: -Z1\n" },
         .{ .argv = &.{ "-Z1", path }, .line = "error: unknown flag: -Z1\n" },
@@ -5269,6 +5268,40 @@ test "a build-only flag on check is named as one, and each bad flag is reported 
         try testing.expectEqualStrings("", res.out);
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, res.err, r.line));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, res.err, "error: "));
+    }
+}
+
+test "check takes -j, and every job count reports the same diagnostics (#104)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir_name = ".toy-test-driver-check-jobs";
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    const path = dir_name ++ "/main.toy";
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "struct Box[T] { v: T }\nimpl Box[T] {\n    fn pick[U](self, a: U, _b: U) -> U { a }\n}\n");
+    for (0..200) |k| try src.print(gpa, "fn f{d}(b: Box[int]) -> int {{ b.pick({d}, true) }}\n", .{ k, k });
+    try src.appendSlice(gpa, "fn main() -> int { return 0 }\n");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src.items });
+
+    const base = try spawnToyBoth(gpa, io, &.{ "check", "-j1", path });
+    defer gpa.free(base.out);
+    defer gpa.free(base.err);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, base.term);
+    try testing.expect(std.mem.indexOf(u8, base.out, "200 error(s)") != null);
+    for ([_][]const []const u8{ &.{ "check", "-j4", path }, &.{ "check", "-j16", path }, &.{ "check", path } }) |argv| {
+        const res = try spawnToyBoth(gpa, io, argv);
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        try testing.expectEqual(base.term, res.term);
+        try testing.expectEqualStrings(base.out, res.out);
+        try testing.expectEqualStrings(base.err, res.err);
     }
 }
 
