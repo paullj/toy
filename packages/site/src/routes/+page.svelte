@@ -35,8 +35,12 @@
 			blurb: 'Bind a value with <code class="code">:=</code> and its type is inferred. Annotate the boundaries and let the body follow.',
 			file: 'order.toy',
 			code: `fn main() -> int {
-    price := 20        # inferred int
+    price := 20                # inferred int
     quantity := 3
+    in_stock := quantity > 0   # inferred bool
+    if !in_stock {
+        return 0
+    }
     return price * quantity
 }`
 		},
@@ -46,9 +50,13 @@
 			file: 'pair.toy',
 			code: `struct Pair[A, B] { left: A, right: B }
 
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
+    Pair[B, A] { left: p.right, right: p.left }
+}
+
 fn main() -> int {
     point := Pair[int, int] { left: 3, right: 39 }
-    return point.left + point.right
+    return swap(point).left + point.left
 }`
 		},
 		{
@@ -69,9 +77,13 @@ impl Square has Area {
 			title: 'Option',
 			blurb: 'There is no null. <code class="code">Option[T]</code> is an ordinary enum, and the postfix <code class="code">?</code> returns early on the empty case.',
 			file: 'total.toy',
-			code: `pub fn total(a: Option[int], b: Option[int]) -> Option[int] {
-    x := a?
-    y := b?
+			code: `pub fn half(n: int) -> Option[int] {
+    if n % 2 == 0 { Option.some(n / 2) } else { Option.none }
+}
+
+pub fn half_sum(a: int, b: int) -> Option[int] {
+    x := half(a)?              # returns none early
+    y := half(b)?
     Option.some(x + y)
 }`
 		},
@@ -80,7 +92,9 @@ impl Square has Area {
 			blurb: 'Errors are values. <code class="code">Result[T, E]</code> holds a value or an error, and <code class="code">?</code> passes the error up to the caller.',
 			file: 'digits.toy',
 			code: `pub fn digit(n: int) -> Result[int, str] {
-    if n > 9 { Result.err("not a digit") } else { Result.ok(n) }
+    if n < 0 { return Result.err("negative") }
+    if n > 9 { return Result.err("not a digit") }
+    Result.ok(n)
 }
 
 pub fn pair(a: int, b: int) -> Result[int, str] {
@@ -144,11 +158,15 @@ pub fn area(shape: Shape) -> int {
 			file: 'pipeline.toy',
 			code: `fn double(x: int) -> int { x * 2 }
 fn add(a: int, b: int) -> int { a + b }
+fn at_most(x: int, limit: int) -> int {
+    if x > limit { limit } else { x }
+}
 
 fn main() -> int {
     score := 3
         |> double
         |> add(36)     # add(double(3), 36)
+        |> at_most(100)
     return score
 }`
 		},
