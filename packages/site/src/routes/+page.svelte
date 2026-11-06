@@ -338,6 +338,10 @@ fn main() -> int {
 						Branches, loops and ways to pass values and functions around.
 					</p>
 					<ExampleTabs examples={flowExamples} />
+					<p class="mt-8 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+						<a href={resolve('/tour/')} class="link">Take the full language tour →</a>
+						<a href={resolve('/docs/')} class="link">Read the reference →</a>
+					</p>
 				</div>
 			</section>
 
