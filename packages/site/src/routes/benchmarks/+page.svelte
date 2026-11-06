@@ -3,6 +3,7 @@
 	import { BarChart, LineChart } from 'layerchart';
 	import BenchLine from '$lib/components/BenchLine.svelte';
 	import PeerBars from '$lib/components/PeerBars.svelte';
+	import squid from '$lib/images/squid-02-stacking.webp';
 	import {
 		benchmarks,
 		changesAt,
@@ -54,6 +55,9 @@
 	const latest = $derived(data.peers ? withLatestToy(data.peers, data.records) : undefined);
 	const peerRows = $derived(latest ? peerCharts(latest.run, peerMetricKey) : []);
 
+	const tabColors = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)'];
+	const tabColor = (i: number) => tabColors[i % tabColors.length];
+
 	// Lower is better for every metric, so a rise is the regression colour.
 	const tone = (pct: number | undefined) => (pct === undefined || Math.abs(pct) < 0.05 ? '' : pct > 0 ? 'worse' : 'better');
 </script>
@@ -66,10 +70,18 @@
 <div class="bench-page mx-auto min-h-screen max-w-6xl border-x px-4 pb-24 pt-20 sm:px-10 md:px-12" style="border-color: var(--border)">
 	<a href={resolve('/')} class="link text-[0.82rem]">← toy</a>
 	<h1 class="mt-8 text-4xl">Benchmarks</h1>
-	<p class="mt-3 max-w-[60ch] text-base leading-snug" style="color: var(--fg-muted)">
+	<p class="mt-3 text-base leading-snug" style="color: var(--fg-muted)">
 		How fast toy runs programs and compiles them, commit by commit on <code class="code">main</code>. Each point is one
-		manual <code class="code">mise run bench</code> on one machine; numbers from different machines are not comparable.
+		<code class="code">mise run bench</code> on one machine, so numbers from different machines do not compare.
 	</p>
+	<div class="salt mt-6 flex items-start gap-4 p-5" role="note" data-testid="bench-salt">
+		<img src={squid} alt="" width="40" height="60" class="h-14 w-auto shrink-0 select-none" />
+		<p class="text-sm leading-snug">
+			<strong>Take these with a pinch of salt.</strong> toy is a hobby project, and these are small programs run on one
+			laptop. They show roughly how fast toy is and whether a change made it faster or slower. They do not rank
+			languages.
+		</p>
+	</div>
 
 	{#if data.records.length === 0}
 		<p class="mt-12 rounded-lg border p-6 text-sm" style="border-color: var(--border); background: var(--code-bg)" data-testid="bench-empty">
@@ -79,19 +91,19 @@
 	{:else}
 		<!-- The wrapper ends the sticky controls' reach with the history: they do not drive the peer view. -->
 		<div>
-		<div class="sticky top-0 z-10 mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 border-b py-3 text-[0.8rem]" style="border-color: var(--border); background: var(--bg)">
-			<div class="seg" role="group" aria-label="Metric">
-				{#each METRICS as m (m.key)}
-					<button type="button" aria-pressed={metricKey === m.key} onclick={() => (metricKey = m.key)}>{m.label}</button>
+		<div class="sticky top-0 z-10 mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 border-b py-4 text-[0.8rem]" style="border-color: var(--border); background: var(--bg)">
+			<div class="tabs" role="group" aria-label="Metric">
+				{#each METRICS as m, i (m.key)}
+					<button type="button" class="block-tab" class:active={metricKey === m.key} style="--block: {tabColor(i)}" aria-pressed={metricKey === m.key} onclick={() => (metricKey = m.key)}>{m.label}</button>
 				{/each}
 			</div>
-			<div class="seg" role="group" aria-label="X axis">
-				<button type="button" aria-pressed={xMode === 'commit'} onclick={() => (xMode = 'commit')}>By commit</button>
-				<button type="button" aria-pressed={xMode === 'date'} onclick={() => (xMode = 'date')}>By date</button>
+			<div class="tabs" role="group" aria-label="X axis">
+				<button type="button" class="block-tab" class:active={xMode === 'commit'} style="--block: {tabColor(2)}" aria-pressed={xMode === 'commit'} onclick={() => (xMode = 'commit')}>By commit</button>
+				<button type="button" class="block-tab" class:active={xMode === 'date'} style="--block: {tabColor(3)}" aria-pressed={xMode === 'date'} onclick={() => (xMode = 'date')}>By date</button>
 			</div>
 			<label class="flex min-w-0 items-center gap-2">
 				<span style="color: var(--fg-muted)">Machine</span>
-				<select bind:value={() => machineId, (v) => (machineChoice = v)} class="min-w-0 max-w-full truncate rounded border px-2 py-1" style="border-color: var(--border); background: var(--bg-elev)">
+				<select bind:value={() => machineId, (v) => (machineChoice = v)} class="machine min-w-0 max-w-full truncate">
 					{#each allMachines as m (m.id)}
 						<option value={m.id}>{m.chip} · {m.id}</option>
 					{/each}
@@ -102,7 +114,7 @@
 			<p class="mt-2 text-[0.75rem]" style="color: var(--fg-muted)">{describeMachine(machine)}</p>
 		{/if}
 
-		<h2 class="section">Overall trend</h2>
+		<h2 class="section" style="--marker: var(--toy-red)">Overall trend</h2>
 		<p class="note">Geometric mean of each benchmark's {metric.label.toLowerCase()} from commit to commit, chained and indexed to 100 at the first record. Lower is better.</p>
 		<div class="grid gap-6 md:grid-cols-2">
 			{#each groups as g (g.kind)}
@@ -115,7 +127,7 @@
 			{/each}
 		</div>
 
-		<h2 class="section">Summary</h2>
+		<h2 class="section" style="--marker: var(--toy-yellow)">Summary</h2>
 		<div class="overflow-x-auto">
 			<table class="w-full text-left text-[0.8rem]" data-testid="bench-summary">
 				<thead style="color: var(--fg-muted)">
@@ -145,7 +157,7 @@
 			</table>
 		</div>
 
-		<h2 class="section">Change per commit</h2>
+		<h2 class="section" style="--marker: var(--toy-teal)">Change per commit</h2>
 		{#if selected}
 			<p class="note" data-testid="bench-selected">
 				<a class="link font-mono" href="{REPO_URL}/commit/{selected.sha}">{selected.sha.slice(0, 7)}</a>
@@ -172,7 +184,7 @@
 
 		{#each groups as g (g.kind)}
 			{#if g.names.length}
-				<h2 class="section">{g.kind} · {metric.label.toLowerCase()}</h2>
+				<h2 class="section" style="--marker: var(--toy-navy)">{g.kind} · {metric.label.toLowerCase()}</h2>
 				<div class="grid gap-x-8 gap-y-10 md:grid-cols-2">
 					{#each g.names as name (name)}
 						<figure data-bench={name}>
@@ -189,11 +201,11 @@
 	{#if data.peers && latest}
 		{@const run = data.peers}
 		<section data-testid="peers">
-			<h2 class="section">Against other languages</h2>
+			<h2 class="section" style="--marker: var(--toy-red)">Against other languages</h2>
 			<p class="caveat note" role="note">
-				Take these with a pinch of salt. They are a rough indication from one run of the suite on one machine, not a
-				ranking: each program is small and written by us. Toy's bars track the latest bench record on
-				<code class="code">main</code>, so they can come from a later session than the other languages.
+				A pinch of salt applies here most of all. Each program is small and written by us, and the numbers come from one
+				run on one machine. Toy's bars use the latest bench record on <code class="code">main</code>, so they can be
+				newer than the other languages' runs.
 			</p>
 			<p class="note">
 				The same algorithm in each language, single-threaded, standard library only, each printing the same checksum. Toy
@@ -226,14 +238,14 @@
 				</dd>
 			</dl>
 			<div class="mt-6 flex flex-wrap items-center gap-x-6 gap-y-3 text-[0.8rem]">
-				<div class="seg" role="group" aria-label="Peer metric">
-					{#each PEER_METRICS as m (m.key)}
-						<button type="button" aria-pressed={peerMetricKey === m.key} onclick={() => (peerMetricKey = m.key)}>{m.label}</button>
+				<div class="tabs" role="group" aria-label="Peer metric">
+					{#each PEER_METRICS as m, i (m.key)}
+						<button type="button" class="block-tab" class:active={peerMetricKey === m.key} style="--block: {tabColor(i)}" aria-pressed={peerMetricKey === m.key} onclick={() => (peerMetricKey = m.key)}>{m.label}</button>
 					{/each}
 				</div>
-				<div class="seg" role="group" aria-label="Peer scale">
-					<button type="button" aria-pressed={!peerLog} onclick={() => (peerLog = false)}>Linear</button>
-					<button type="button" aria-pressed={peerLog} onclick={() => (peerLog = true)}>Log</button>
+				<div class="tabs" role="group" aria-label="Peer scale">
+					<button type="button" class="block-tab" class:active={!peerLog} style="--block: {tabColor(2)}" aria-pressed={!peerLog} onclick={() => (peerLog = false)}>Linear</button>
+					<button type="button" class="block-tab" class:active={peerLog} style="--block: {tabColor(3)}" aria-pressed={peerLog} onclick={() => (peerLog = true)}>Log</button>
 				</div>
 			</div>
 			<div class="mt-6 grid gap-x-8 gap-y-10 md:grid-cols-2">
@@ -265,10 +277,23 @@
 	.bench-page {
 		--bench-worse: var(--toy-red);
 		--bench-better: var(--tok-fn);
-		--peer-bar: var(--fg-muted);
+		--peer-bar: color-mix(in srgb, var(--fg-muted) 35%, transparent);
+	}
+	.salt {
+		border: 1.5px solid var(--toy-yellow);
+		border-radius: 1rem;
+		background: color-mix(in srgb, var(--toy-yellow) 12%, var(--bg));
+		box-shadow: 3px 3px 0 var(--toy-yellow);
+	}
+	.machine {
+		border: 1.5px solid var(--border);
+		border-radius: 0.6rem;
+		padding: 0.3rem 0.6rem;
+		background: var(--bg);
+		box-shadow: 2px 2px 0 var(--border);
 	}
 	.caveat {
-		border-left: 3px solid var(--toy-red);
+		border-left: 3px solid var(--toy-yellow);
 		padding-left: 0.75rem;
 		color: var(--fg);
 	}
@@ -293,13 +318,23 @@
 		font-size: 0.75rem;
 	}
 	.section {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
 		margin-top: 3.5rem;
 		margin-bottom: 0.75rem;
 		font-size: 1.5rem;
 	}
+	.section::before {
+		content: '';
+		width: 0.6rem;
+		height: 0.6rem;
+		flex-shrink: 0;
+		border-radius: 3px;
+		background: var(--marker);
+	}
 	.note {
 		margin-bottom: 1rem;
-		max-width: 70ch;
 		font-size: 0.8rem;
 		color: var(--fg-muted);
 	}
@@ -313,20 +348,9 @@
 	.better {
 		color: var(--bench-better);
 	}
-	.seg {
-		display: inline-flex;
-		overflow: hidden;
-		border: 1px solid var(--border);
-		border-radius: 0.4rem;
-	}
-	.seg button {
-		padding: 0.25rem 0.7rem;
-	}
-	.seg button + button {
-		border-left: 1px solid var(--border);
-	}
-	.seg button[aria-pressed='true'] {
-		background: var(--fg);
-		color: var(--bg);
+	.tabs {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
 	}
 </style>
