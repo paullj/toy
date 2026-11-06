@@ -9,6 +9,7 @@
 		commits,
 		describeMachine,
 		formatChange,
+		formatLinesPerSecond,
 		machines,
 		METRICS,
 		peerCharts,
@@ -138,6 +139,7 @@
 						<th class="py-2 pr-4 text-right font-normal">Latest</th>
 						<th class="py-2 pr-4 text-right font-normal">vs previous</th>
 						<th class="py-2 pr-4 text-right font-normal">vs first</th>
+						<th class="py-2 pr-4 text-right font-normal" title="A compiler benchmark's project lines over its wall-time median">Lines/s</th>
 						<th class="py-2 font-normal">Trend</th>
 					</tr>
 				</thead>
@@ -148,6 +150,7 @@
 							<td class="py-2 pr-4 text-right font-mono">{r.latest === undefined ? '–' : metric.format(r.latest)}</td>
 							<td class="py-2 pr-4 text-right font-mono {tone(r.fromPrevious)}">{formatChange(r.fromPrevious)}</td>
 							<td class="py-2 pr-4 text-right font-mono {tone(r.fromFirst)}">{formatChange(r.fromFirst)}</td>
+							<td class="py-2 pr-4 text-right font-mono">{formatLinesPerSecond(r.linesPerSecond)}</td>
 							<td class="py-1">
 								<div class="h-7 w-28">
 									<LineChart data={r.points} x="index" y="value" yBaseline={null} axis={false} grid={false} tooltipContext={false} highlight={false} padding={{ top: 3, bottom: 3, left: 2, right: 2 }} />

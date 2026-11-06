@@ -25,6 +25,14 @@ test('every benchmark in the history gets a chart with a line', async ({ page })
 	await expect(page.getByTestId('bench-summary').locator('tbody tr')).toHaveCount(names.length);
 });
 
+test('the summary gives a compiler benchmark its lines per second, and none to a runtime one', async ({ page }) => {
+	const r = records.findLast((r) => r.machine.id === records[0].machine.id && r.name === 'check_cold_200x50');
+	const perSecond = `${(r.lines / r.metrics.wall_median_s / 1000).toFixed(1)}k`;
+	const row = (name: string) => page.getByTestId('bench-summary').locator('tbody tr').filter({ hasText: name });
+	await expect(row('check_cold_200x50').locator('td').nth(4)).toHaveText(perSecond);
+	await expect(row('loops').locator('td').nth(4)).toHaveText('–');
+});
+
 test('the change chart has a bar per benchmark with an earlier record, its name beside it', async ({ page }) => {
 	const machine = records.filter((r) => r.machine.id === records[0].machine.id);
 	const latest = machine.at(-1).sha;

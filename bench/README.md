@@ -10,6 +10,7 @@ checks that each runtime benchmark still prints its checksum (the corpus runs
 mise run bench                    # every benchmark, 5 timed runs each
 mise run bench alloc              # only names matching the regex "alloc"
 mise run bench --runs 10 'loops|closures'
+mise run bench '^(check|build)_'  # only the compiler set
 ```
 
 `mise` provides the pinned `hyperfine` and `jq` (see `mise.toml`). The task builds a
@@ -20,16 +21,18 @@ for each benchmark:
   the standard deviation and the min..max range;
 - instructions retired, cycles and peak memory: one `/usr/bin/time -l` run;
 - checksum: the runtime program's stdout must equal its `# expect: stdout` line, or the
-  run fails.
+  run fails;
+- lines per second, for a compiler benchmark: the lines of the project's own `.toy` files
+  (the bundled std is not counted) over the wall-time median.
 
 The table is printed at the end: instructions, cycles, the wall-time median, stddev and
-min..max, user/sys time and peak memory, with the change of instructions, wall time and
-peak memory against the latest `main` record of the same machine in `bench/history.jsonl`
-(see History).
+min..max, lines per second, user/sys time and peak memory, with the change of
+instructions, wall time and peak memory against the latest `main` record of the same
+machine in `bench/history.jsonl` (see History).
 
-A full run takes about 70 s once the ReleaseFast toy is built, and 2 to 3 minutes with
-that build. Close other heavy programs first; the numbers are only comparable between
-runs on the same machine.
+A full run takes about 2.5 minutes once the ReleaseFast toy is built (70 s of runtime
+benchmarks, 90 s of compiler benchmarks), and 3 to 4 minutes with that build. Close other
+heavy programs first; the numbers are only comparable between runs on the same machine.
 
 ## Layout
 
@@ -43,7 +46,12 @@ runs on the same machine.
 | `history.jsonl` | the history on `main`; append-only |
 | `runtime/` | runtime benchmarks: toy programs with a fixed input that print a checksum |
 | `compiler/gen.sh` | generates a multi-module project of a given size |
+| `compiler/own.sh` | generates the `own` shape of #41 and #104: N small fns over one generic struct |
+| `compiler/feature.sh` | generates a multi-module project that uses the heavy language features |
+| `compiler/copy.sh` | copies a real program from the repo into a project dir |
 | `compiler/medium/` | a checked-in `gen.sh` project (100 modules); a corpus fixture |
+| `compiler/feature/` | a checked-in `feature.sh` project (3 modules x 2 groups); a corpus fixture |
+| `fixture-check.sh` | the CI gate: `medium/` and `feature/` still equal a fresh run of their generators, so the corpus tests the generators |
 | `opt-check.sh` | the CI gate: -O0 against -O1 over the corpus, and each opt pass's win |
 | `profile.sh` | per-stage compile-time profile and a `-j` sweep of one entry file |
 | `lib.sh` | helpers `run.sh` and `peers/run.sh` share: checksum, metrics, the ReleaseFast build |
@@ -65,6 +73,30 @@ departs from the published one, the comment at its top says how and why: `mandel
 and `fasta` hash the bytes they would write, `k_nucleotide` makes its input in-process
 and keys its tables by an int that packs the k-mer, since `str` has no slicing (#249).
 
+## The compiler set
+
+Each compiler benchmark is named `<command>_<cache>[_j1]_<project>`: `check` or `build`
+(`build -o out.bin`), a cold cache (the project's `.toy/` removed before every run) or a
+warm one (hyperfine's warmup run fills it), and `-j1` or the default jobs (one worker per
+core).
+
+| Group | Projects | Benchmarks |
+|---|---|---|
+| generated | `gen.sh` at 20, 200 and 600 modules of 50 fns: `20x50` (about 8k lines), `200x50` (82k), `600x50` (245k) | check and build, cold and warm, `-j1` and default |
+| `own` (#104) | `own.sh` at N = 4480, 8960 and 30000 fns: `own4480`, `own8960`, `own30000` | check and build, cold, `-j1` and default |
+| feature-heavy | `feature.sh` at 30 modules of 4 groups: `feature30x4` (11k lines) | check and build, cold and warm, `-j1` and default |
+| real programs | `copy.sh` of the largest corpus programs (`aggregate_values`, `gc_layouts`, `escape_std_methods`), a multi-module one (`modules_app`) and a Benchmarks Game program (`n_body`) | build, cold and warm, `-j1` and default |
+
+`gen.sh` projects are plain int fns, so they flatter compile speed. Each `feature.sh` group
+declares a generic struct used at three type args with a generic method, a protocol with a
+plain and a generic conformance and a `has`-bounded fn, a payload enum and a `match`,
+Option and Result chains with `?`, closures and fn values, derived `==`, `hash` and
+`to_string` through `Set`, `Map` and `str`, and each module uses the types and generics of
+the module before it and calls its entry, so a build compiles every module. The project
+stays at 120 groups: about 150 groups reach the compiler's limit of 10,000 generic
+instances (T0014). The real programs are small, so process start and the std dominate
+them; they catch a regression on ordinary code that the generated projects miss.
+
 ## Add a benchmark
 
 A runtime benchmark:
@@ -76,13 +108,18 @@ A runtime benchmark:
    `benchmarks.json`. The runner reads the checksum from the `# expect:` line too.
 3. Bump the `bench/runtime` count in `packages/compiler/tests/corpus_manifest.zon`.
 
-A compiler benchmark runs `toy <args>` in a project that `compiler/gen.sh` generates
-from `project` (`[modules, fns_per_module]`), with the project's `.toy/` cache removed
-before every run (cold cache):
+A compiler benchmark runs `toy <args>` in a project dir. `project` names a generator in
+`compiler/` and its arguments; the runner calls `compiler/<generator> <dir> <args...>`, and
+benchmarks with the same `project` share one dir. `cache` is `cold` (the default) or
+`warm`:
 
 ```json
-{ "name": "check_cold_200x50", "kind": "compiler", "project": [200, 50], "args": ["check", "main.toy"] }
+{ "name": "check_cold_200x50", "kind": "compiler", "project": ["gen.sh", "200", "50"], "args": ["check", "main.toy"] }
+{ "name": "build_warm_n_body", "kind": "compiler", "project": ["copy.sh", "bench/runtime/n_body.toy"], "args": ["build", "-o", "out.bin", "n_body.toy"], "cache": "warm" }
 ```
+
+A new name starts a new line in the history, so keep a name's project and command as they
+are; change them under a new name.
 
 ## Peers
 
@@ -135,7 +172,8 @@ under the peer view, with no chart.
 ## History
 
 `bench/history.jsonl` holds the speed of toy on `main`, one line per commit and benchmark:
-`sha`, `subject`, `commit_date`, `run_date`, `name`, `kind`, `runs`, `metrics`
+`sha`, `subject`, `commit_date`, `run_date`, `name`, `kind`, `runs`, `lines` (a compiler
+benchmark's project lines, else null), `metrics`
 (`instructions`, `cycles`, `peak_footprint_bytes`, `max_rss_bytes`, `wall_median_s`,
 `wall_mean_s`, `wall_stddev_s`, `wall_min_s`, `wall_max_s`, `user_s`, `sys_s`), the checksum,
 and `machine` (chip, model, P and E cores, RAM, macOS and zig versions, AC or battery, Low

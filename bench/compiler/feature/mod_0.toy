@@ -1,0 +1,179 @@
+import std/vec
+import std/map
+import std/set
+import std/str
+
+pub protocol Score_0_0 { fn score(self) -> int }
+
+pub struct Pair_0_0[T] { pub a: T, pub b: T }
+
+impl Pair_0_0[T] {
+    fn swap(self) -> Pair_0_0[T] { Pair_0_0 { a: self.b, b: self.a } }
+    fn map[U](self, f: fn(T) -> U) -> Pair_0_0[U] { Pair_0_0 { a: f(self.a), b: f(self.b) } }
+}
+
+pub struct Item_0_0 { pub id: int, pub name: str }
+
+impl Item_0_0 has Score_0_0 {
+    fn score(self) -> int { self.id * 2 + self.name.len() }
+}
+
+impl Pair_0_0[T] has Score_0_0 {
+    fn score(self) -> int { 0 + 1 }
+}
+
+pub enum Shape_0_0 { dot, circle(int), rect { w: int, h: int } }
+
+fn area_0_0(sh: Shape_0_0) -> int {
+    match sh {
+        .dot -> 0,
+        .circle(r) -> 3 * r * r,
+        .rect { w, h } -> w * h,
+    }
+}
+
+pub fn total_0_0[T has Score_0_0](xs: Vec[T]) -> int {
+    xs.fold(0, fn(acc, x) { acc + x.score() })
+}
+
+fn or_default_0_0[T](o: Option[T], d: T) -> T {
+    match o { .some(v) -> v, .none -> d }
+}
+
+fn parse_0_0(n: int) -> Result[int, str] {
+    if n < 0 { return Result[int, str].err("negative") }
+    return Result.ok(n + 0)
+}
+
+fn chain_0_0(n: int) -> Result[int, str] {
+    a := parse_0_0(n)?
+    b := parse_0_0(a)?
+    return Result.ok(a + b)
+}
+
+fn first_even_0_0(xs: Vec[int]) -> Option[int] {
+    for x in xs { if x % 2 == 0 { return Option.some(x) } }
+    return Option.none
+}
+
+fn half_first_even_0_0(xs: Vec[int]) -> Option[int] {
+    v := first_even_0_0(xs)?
+    return Option.some(v / 2)
+}
+
+fn make_scaler_0_0(k: int) -> fn(int) -> int { fn(x) { x * k + 0 } }
+
+pub fn run_0_0(n: int) -> int {
+    items: Vec[Item_0_0] = []
+    for i in 0..4 { items.push(Item_0_0 { id: i + n, name: "item".concat(i.to_string()) }) }
+    seen := Set[Item_0_0].new()
+    for it in items { seen.add(it) }
+    seen.add(Item_0_0 { id: n, name: "item0" })
+    scores := Map[str, int].new()
+    for it in items { scores.set(it.name, it.score()) }
+    ints := Pair_0_0 { a: n, b: 2 }.swap().map(make_scaler_0_0(3))
+    lens := Pair_0_0 { a: "ab", b: "cde" }.map(fn(t) { t.len() })
+    flags := Pair_0_0 { a: true, b: false }.map(fn(f) { if f { 1 } else { 0 } })
+    pairs: Vec[Pair_0_0[int]] = [ints, lens, flags]
+    shapes: Vec[Shape_0_0] = [Shape_0_0.dot, Shape_0_0.circle(n), Shape_0_0.rect { w: n, h: 0 + 1 }]
+    area := area_0_0
+    areas := shapes |> .map(area) |> .fold(0, fn(acc, x) { acc + x })
+    evens := items |> .map(fn(it) { it.id }) |> .filter(fn(x) { x % 2 == 0 })
+    label := Item_0_0 { id: 0, name: "x" }.to_string()
+    probe := Item_0_0 { id: n, name: "item0" }
+    same := if items[0] == probe { 1 } else { 0 }
+    ok := match chain_0_0(n) { .ok(v) -> v, .err(_) -> 0 }
+    return total_0_0(items) + total_0_0(pairs) + seen.len() + or_default_0_0(scores.get("item1"), 0) +
+        areas + evens.len() + label.len() + same + ok + or_default_0_0(half_first_even_0_0(evens), 7)
+}
+
+pub protocol Score_0_1 { fn score(self) -> int }
+
+pub struct Pair_0_1[T] { pub a: T, pub b: T }
+
+impl Pair_0_1[T] {
+    fn swap(self) -> Pair_0_1[T] { Pair_0_1 { a: self.b, b: self.a } }
+    fn map[U](self, f: fn(T) -> U) -> Pair_0_1[U] { Pair_0_1 { a: f(self.a), b: f(self.b) } }
+}
+
+pub struct Item_0_1 { pub id: int, pub name: str }
+
+impl Item_0_1 has Score_0_1 {
+    fn score(self) -> int { self.id * 2 + self.name.len() }
+}
+
+impl Pair_0_1[T] has Score_0_1 {
+    fn score(self) -> int { 1 + 1 }
+}
+
+pub enum Shape_0_1 { dot, circle(int), rect { w: int, h: int } }
+
+fn area_0_1(sh: Shape_0_1) -> int {
+    match sh {
+        .dot -> 0,
+        .circle(r) -> 3 * r * r,
+        .rect { w, h } -> w * h,
+    }
+}
+
+pub fn total_0_1[T has Score_0_1](xs: Vec[T]) -> int {
+    xs.fold(0, fn(acc, x) { acc + x.score() })
+}
+
+fn or_default_0_1[T](o: Option[T], d: T) -> T {
+    match o { .some(v) -> v, .none -> d }
+}
+
+fn parse_0_1(n: int) -> Result[int, str] {
+    if n < 0 { return Result[int, str].err("negative") }
+    return Result.ok(n + 1)
+}
+
+fn chain_0_1(n: int) -> Result[int, str] {
+    a := parse_0_1(n)?
+    b := parse_0_1(a)?
+    return Result.ok(a + b)
+}
+
+fn first_even_0_1(xs: Vec[int]) -> Option[int] {
+    for x in xs { if x % 2 == 0 { return Option.some(x) } }
+    return Option.none
+}
+
+fn half_first_even_0_1(xs: Vec[int]) -> Option[int] {
+    v := first_even_0_1(xs)?
+    return Option.some(v / 2)
+}
+
+fn make_scaler_0_1(k: int) -> fn(int) -> int { fn(x) { x * k + 1 } }
+
+pub fn run_0_1(n: int) -> int {
+    items: Vec[Item_0_1] = []
+    for i in 0..4 { items.push(Item_0_1 { id: i + n, name: "item".concat(i.to_string()) }) }
+    seen := Set[Item_0_1].new()
+    for it in items { seen.add(it) }
+    seen.add(Item_0_1 { id: n, name: "item0" })
+    scores := Map[str, int].new()
+    for it in items { scores.set(it.name, it.score()) }
+    ints := Pair_0_1 { a: n, b: 2 }.swap().map(make_scaler_0_1(3))
+    lens := Pair_0_1 { a: "ab", b: "cde" }.map(fn(t) { t.len() })
+    flags := Pair_0_1 { a: true, b: false }.map(fn(f) { if f { 1 } else { 0 } })
+    pairs: Vec[Pair_0_1[int]] = [ints, lens, flags]
+    shapes: Vec[Shape_0_1] = [Shape_0_1.dot, Shape_0_1.circle(n), Shape_0_1.rect { w: n, h: 1 + 1 }]
+    area := area_0_1
+    areas := shapes |> .map(area) |> .fold(0, fn(acc, x) { acc + x })
+    evens := items |> .map(fn(it) { it.id }) |> .filter(fn(x) { x % 2 == 0 })
+    label := Item_0_1 { id: 1, name: "x" }.to_string()
+    probe := Item_0_1 { id: n, name: "item0" }
+    same := if items[0] == probe { 1 } else { 0 }
+    ok := match chain_0_1(n) { .ok(v) -> v, .err(_) -> 0 }
+    return total_0_1(items) + total_0_1(pairs) + seen.len() + or_default_0_1(scores.get("item1"), 0) +
+        areas + evens.len() + label.len() + same + ok + or_default_0_1(half_first_even_0_1(evens), 7)
+}
+
+pub fn entry(n: int) -> int {
+    total := 0
+    total += run_0_0(n)
+    total += run_0_1(n)
+    return total
+}

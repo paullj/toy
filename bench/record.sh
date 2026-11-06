@@ -83,12 +83,13 @@ fi
 
 echo
 {
-  printf 'benchmark\tinstructions\tΔ\tcycles\twall median\t± stddev\tmin..max\tΔ\tuser/sys\tpeak mem\tΔ\tchecksum\n'
+  printf 'benchmark\tinstructions\tΔ\tcycles\twall median\t± stddev\tmin..max\tΔ\tlines/s\tuser/sys\tpeak mem\tΔ\tchecksum\n'
   jq -r --argjson base "$baseline" '
     def num(f): if . == null then "-" else f end;
     def mega: num(. / 1e6 | . * 10 | round / 10 | tostring + "M");
     def ms: num(. * 1000 | . * 10 | round / 10 | tostring + " ms");
     def mib: num(. / 1048576 | . * 10 | round / 10 | tostring + " MiB");
+    def kilo: num(. / 1e3 | . * 10 | round / 10 | tostring + "k");
     def delta($old; $new):
       if $old == null or $old == 0 or $new == null then "-"
       else ($new / $old - 1) * 100 | . * 10 | round / 10
@@ -101,6 +102,7 @@ echo
        ($m.wall_median_s | ms), ($m.wall_stddev_s | ms),
        "\($m.wall_min_s | ms)..\($m.wall_max_s | ms)",
        delta($b.wall_median_s; $m.wall_median_s),
+       (if .lines == null then null else .lines / $m.wall_median_s end | kilo),
        "\($m.user_s | ms)/\($m.sys_s | ms)",
        ($m.peak_footprint_bytes | mib),
        delta($b.peak_footprint_bytes; $m.peak_footprint_bytes),

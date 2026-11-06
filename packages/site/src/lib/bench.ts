@@ -33,6 +33,8 @@ export type BenchRecord = {
 	name: string;
 	kind: 'runtime' | 'compiler';
 	runs: number;
+	/** A compiler benchmark's project lines; absent before #190 and on runtime records. */
+	lines?: number | null;
 	metrics: Metrics;
 	checksum?: string | null;
 	checksum_ok?: boolean;
@@ -150,6 +152,11 @@ export function trend(records: BenchRecord[], kind: BenchRecord['kind'], metric:
 export const change = (from: number | undefined, to: number | undefined) =>
 	from === undefined || to === undefined || from === 0 ? undefined : (to / from - 1) * 100;
 
+export const linesPerSecond = (r: BenchRecord | undefined) =>
+	r?.lines ? r.lines / r.metrics.wall_median_s : undefined;
+
+export const formatLinesPerSecond = (v: number | undefined) => (v === undefined ? '–' : `${(v / 1000).toFixed(1)}k`);
+
 export function summary(records: BenchRecord[], metric: MetricKey) {
 	return benchmarks(records).map(({ name, kind }) => {
 		const pts = series(records, name, metric);
@@ -158,6 +165,7 @@ export function summary(records: BenchRecord[], metric: MetricKey) {
 			name,
 			kind,
 			latest: last?.value,
+			linesPerSecond: linesPerSecond(last?.record),
 			fromPrevious: change(pts.at(-2)?.value, last?.value),
 			fromFirst: pts.length > 1 ? change(pts[0].value, last?.value) : undefined,
 			points: pts

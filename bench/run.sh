@@ -47,6 +47,8 @@ while IFS= read -r bench; do
   if [ -n "$filter" ] && ! [[ "$name" =~ $filter ]]; then continue; fi
   echo "running $name ($kind, $runs runs)..."
   checksum=""
+  lines=""
+  cache=cold
 
   case "$kind" in
     runtime)
@@ -60,20 +62,34 @@ while IFS= read -r bench; do
       prepare=()
       ;;
     compiler)
-      read -r n m < <(jq -r '.project | "\(.[0]) \(.[1])"' <<<"$bench")
-      dir="$work/gen_${n}x${m}"
-      [ -d "$dir" ] || bash "$here/compiler/gen.sh" "$dir" "$n" "$m" >/dev/null
+      # The project is a generator under compiler/ and its arguments; benchmarks that
+      # name the same project share one generated dir.
+      gen="$(jq -r '.project[0]' <<<"$bench")"
+      dir="$work/$(jq -r '.project | join("_") | gsub("[^A-Za-z0-9_.-]"; "_")' <<<"$bench")"
+      if ! [ -d "$dir" ]; then
+        gen_args=()
+        while IFS= read -r a; do gen_args+=("$a"); done < <(jq -r '.project[1:][]' <<<"$bench")
+        bash "$here/compiler/$gen" "$dir" ${gen_args[@]+"${gen_args[@]}"} >/dev/null
+      fi
+      lines="$(find "$dir" -name .toy -prune -o -type f -name '*.toy' -print0 | xargs -0 cat | wc -l | tr -d ' ')"
       cmd=("$toy")
       while IFS= read -r a; do cmd+=("$a"); done < <(jq -r '.args[]' <<<"$bench")
-      # Cold cache: every timed run starts without the project's .toy/ cache.
-      prepare=(--prepare "rm -rf .toy")
+      cache="$(jq -r '.cache // "cold"' <<<"$bench")"
+      case "$cache" in
+        # Cold: every timed run starts without the project's .toy/ cache.
+        cold) prepare=(--prepare "rm -rf .toy") ;;
+        # Warm: hyperfine's warmup run fills the cache the timed runs reuse.
+        warm) prepare=() ;;
+        *) echo "  $name: unknown cache '$cache'"; exit 2 ;;
+      esac
       ;;
     *) echo "  $name: unknown kind '$kind'"; exit 2 ;;
   esac
 
   (cd "$dir" && hyperfine -N --warmup 1 --runs "$runs" ${prepare[@]+"${prepare[@]}"} --style none \
     --export-json "$work/$name.json" "$(printf '%q ' "${cmd[@]}")")
-  (cd "$dir" && rm -rf .toy && /usr/bin/time -l "${cmd[@]}" >"$work/$name.out" 2>"$work/$name.time")
+  if [ "$cache" = cold ]; then rm -rf "$dir/.toy"; fi
+  (cd "$dir" && /usr/bin/time -l "${cmd[@]}" >"$work/$name.out" 2>"$work/$name.time")
 
   got=""
   ok=true
@@ -88,8 +104,9 @@ while IFS= read -r bench; do
 
   m="$(bench_metrics "$work/$name.json" "$work/$name.time")"
   jq -c -n --arg name "$name" --arg kind "$kind" --argjson runs "$runs" \
-    --arg checksum "$got" --argjson ok "$ok" --argjson m "$m" \
+    --arg checksum "$got" --argjson ok "$ok" --argjson m "$m" --arg lines "$lines" \
     '{name: $name, kind: $kind, runs: $runs, metrics: $m,
+      lines: (if $lines == "" then null else ($lines | tonumber) end),
       checksum: (if $checksum == "" then null else $checksum end), checksum_ok: $ok}' \
     >>"$work/results.jsonl"
 done < <(jq -c '.[]' "$here/benchmarks.json")
