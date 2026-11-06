@@ -281,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
     // the config, 2 on a usage error or an unreadable entry. `--exit-zero` forces 0
     // regardless.
     if (st.check_seen) {
-        std.process.exit(try runCheck(gpa, out, level, usage, st.target, st.paths.items, st.check_ndjson, st.check_exit_zero, st.timings, st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
+        std.process.exit(try runCheck(gpa, out, level, usage, st.target, st.paths.items, st.check_ndjson, st.check_exit_zero, st.timings, st.jobs(), st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
     }
 
     // The DEFAULT action is to BUILD a signed executable: a bare `toy <file>` (and any
@@ -292,8 +292,7 @@ pub fn main(init: std.process.Init) !void {
     // inspection `--emit` was requested.
     const build_exe = st.verb_seen or st.out_path != null or !st.emit_explicit;
     const run_after = st.command == .run;
-    // Worker threads the build will use (for the "built with N threads" line).
-    const threads: usize = if (st.job_count != 0) st.job_count else (std.Thread.getCpuCount() catch 1);
+    const threads = st.jobs();
 
     // Without a verb, a second word may be a mistyped command too short or far for a
     // suggestion, so the error must not name a `build` the user never typed.
@@ -301,12 +300,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Build the executable: output → `-o`/`--output`, else the default build dir.
     if (build_exe) {
-        std.process.exit(try emitExecutable(gpa, out, level, usage, st.target, st.paths.items, st.out_path, run_after, st.program_args, st.mode, st.codegen_stats, st.profile, st.specialize, st.opt_stats, st.timings, st.jlimit, threads, st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
+        std.process.exit(try emitExecutable(gpa, out, level, usage, st.target, st.paths.items, st.out_path, run_after, st.program_args, st.mode, st.codegen_stats, st.profile, st.specialize, st.opt_stats, st.timings, threads, st.sev, st.allow_core_imports, roots(&st), linkRequest(&st)));
     }
 
     // `--emit ir`: print the target-independent IR for the whole program.
     if (st.emit == .ir) {
-        std.process.exit(try emitIr(gpa, out, level, usage, st.target, st.paths.items, st.profile, st.specialize, st.jlimit, st.sev, st.allow_core_imports, roots(&st)));
+        std.process.exit(try emitIr(gpa, out, level, usage, st.target, st.paths.items, st.profile, st.specialize, threads, st.sev, st.allow_core_imports, roots(&st)));
     }
 
     const results = try Driver.run(gpa, io, st.emit, st.target, st.paths.items);
@@ -365,10 +364,7 @@ const State = struct {
     specialize: bool = true,
     opt_stats: bool = false,
     timings: bool = false,
-    // the `-j N` jobs knob. `.unlimited` => cpu pool; `.limited(0)` (-j1) => serial;
-    // `.limited(N)` => cap at N.
-    jlimit: Io.Limit = .unlimited,
-    // 0 => "not set → use cpu count" for the "built with N threads" line.
+    // `-j N`; 0 => not given, so the cpu count (see `jobs`).
     job_count: usize = 0,
     // The resolved `--color` choice, fed once into `resolveLevel` after the parse.
     color_choice: Terminal.ColorChoice = .auto,
@@ -387,6 +383,10 @@ const State = struct {
     // `run`'s words after `--`, borrowing argv; they follow the binary's path in its argv.
     program_args: []const []const u8 = &.{},
     paths: std.ArrayList([]const u8),
+
+    fn jobs(st: *const State) usize {
+        return if (st.job_count != 0) st.job_count else Engine.hostCpus();
+    }
 };
 
 /// Map a `Parsed(cmd)` onto the driver `State`. GENERIC over the comptime command +
@@ -428,13 +428,7 @@ fn applyParsed(gpa: std.mem.Allocator, comptime cmd: cli.Spec.Command, p: anytyp
     }
     st.allow_core_imports = devCoreImports(p);
     try takeRoots(gpa, p, st);
-    if (p.j) |n| {
-        // n >= 1 guaranteed by the Range. -j1 => .limited(0) (serial baseline);
-        // -jN>=2 => .limited(N) (cap the pool). job_count feeds the threads line.
-        const u: usize = @intCast(n);
-        st.jlimit = if (u == 1) .limited(0) else .limited(u);
-        st.job_count = u;
-    }
+    if (p.j) |n| st.job_count = @intCast(n);
     // The parser rejects `--release` with `--profile`, so at most one names the profile.
     st.profile = .of(if (p.release) .release else if (p.profile) |n| switch (n) {
         .debug => .debug,
@@ -517,6 +511,7 @@ fn applyCheckParsed(gpa: std.mem.Allocator, p: anytype, usage: Usage, st: *State
     st.allow_core_imports = devCoreImports(p);
     try takeRoots(gpa, p, st);
     st.timings = p.timings;
+    if (p.j) |n| st.job_count = @intCast(n);
     if (try buildSevRules(gpa, p, sev_rules)) |e| return try cliValueError(usage, e);
     st.sev = .{ .rules = sev_rules.items, .deny_warnings = p.deny_warnings };
     for (p.file) |f| try st.paths.append(gpa, f);
@@ -793,7 +788,6 @@ fn emitExecutable(
     specialize: bool,
     opt_stats: bool,
     timings: bool,
-    jlimit: Io.Limit,
     threads: usize,
     sev: SevCfg.SeverityConfig,
     allow_core_imports: bool,
@@ -809,10 +803,7 @@ fn emitExecutable(
         return usage_exit;
     }
 
-    // the `-o` build runs on OUR OWN pool sized by `-j`, not the CLI's fixed
-    // `.unlimited` io. `.limited(0)` (from `-j1`) drives every fanOut serial so the
-    // single-thread build is the byte-identity baseline; `.limited(N)` caps workers.
-    var tail_io: std.Io.Threaded = .init(gpa, .{ .concurrent_limit = jlimit });
+    var tail_io = Engine.pool(gpa, threads);
     defer tail_io.deinit();
     const io = tail_io.io();
 
@@ -1098,7 +1089,7 @@ fn emitIr(
     paths: []const []const u8,
     profile: Profile,
     specialize: bool,
-    jlimit: Io.Limit,
+    threads: usize,
     sev: SevCfg.SeverityConfig,
     allow_core_imports: bool,
     search: Graph.Roots,
@@ -1111,10 +1102,7 @@ fn emitIr(
         return usage_exit;
     }
 
-    // the whole-graph typecheck Pass-C fans out per-fn body checks across our own
-    // `-j`-sized pool. `.limited(0)` (-j1) drives every job onto its inline serial path
-    // — the byte-identity baseline against which -jN must produce IDENTICAL diagnostics.
-    var tail_io: std.Io.Threaded = .init(gpa, .{ .concurrent_limit = jlimit });
+    var tail_io = Engine.pool(gpa, threads);
     defer tail_io.deinit();
     const io = tail_io.io();
 
@@ -1159,9 +1147,7 @@ fn emitIr(
         .discover_probe = null,
         .probe = null,
         .link_ns = null,
-        // `-j` chunk basis from the pool limit: `.limited(N)`->N, `.unlimited`->host
-        // cpus, `-j1` (`.limited(0)`)->1 (one chunk = the serial inline path).
-        .ncpu = @max(@as(usize, 1), jlimit.toInt() orelse Engine.hostCpus()),
+        .ncpu = threads,
         .sev = sev,
         .allow_core_imports = allow_core_imports,
         .roots = search,
@@ -1282,6 +1268,7 @@ fn runCheck(
     ndjson: bool,
     exit_zero: bool,
     timings: bool,
+    threads: usize,
     sev: SevCfg.SeverityConfig,
     allow_core_imports: bool,
     search: Graph.Roots,
@@ -1295,10 +1282,9 @@ fn runCheck(
     }
     const entry = paths[0];
 
-    // Own pool for the whole-graph typecheck Pass-C body fan-out (`checkGraph` needs an
-    // `io`); a plain `check` uses the host cpu pool. Diagnostics are deterministic
-    // regardless of `-jN` (sorted by (scope, offset, code, message)).
-    var tail_io: std.Io.Threaded = .init(gpa, .{});
+    // Diagnostics are deterministic regardless of `-jN` (sorted by (scope, offset, code,
+    // message)).
+    var tail_io = Engine.pool(gpa, threads);
     defer tail_io.deinit();
     const cio = tail_io.io();
 
@@ -1381,7 +1367,7 @@ fn runCheck(
     // (W0001), which the old code dropped by collapsing to `tc.?.diags` on a clean
     // resolve.
     if (!Decide.resolveHasError(res.diags)) {
-        tc = TypecheckGraph.checkGraph(gpa, graph, res, cio, 0) catch |e| {
+        tc = TypecheckGraph.checkGraph(gpa, graph, res, cio, threads) catch |e| {
             try argLine(usage, @errorName(e));
             return 2;
         };

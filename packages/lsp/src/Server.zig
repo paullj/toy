@@ -32,7 +32,8 @@ const inlay = @import("inlay.zig");
 const Analysis = @import("Analysis.zig");
 const Documents = @import("Documents.zig");
 const Workspace = @import("Workspace.zig");
-const Graph = @import("toy_compiler").Graph;
+const toyc = @import("toy_compiler");
+const Graph = toyc.Graph;
 const lsp_uri = @import("uri.zig");
 
 pub const ExitCode = enum(u8) { ok = 0, no_shutdown = 1 };
@@ -78,7 +79,7 @@ pub const Server = struct {
     include: std.ArrayList([]const u8) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Server {
-        return .{ .gpa = gpa, .threaded = .init(gpa, .{}), .arena = .init(gpa), .docs = .{} };
+        return .{ .gpa = gpa, .threaded = toyc.QueryEngine.pool(gpa, 0), .arena = .init(gpa), .docs = .{} };
     }
 
     pub fn deinit(self: *Server) void {
@@ -1606,4 +1607,10 @@ test "lsp: each module of a multi-module program publishes its own diagnostics u
     try testing.expectEqual(@as(usize, 1), md.len);
     try testing.expectEqualStrings("T0041", getStr(md[0], "code").?);
     try testing.expectEqual(@as(i64, 3), field(md[0], "range", "start").?.object.get("line").?.integer);
+}
+
+test "lsp compute pool is capped at the host cpu count, as toy check's is (#104)" {
+    var s = Server.init(testing.allocator);
+    defer s.deinit();
+    try testing.expectEqual(if (toyc.QueryEngine.hostCpus() <= 1) std.Io.Limit.limited(0) else std.Io.Limit.limited(toyc.QueryEngine.hostCpus()), s.threaded.concurrent_limit);
 }

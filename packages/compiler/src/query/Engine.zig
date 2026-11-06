@@ -287,6 +287,16 @@ pub fn hostCpus() usize {
     return std.Thread.getCpuCount() catch 1;
 }
 
+/// The worker pool for `threads` jobs (0 => `hostCpus()`). One job gets `.limited(0)`,
+/// which runs every fan-out inline: the serial byte-identity baseline. Any other count
+/// caps the pool, because an `.unlimited` pool spawns one thread per fan-out chunk (8
+/// per cpu), and the surplus threads then contend on the allocator and the shared
+/// tables (#104).
+pub fn pool(gpa: std.mem.Allocator, threads: usize) std.Io.Threaded {
+    const n = if (threads != 0) threads else hostCpus();
+    return .init(gpa, .{ .concurrent_limit = if (n <= 1) .limited(0) else .limited(n) });
+}
+
 /// CHUNKED parallel fan-out: the primitive that makes `-jN` actually scale.
 ///
 /// `Engine.fanOut` dispatches ONE task per unit; with 10K µs-scale units that is 10K
@@ -1014,3 +1024,16 @@ test "barrier returns the fold for any kind" {
 // Engine boundary tests (hit/miss/force/verify/invalidation + key discrimination)
 // are an INTEGRATION suite (temp-dir cache + threaded runtime), so they live in
 // `src/tests/query_engine.zig` rather than inline here; `root.zig` pulls them.
+
+test "pool: -j1 runs inline, -jN caps at N, 0 caps at the host cpus" {
+    const gpa = std.testing.allocator;
+    var one = pool(gpa, 1);
+    defer one.deinit();
+    try std.testing.expectEqual(std.Io.Limit.limited(0), one.concurrent_limit);
+    var four = pool(gpa, 4);
+    defer four.deinit();
+    try std.testing.expectEqual(std.Io.Limit.limited(4), four.concurrent_limit);
+    var host = pool(gpa, 0);
+    defer host.deinit();
+    try std.testing.expectEqual(if (hostCpus() <= 1) std.Io.Limit.limited(0) else std.Io.Limit.limited(hostCpus()), host.concurrent_limit);
+}

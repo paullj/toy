@@ -21,10 +21,12 @@
 //! decision — those consume the REIFIED `struct_id`, assigned serially in
 //! `writeStructuralKey` order (an index-INDEPENDENT recursive key), not this index.
 //!
-//! THREAD-SAFETY: `App`s are formed during parallel Pass C. A single mutex guards both
-//! `intern` (write) and `at` (read); `at` returns the `Entry` BY VALUE (its `args`
-//! slice is an independent, never-freed-until-teardown heap allocation, so the returned
-//! slice header stays valid after the lock is released even if the entry array reallocs).
+//! THREAD-SAFETY: `App`s are formed during parallel Pass C, which also reads the table
+//! for every generic receiver, so reads far outnumber writes. Writers (`intern`,
+//! `internFn`) serialize on a spinlock; `at` takes no lock. Entries live on shelves that
+//! never move once allocated, so a slot written under the lock stays put, and `intern`
+//! publishes the new count with a release store that `at`'s acquire load pairs with. A
+//! reader that took a lock here made every Pass-C thread spin on one cache line (#104).
 
 const std = @import("std");
 const Type = @import("../layout/Type.zig").Type;
@@ -57,14 +59,26 @@ const shape_struct: u8 = 0;
 const shape_enum: u8 = 1;
 const shape_fn: u8 = 2;
 
-entries: std.ArrayList(Entry) = .empty,
+/// Shelf `s` holds `shelf0_len << s` entries, so the shelves double like a growing
+/// array but are never copied: a slot's address is fixed once its shelf exists, which
+/// is what lets `at` read without the lock while a writer appends. Doubling rather than
+/// fixed-size chunks: fixed chunks need a chunk table that grows (and so moves under a
+/// reader) or a cap on the entry count, while doubling shelves fit the whole u32 index
+/// space in a fixed table of 27 pointers.
+shelves: [shelf_count]?[*]Entry = @splat(null),
+/// The published entry count: stored with release after the slot is written, loaded
+/// with acquire by `at`.
+len: std.atomic.Value(u32) = .init(0),
 /// Flat structural key (`writeFlatKey`) -> entry index. Keys are OWNED.
 dedup: std.StringHashMapUnmanaged(u32) = .empty,
-/// A lock-free atomic-bool spinlock (mirrors `query/Cache.zig`): 0.16's `std.Io.Mutex`
-/// needs an `Io` to block, but the critical sections here are tiny (a key build + a
-/// hashmap upsert / a slice copy), so a spinlock keeps this module Io-free and safe if
-/// Pass-C `App` interning runs in parallel.
+/// A spinlock rather than `std.Io.Mutex` (which needs an `Io` to block) keeps this module
+/// Io-free; only writers take it, and once `at` stopped locking they are rare enough
+/// that a waiter almost never spins.
 lock_state: std.atomic.Value(bool) = .init(false),
+
+const shelf0_log2 = 6;
+const shelf0_len: u64 = 1 << shelf0_log2;
+const shelf_count = 33 - shelf0_log2;
 
 fn lock(c: *Composite) void {
     while (c.lock_state.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
@@ -76,12 +90,33 @@ fn unlock(c: *Composite) void {
     c.lock_state.store(false, .release);
 }
 
+fn shelfLen(s: usize) usize {
+    return @intCast(shelf0_len << @intCast(s));
+}
+
+fn slot(c: *const Composite, idx: u32) *Entry {
+    const v = @as(u64, idx) + shelf0_len;
+    const s = std.math.log2_int(u64, v) - shelf0_log2;
+    return &c.shelves[s].?[@intCast(v - (shelf0_len << @intCast(s)))];
+}
+
+/// Append `e` and return its index. Caller holds the lock.
+fn append(c: *Composite, gpa: std.mem.Allocator, e: Entry) !u32 {
+    const idx = c.len.load(.monotonic);
+    const s = std.math.log2_int(u64, @as(u64, idx) + shelf0_len) - shelf0_log2;
+    if (c.shelves[s] == null) c.shelves[s] = (try gpa.alloc(Entry, shelfLen(s))).ptr;
+    c.slot(idx).* = e;
+    c.len.store(idx + 1, .release);
+    return idx;
+}
+
 pub fn deinit(c: *Composite, gpa: std.mem.Allocator) void {
-    for (c.entries.items) |e| {
+    for (0..c.len.raw) |i| {
+        const e = c.slot(@intCast(i)).*;
         gpa.free(@constCast(e.args));
         if (e.is_fn) gpa.free(e.name);
     }
-    c.entries.deinit(gpa);
+    for (c.shelves, 0..) |sh, s| if (sh) |p| gpa.free(p[0..shelfLen(s)]);
     var it = c.dedup.keyIterator();
     while (it.next()) |k| gpa.free(k.*);
     c.dedup.deinit(gpa);
@@ -100,31 +135,28 @@ fn writeFlatKey(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), shape: u8, ctor
 }
 
 /// Intern `(ctor, args)` to a stable composite index; structurally-equal calls return
-/// the same index. Mutex-guarded (Apps form during parallel Pass C).
+/// the same index. Takes the writer lock (Apps form during parallel Pass C).
 pub fn intern(c: *Composite, gpa: std.mem.Allocator, ctor: u32, args: []const Type, ctor_is_enum: bool) !u32 {
-    c.lock();
-    defer c.unlock();
     var keybuf: std.ArrayList(u8) = .empty;
     defer keybuf.deinit(gpa);
     try writeFlatKey(gpa, &keybuf, if (ctor_is_enum) shape_enum else shape_struct, ctor, args);
+    c.lock();
+    defer c.unlock();
     const gop = try c.dedup.getOrPut(gpa, keybuf.items);
     if (gop.found_existing) return gop.value_ptr.*;
     gop.key_ptr.* = try gpa.dupe(u8, keybuf.items);
-    const idx: u32 = @intCast(c.entries.items.len);
-    gop.value_ptr.* = idx;
     const owned = try gpa.dupe(Type, args);
-    try c.entries.append(gpa, .{ .ctor = ctor, .args = owned, .ctor_is_enum = ctor_is_enum });
+    const idx = try c.append(gpa, .{ .ctor = ctor, .args = owned, .ctor_is_enum = ctor_is_enum });
+    gop.value_ptr.* = idx;
     return idx;
 }
 
 /// Intern the function type `fn(params) -> ret` to a stable composite index, content-
 /// addressed like `intern`. Consumes `name` (its rendered label): stored on a fresh entry,
-/// freed on a dedup hit or an error. The caller renders `name` BEFORE calling, because the
-/// label reads this table and the spinlock is not reentrant.
+/// freed on a dedup hit or an error. The caller renders `name` BEFORE calling, so the
+/// rendering (which reads this table and allocates) never runs under the lock.
 pub fn internFn(c: *Composite, gpa: std.mem.Allocator, params: []const Type, ret: Type, name: []u8) !u32 {
     errdefer gpa.free(name);
-    c.lock();
-    defer c.unlock();
     const args = try gpa.alloc(Type, params.len + 1);
     var args_owned = true;
     defer if (args_owned) gpa.free(args);
@@ -133,15 +165,16 @@ pub fn internFn(c: *Composite, gpa: std.mem.Allocator, params: []const Type, ret
     var keybuf: std.ArrayList(u8) = .empty;
     defer keybuf.deinit(gpa);
     try writeFlatKey(gpa, &keybuf, shape_fn, @intCast(params.len), args);
+    c.lock();
+    defer c.unlock();
     const gop = try c.dedup.getOrPut(gpa, keybuf.items);
     if (gop.found_existing) {
         gpa.free(name);
         return gop.value_ptr.*;
     }
     gop.key_ptr.* = try gpa.dupe(u8, keybuf.items);
-    const idx: u32 = @intCast(c.entries.items.len);
+    const idx = try c.append(gpa, .{ .ctor = @intCast(params.len), .args = args, .is_fn = true, .name = name });
     gop.value_ptr.* = idx;
-    try c.entries.append(gpa, .{ .ctor = @intCast(params.len), .args = args, .is_fn = true, .name = name });
     args_owned = false;
     return idx;
 }
@@ -157,12 +190,12 @@ pub fn typeAt(c: *Composite, idx: u32) Type {
     return if (c.at(idx).is_fn) Type.func(idx) else Type.app(idx);
 }
 
-/// The interned `(ctor, args)` at `idx`, BY VALUE. The `args` slice remains valid after
-/// the lock is released (independent heap allocation, freed only at teardown).
-pub fn at(c: *Composite, idx: u32) Entry {
-    c.lock();
-    defer c.unlock();
-    return c.entries.items[idx];
+/// The interned `(ctor, args)` at `idx`, BY VALUE, read without the lock (see the
+/// module doc). The `args` slice is freed only at teardown.
+pub fn at(c: *const Composite, idx: u32) Entry {
+    const n = c.len.load(.acquire);
+    std.debug.assert(idx < n);
+    return c.slot(idx).*;
 }
 
 /// Append the INDEX-INDEPENDENT recursive structural key of `ty` to `buf`: an `.app`
@@ -212,8 +245,8 @@ pub fn appDepth(c: *Composite, ty: Type) u32 {
 
 /// The composite-backed `Infer.Decomposer` for the COMPUTE-regime inference sites
 /// (Pass C + discovery), where this table is live. `Composite → Infer` is the only
-/// edge (Infer never imports Composite), so no cycle. `at` is mutex-guarded, so this
-/// is safe under parallel Pass C.
+/// edge (Infer never imports Composite), so no cycle. `at` takes no lock, so parallel
+/// Pass C reads never contend.
 fn decomposeThunk(ctx: *anyopaque, ty: Type) ?Infer.Decomposed {
     if (!ty.isApp() and !ty.isFunc()) return null;
     const c: *Composite = @ptrCast(@alignCast(ctx));
@@ -421,4 +454,48 @@ test "decomposer exposes a fn type's params and ret" {
     const parts = fnParts(c.at(f));
     try testing.expectEqualSlices(Type, &.{ Type.int, Type.bool }, parts.params);
     try testing.expect(Type.eql(parts.ret, Type.str));
+}
+
+test "at reads while a writer holds the lock" {
+    const gpa = testing.allocator;
+    var c: Composite = .{};
+    defer c.deinit(gpa);
+    const idx = try c.intern(gpa, 3, &.{Type.int}, false);
+    c.lock();
+    defer c.unlock();
+    try testing.expectEqual(@as(u32, 3), c.at(idx).ctor);
+}
+
+test "entries on every shelf read back after the table grows" {
+    const gpa = testing.allocator;
+    var c: Composite = .{};
+    defer c.deinit(gpa);
+    const n = 5000;
+    for (0..n) |i| try testing.expectEqual(@as(u32, @intCast(i)), try c.intern(gpa, @intCast(i), &.{Type.int}, false));
+    for (0..n) |i| try testing.expectEqual(@as(u32, @intCast(i)), c.at(@intCast(i)).ctor);
+}
+
+test "parallel interns of the same keys agree and read back" {
+    const gpa = testing.allocator;
+    var c: Composite = .{};
+    defer c.deinit(gpa);
+    const keys = 2000;
+    const nthreads = 8;
+    var got: [nthreads][keys]u32 = undefined;
+    const W = struct {
+        fn run(t: *Composite, out: *[keys]u32, salt: usize) void {
+            for (0..keys) |k| {
+                const ctor: u32 = @intCast((k * 7 + salt) % keys);
+                const idx = t.intern(gpa, ctor, &.{ Type.int, Type.bool }, false) catch unreachable;
+                out[ctor] = idx;
+                std.debug.assert(t.at(idx).ctor == ctor);
+            }
+        }
+    };
+    var threads: [nthreads]std.Thread = undefined;
+    for (&threads, 0..) |*th, i| th.* = try std.Thread.spawn(.{}, W.run, .{ &c, &got[i], i * 131 });
+    for (threads) |th| th.join();
+    try testing.expectEqual(@as(u32, keys), c.len.raw);
+    for (got[1..]) |g| try testing.expectEqualSlices(u32, &got[0], &g);
+    for (0..keys) |k| try testing.expectEqual(@as(u32, @intCast(k)), c.at(got[0][k]).ctor);
 }
