@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
 	await page.goto('/docs/errors/');
+	await page.locator('html[data-hydrated]').waitFor({ state: 'attached' });
 });
 
 test('the sidebar lists every code under its group', async ({ page }) => {
