@@ -96,6 +96,9 @@ importers:
       layerchart:
         specifier: 2.9.2
         version: 2.9.2(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.4)(vite@6.4.3(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.4)(typescript@5.9.3)(vite@6.4.3(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.4)
+      minisearch:
+        specifier: 7.2.0
+        version: 7.2.0
       svelte:
         specifier: ^5.20.0
         version: 5.56.4
@@ -1103,6 +1106,9 @@ packages:
   mimic-function@5.0.1:
     resolution: {integrity: sha512-VP79XUPxV2CigYP3jWwAUFSku2aKqBH7uTAapFWCBqutsbmDo96KY5o8uh6U+/YSIn5OxJnXp73beVkpqMIGhA==}
     engines: {node: '>=18'}
+
+  minisearch@7.2.0:
+    resolution: {integrity: sha512-dqT2XBYUOZOiC5t2HRnwADjhNS2cecp9u+TJRiJ1Qp/f5qjkeT5APcGPjHw+bz89Ms8Jp+cG4AlE+QZ/QnDglg==}
 
   mode-watcher@1.1.0:
     resolution: {integrity: sha512-mUT9RRGPDYenk59qJauN1rhsIMKBmWA3xMF+uRwE8MW/tjhaDSCCARqkSuDTq8vr4/2KcAxIGVjACxTjdk5C3g==}
@@ -2294,6 +2300,8 @@ snapshots:
       mimic-function: 5.0.1
 
   mimic-function@5.0.1: {}
+
+  minisearch@7.2.0: {}
 
   mode-watcher@1.1.0(svelte@5.56.4):
     dependencies:
