@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const BLOCKS = ['order.toy', 'shapes.toy', 'pair.toy', 'area.toy', 'loops.toy', 'pipeline.toy', 'closures.toy', 'total.toy', 'digits.toy'];
+const BLOCKS = ['order.toy', 'shapes.toy', 'pair.toy', 'area.toy', 'values.toy', 'loops.toy', 'pipeline.toy', 'closures.toy', 'total.toy', 'digits.toy'];
 
 function block(page: Page, file: string) {
 	return page.locator('figure', { has: page.locator('figcaption', { hasText: file }) });
