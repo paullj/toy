@@ -29,7 +29,7 @@ test('the latest commit is selected and links to GitHub', async ({ page }) => {
 	const latest = shas.at(-1)!;
 	const link = page.getByTestId('bench-selected').locator('a');
 	await expect(link).toHaveText(latest.slice(0, 7));
-	await expect(link).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${latest}`);
+	await expect(link).toHaveAttribute('href', `https://github.com/paullj/toy/commit/${latest}`);
 });
 
 test('hovering a point shows its commit, and a click selects it', async ({ page }) => {

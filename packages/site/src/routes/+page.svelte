@@ -26,7 +26,7 @@
 		{ href: resolve('/playground/'), label: 'Playground →' },
 		{ href: resolve('/docs/'), label: 'Reference →' },
 		{ href: resolve('/benchmarks/'), label: 'Benchmarks →' },
-		{ href: 'https://github.com/paullj/toy-compiler', label: 'Source →' }
+		{ href: 'https://github.com/paullj/toy', label: 'Source →' }
 	];
 
 	const typeExamples = [
@@ -218,7 +218,7 @@ fn main() -> int {
 		{ href: resolve('/tour/'), kind: 'Tour', label: 'Take the tour →' },
 		{ href: resolve('/playground/'), kind: 'Playground', label: 'Try it in the browser →' },
 		{ href: resolve('/docs/'), kind: 'Reference', label: 'Read the docs →' },
-		{ href: 'https://github.com/paullj/toy-compiler', kind: 'Source', label: 'View on GitHub →' }
+		{ href: 'https://github.com/paullj/toy', kind: 'Source', label: 'View on GitHub →' }
 	];
 
 	// --- Scrollspy ---
@@ -365,7 +365,7 @@ fn main() -> int {
 						{/each}
 					</ul>
 					<p class="mt-5 text-sm">
-						<a href="https://github.com/paullj/toy-compiler/blob/main/packages/docs/std.md" class="link">and more →</a>
+						<a href="https://github.com/paullj/toy/blob/main/packages/docs/std.md" class="link">and more →</a>
 					</p>
 				</div>
 			</section>

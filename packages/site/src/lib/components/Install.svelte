@@ -10,8 +10,8 @@
 		{ id: 'windows', label: 'Windows', command: `powershell -c "irm ${SITE}/install.ps1 | iex"`, supported: false }
 	];
 
-	const fromSource = `git clone https://github.com/paullj/toy-compiler
-cd toy-compiler && zig build -Doptimize=ReleaseFast`;
+	const fromSource = `git clone https://github.com/paullj/toy
+cd toy && zig build -Doptimize=ReleaseFast`;
 
 	const colors = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)'];
 

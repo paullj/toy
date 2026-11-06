@@ -37,11 +37,11 @@ test('the peer view sits under the history with its caveat and run details', asy
 test('toy bars come from the newest main record on the peers machine, others from the peer run', async ({ page }) => {
 	const toy = page.getByTestId('peers-toy');
 	const newest = 'bcbe70013688a3c739bec83ef757c70871fe5032';
-	await expect(toy.getByRole('link', { name: newest.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${newest}`);
+	await expect(toy.getByRole('link', { name: newest.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy/commit/${newest}`);
 	await expect(toy).toContainText('2026-11-03');
 	// The history fixture has no binary_trees, so that bar falls back to the peer run's toy row.
 	await expect(toy).toContainText('binary_trees');
-	await expect(toy.getByRole('link', { name: run.toy_commit.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/commit/${run.toy_commit}`);
+	await expect(toy.getByRole('link', { name: run.toy_commit.slice(0, 7) })).toHaveAttribute('href', `https://github.com/paullj/toy/commit/${run.toy_commit}`);
 	const chart = page.locator('figure[data-peer="loops"]');
 	await chart.scrollIntoViewIfNeeded();
 	const box = (await chart.locator('svg .lc-bar').first().boundingBox())!;
@@ -57,7 +57,7 @@ test('every benchmark gets one bar chart with a bar per language and source link
 		await expect(chart.locator('figcaption')).toHaveText(name);
 		await expect(chart.locator('svg .lc-bar')).toHaveCount(langs(name).length);
 		for (const r of results(name)) {
-			await expect(chart.locator('.sources a', { hasText: r.lang })).toHaveAttribute('href', `https://github.com/paullj/toy-compiler/blob/main/${r.source}`);
+			await expect(chart.locator('.sources a', { hasText: r.lang })).toHaveAttribute('href', `https://github.com/paullj/toy/blob/main/${r.source}`);
 		}
 	}
 });

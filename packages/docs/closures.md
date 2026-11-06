@@ -73,7 +73,7 @@ fn main() -> int {
 ```
 
 - It can call itself, and it captures like a lambda.
-- **Groups:** a run of local fns with no other statement between them is one group, and each fn in a group can call the others, before or after it ([#47](https://github.com/paullj/toy-compiler/issues/47)):
+- **Groups:** a run of local fns with no other statement between them is one group, and each fn in a group can call the others, before or after it ([#47](https://github.com/paullj/toy/issues/47)):
 
   ```toy
   fn main() -> int {
@@ -117,7 +117,7 @@ fn main() -> int {
   - A lambda's body is part of its owner's fingerprint, so a changed lambda already makes its owner's key change. Its own unit is lowered under the owner's tables (its captures, boxes and storage), and it has no key of its own.
   - A specialized copy is its instance's body with some value calls made direct. Each caller's key folds the copy's name.
   - Adapters and thunks are a few instructions each.
-  - The cost: a rebuild with no edit of `closures/escape_std_methods.toy` lowers 91 of its 152 units again. Keying these units on their owner's fingerprint plus their place in it would make them cacheable ([#39](https://github.com/paullj/toy-compiler/issues/39)).
+  - The cost: a rebuild with no edit of `closures/escape_std_methods.toy` lowers 91 of its 152 units again. Keying these units on their owner's fingerprint plus their place in it would make them cacheable ([#39](https://github.com/paullj/toy/issues/39)).
 
 ## Generics
 
@@ -144,7 +144,7 @@ bump(count)                          # count changes
 - **Limits:**
   - **Where `mut` may appear.** On the params of top-level fns and of inherent-impl methods, static (associated) methods included, and on any `self` receiver where `mut self` is allowed today. It is P0006 on a lambda's params, a local fn's params, an `extern` fn's params, a protocol sig's or a conformance method's params after `self`, and any param past the 64th.
   - **A conformance method's receiver** is `self` or `mut self` exactly as its protocol method declares it; otherwise T0076. An operator or loop that calls a witness for you (`==`, `<`, `+`, `io.println`, a `Map` key's hash, `for`'s `next`) knows only the protocol, and so does a generic call `t.m()` on a `T has P`, so that is how it passes the receiver: a copy for `self`, the caller's address for `mut self`. The prelude protocols (`Eq`, `Ord`, the arithmetic ones, `Hash`, `Display`, `From`, `Into`) declare `self`; `std/iter`'s `Iterator.next` declares `mut self`, so every iterator's `next` takes `mut self`, even a read-only one that changes nothing.
-    - **Why exact, not Swift's rule** ([#48](https://github.com/paullj/toy-compiler/issues/48)): letting a `self` witness satisfy a `mut self` requirement would need an adapter per (witness, protocol method) that loads the value and calls it, or a check of the witness's real mode at each protocol call, and boxing and "mutated by" hints would then differ between concrete and generic calls. One calling convention per protocol method is the simpler rule. The other direction cannot work at all: a `mut self` witness given a copy would write the copy, and the change would be lost.
+    - **Why exact, not Swift's rule** ([#48](https://github.com/paullj/toy/issues/48)): letting a `self` witness satisfy a `mut self` requirement would need an adapter per (witness, protocol method) that loads the value and calls it, or a check of the witness's real mode at each protocol call, and boxing and "mutated by" hints would then differ between concrete and generic calls. One calling convention per protocol method is the simpler rule. The other direction cannot work at all: a `mut self` witness given a copy would write the copy, and the change would be lost.
   - **`for x in it`** calls `it.iter()` once, then `next()` on that iterator. `iter` gets its receiver as it declares it: a copy for `iter(self)`, the variable itself for `iter(mut self)`, which then must be a place (T0019 otherwise) and counts as a mutation of it. `next` gets the loop's own iterator by address. `for k, v` does the same.
   - **The argument.** A local (a param, a forwarded `mut` param, a loop variable and a match binding included), a `Vec` element `xs[i]`, or a field / tuple-field chain rooted at either. Not a place (T0019): a literal, a call result, a struct literal or its field, a top-level fn name, a local fn name, a bound method `p.m`.
   - **Elements.** An element has no address, so a `mut` argument, a `mut self` receiver (`ps[i].bump()`) or a `for` over an `iter(mut self)` rooted at one is copy-in/copy-out, as a field store `xs[i].f = v` is: the handle and the index run where the argument is, the element is copied in there, the callee writes the copy, and after the call each copy is written back with `set`, in argument order, the receiver first. The handle is not boxed: a lambda that calls `ps[i].bump()` captures `ps` like any read. A bound `ps[i].bump` is still T0019, because the bound value would outlive the write-back.
@@ -241,7 +241,7 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 - **Escapes:** returning it, storing it (a field, a struct, enum or list literal, a `Vec`), comparing it, capturing it in a closure that escapes, assigning the local, passing it at a `mut` position, or passing it through a fn value or to a builtin, an extern or an intrinsic.
 - **Summaries:** which parameters of a function may escape, per function and per generic instance, computed bottom-up over the call graph. A call back into the caller's own cycle of calls that pass functions (recursion) escapes.
 - **Legality is the same at every level:** `toy check`, `-O0` and `-O1` agree on T0052. It can depend on another module's body: a callee that starts keeping its fn param makes a `mut`-param capture passed to it an error.
-- **`-O1` storage:** any one opt pass turns it on, not the level as such: `-O1` with every pass off (`--no-opt` for each) stores closures as `-O0` does, and `-O0 --opt=dce` stores them as `-O1` does. [#206](https://github.com/paullj/toy-compiler/issues/206) would give bound method values frame envs.
+- **`-O1` storage:** any one opt pass turns it on, not the level as such: `-O1` with every pass off (`--no-opt` for each) stores closures as `-O0` does, and `-O0 --opt=dce` stores them as `-O1` does. [#206](https://github.com/paullj/toy/issues/206) would give bound method values frame envs.
   - a non-escaping env goes in the frame of the body that makes it, whatever its size;
   - a captured-and-mutated local of any size that only non-escaping closures capture is not boxed: those closures hold its address;
   - when that frame would exceed codegen's limit (16 MiB), every env that body makes and every local it would unbox goes in a GC cell instead, as at `-O0`. The lowering decides this, the one place that knows the frame;
@@ -268,11 +268,11 @@ There is one sharing model, so the `&x` / `*r` operators were removed.
 
 Open issues that touch this page. Each has a repro.
 
-- **Uncached closure units** ([#39](https://github.com/paullj/toy-compiler/issues/39)): lambda units, specialized copies and adapters are lowered again on every build (see Representation).
-- **Bound method values** ([#206](https://github.com/paullj/toy-compiler/issues/206)): a bound method value always gets a heap env, and its receiver stays boxed (see Escape analysis).
-- **Local fns that call each other** ([#47](https://github.com/paullj/toy-compiler/issues/47)): the earlier one's use of the later one is R0001 (see Local named functions).
-- **Constructors in a `then` lambda** ([#49](https://github.com/paullj/toy-compiler/issues/49)): a bare `Option.none` or `Result.ok(v)` there is T0016 unless the lambda's return is annotated (see Standard library).
-- **LSP in a generic body that no instance reaches** ([#52](https://github.com/paullj/toy-compiler/issues/52)): no hover, definition or signature help on a method call there until something instantiates the body.
+- **Uncached closure units** ([#39](https://github.com/paullj/toy/issues/39)): lambda units, specialized copies and adapters are lowered again on every build (see Representation).
+- **Bound method values** ([#206](https://github.com/paullj/toy/issues/206)): a bound method value always gets a heap env, and its receiver stays boxed (see Escape analysis).
+- **Local fns that call each other** ([#47](https://github.com/paullj/toy/issues/47)): the earlier one's use of the later one is R0001 (see Local named functions).
+- **Constructors in a `then` lambda** ([#49](https://github.com/paullj/toy/issues/49)): a bare `Option.none` or `Result.ok(v)` there is T0016 unless the lambda's return is annotated (see Standard library).
+- **LSP in a generic body that no instance reaches** ([#52](https://github.com/paullj/toy/issues/52)): no hover, definition or signature help on a method call there until something instantiates the body.
 
 ## Out of scope
 

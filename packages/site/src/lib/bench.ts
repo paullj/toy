@@ -47,7 +47,7 @@ export const METRICS: { key: MetricKey; label: string; format: (v: number) => st
 	{ key: 'peak_footprint_bytes', label: 'Peak memory', format: (v) => `${(v / 1048576).toFixed(1)} MiB` }
 ];
 
-export const REPO_URL = 'https://github.com/paullj/toy-compiler';
+export const REPO_URL = 'https://github.com/paullj/toy';
 
 /** One record per line; blank lines are allowed so a trailing newline or an empty file parses. */
 export function parseHistory(text: string): BenchRecord[] {

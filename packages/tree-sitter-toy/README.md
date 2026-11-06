@@ -47,7 +47,7 @@ the zero-ERROR corpus parse.
 local parser_config = require("nvim-treesitter.parsers").get_parser_configs()
 parser_config.toy = {
   install_info = {
-    url = "/path/to/toy-compiler/packages/tree-sitter-toy",
+    url = "/path/to/toy/packages/tree-sitter-toy",
     files = { "src/parser.c", "src/scanner.c" },
   },
   filetype = "toy",
