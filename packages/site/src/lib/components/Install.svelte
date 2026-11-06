@@ -27,12 +27,12 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 </script>
 
 <div id="install" class="mt-8 scroll-mt-8">
-	<div role="tablist" aria-label="Operating system" class="os-tabs">
+	<div role="tablist" aria-label="Operating system" class="flex flex-wrap gap-2.5">
 		{#each systems as s, i}
 			<button
 				role="tab"
 				aria-selected={current === s.id}
-				class="os-tab"
+				class="block-tab"
 				class:active={current === s.id}
 				style="--block: {colors[i]}"
 				onclick={() => (current = s.id)}
@@ -42,7 +42,7 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 		{/each}
 	</div>
 
-	<div class="install-box" role="tabpanel">
+	<div class="mt-4 rounded-xl border" style="border-color: var(--border); background: var(--code-bg)" role="tabpanel">
 		<div class="flex items-start gap-3 px-4 py-3 font-mono text-[0.75rem] leading-relaxed">
 			<span class="select-none" style="color: var(--fg-muted)">$</span>
 			<code class="min-w-0 flex-1 [overflow-wrap:anywhere] opacity-50" data-testid="install-command">{os.command}</code>
@@ -66,46 +66,6 @@ cd toy-compiler && zig build -Doptimize=ReleaseFast`;
 </div>
 
 <style>
-	.os-tabs {
-		display: flex;
-		margin-bottom: -1.5px;
-	}
-	.os-tab {
-		position: relative;
-		border: 1.5px solid var(--border);
-		padding: 0.35rem 0.9rem;
-		font-size: 0.8rem;
-		font-weight: 600;
-		color: var(--fg-muted);
-		background: var(--bg);
-		transition: color 0.12s, background-color 0.12s, border-color 0.12s;
-	}
-	.os-tab + .os-tab {
-		margin-left: -1.5px;
-	}
-	.os-tab:first-child {
-		border-top-left-radius: 0.6rem;
-	}
-	.os-tab:last-child {
-		border-top-right-radius: 0.6rem;
-	}
-	.os-tab:hover {
-		z-index: 1;
-		color: var(--fg);
-		border-color: var(--block);
-	}
-	.os-tab.active {
-		z-index: 2;
-		color: var(--fg);
-		background: color-mix(in srgb, var(--block) 18%, var(--bg));
-		border-color: var(--block);
-	}
-	.install-box {
-		border: 1.5px solid var(--border);
-		border-radius: 0 0.75rem 0.75rem 0.75rem;
-		background: var(--code-bg);
-		box-shadow: 3px 3px 0 var(--border);
-	}
 	.tag {
 		flex-shrink: 0;
 		border: 1px solid var(--border);

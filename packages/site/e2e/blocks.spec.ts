@@ -146,7 +146,7 @@ test('hover tells how a closure holds a name, what a _ makes, and who mutates an
 	const cases = [
 		{ line: 'count += 1', word: 'count', note: 'captured: shared' },
 		{ line: 'add10 := add(10, _)', word: '_', note: 'capture: fn(int) -> int' },
-		{ line: '# count is now 3', word: 'count', note: 'mutated by bump' }
+		{ line: '# count is now 1', word: 'count', note: 'mutated by bump' }
 	];
 	for (const c of cases) {
 		// Off the editor first: a pointer that lands on the last tooltip keeps it open.

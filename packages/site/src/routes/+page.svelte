@@ -111,16 +111,9 @@ fn main() -> int {
 			title: 'Loops',
 			blurb: '<code class="code">for</code> walks a range or anything with an iterator. <code class="code">loop</code> is an expression, and a labeled <code class="code">break</code> can leave nested loops with a value.',
 			file: 'loops.toy',
-			code: `import std/vec
-
-fn main() -> int {
+			code: `fn main() -> int {
     total := 0
-    for i in 1..5 {            # 1, 2, 3, 4
-        total += i
-    }
-    for x in [4, 5, 6] {
-        total += x
-    }
+    for i in 1..5 { total += i }        # 1 + 2 + 3 + 4
     # loop is an expression: break hands it a value
     first := @outer loop {
         for j in 0..10 {
@@ -165,7 +158,6 @@ fn main() -> int {
 			file: 'closures.toy',
 			code: `fn add(a: int, b: int) -> int { a + b }
 fn bump(mut n: int) { n += 1 }
-fn twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
 
 fn main() -> int {
     count := 0
@@ -174,9 +166,8 @@ fn main() -> int {
         x + count
     }
     add10 := add(10, _)        # fn(x) { add(10, x) }
-    total := twice(tick, 0) + add10(5)
-    bump(count)                # count is now 3
-    return total + count
+    bump(count)                # count is now 1
+    return tick(add10(5)) + count
 }`
 		}
 	];
@@ -352,7 +343,7 @@ fn main() -> int {
 						{/each}
 					</ul>
 					<p class="mt-5 text-sm">
-						<a href="https://github.com/paullj/toy-compiler/blob/main/packages/docs/std.md" class="link">and more</a>
+						<a href="https://github.com/paullj/toy-compiler/blob/main/packages/docs/std.md" class="link">and more →</a>
 					</p>
 				</div>
 			</section>
