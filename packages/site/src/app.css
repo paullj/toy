@@ -179,3 +179,19 @@ code, pre, kbd, .font-mono {
 .tok-str { color: var(--tok-str); }
 .tok-com { color: var(--fg-muted); font-style: italic; }
 .tok-punc { color: var(--fg-muted); }
+
+/* Pill toggles: the OS picker and the example tabs. */
+.pill {
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 0.2rem 0.75rem;
+	font-size: 0.8rem;
+	color: var(--fg-muted);
+	transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+}
+.pill:hover { color: var(--accent); }
+.pill.active {
+	color: var(--fg);
+	background: var(--code-bg);
+	border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}

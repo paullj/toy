@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { useEventListener } from 'runed';
-	import Code from '$lib/components/Code.svelte';
+	import CheckOutput from '$lib/components/CheckOutput.svelte';
+	import ExampleTabs from '$lib/components/ExampleTabs.svelte';
 	import Install from '$lib/components/Install.svelte';
 	import SpeedBars from '$lib/components/SpeedBars.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
@@ -10,13 +11,14 @@
 
 	const nav = [
 		{ id: 'introduction', label: 'Introduction' },
-		{ id: 'features', label: 'Features' },
+		{ id: 'types', label: 'Types' },
+		{ id: 'control-flow', label: 'Control flow' },
+		{ id: 'tooling', label: 'Tooling' },
 		{ id: 'performance', label: 'Performance' },
-		{ id: 'install', label: 'Install' },
 		{ id: 'learn', label: 'Learn' }
 	];
 
-	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)'];
+	const blockColor = ['var(--toy-red)', 'var(--toy-yellow)', 'var(--toy-teal)', 'var(--toy-navy)', 'var(--toy-red)', 'var(--toy-yellow)'];
 
 	const secondary = [
 		{ href: resolve('/tour/'), label: 'Tour →' },
@@ -26,28 +28,15 @@
 		{ href: 'https://github.com/paullj/toy-compiler', label: 'Source →' }
 	];
 
-	const featureItems = [
+	const typeExamples = [
 		{
-			title: 'Type inference',
+			title: 'Inference',
 			blurb: 'Bind a value with <code class="code">:=</code> and its type is inferred. Annotate the boundaries and let the body follow.',
 			file: 'order.toy',
 			code: `fn main() -> int {
     price := 20        # inferred int
     quantity := 3
     return price * quantity
-}`
-		},
-		{
-			title: 'Pattern matching',
-			blurb: 'Enums hold one of several variants. <code class="code">match</code> destructures them, checked for exhaustiveness at compile time.',
-			file: 'shapes.toy',
-			code: `pub enum Shape { Circle(int), Square(int) }
-
-pub fn area(shape: Shape) -> int {
-    match shape {
-        .Circle(r) -> 3 * r * r,
-        .Square(side) -> side * side,
-    }
 }`
 		},
 		{
@@ -73,6 +62,32 @@ struct Square { side: int }
 
 impl Square has Area {
     fn area(self) -> int { self.side * self.side }
+}`
+		},
+		{
+			title: 'No null',
+			blurb: '<code class="code">Option[T]</code> and <code class="code">Result[T, E]</code> are ordinary enums. The postfix <code class="code">?</code> unwraps a value or returns early on the empty case.',
+			file: 'total.toy',
+			code: `pub fn total(a: Option[int], b: Option[int]) -> Option[int] {
+    x := a?
+    y := b?
+    Option.some(x + y)
+}`
+		}
+	];
+
+	const flowExamples = [
+		{
+			title: 'Pattern matching',
+			blurb: 'Enums hold one of several variants. <code class="code">match</code> destructures them, checked for exhaustiveness at compile time.',
+			file: 'shapes.toy',
+			code: `pub enum Shape { Circle(int), Square(int) }
+
+pub fn area(shape: Shape) -> int {
+    match shape {
+        .Circle(r) -> 3 * r * r,
+        .Square(side) -> side * side,
+    }
 }`
 		},
 		{
@@ -109,16 +124,6 @@ fn main() -> int {
         })
     bump(count)                # count is now 4
     return total + count
-}`
-		},
-		{
-			title: 'No null',
-			blurb: '<code class="code">Option[T]</code> and <code class="code">Result[T, E]</code> are ordinary enums. The postfix <code class="code">?</code> unwraps a value or returns early on the empty case.',
-			file: 'total.toy',
-			code: `pub fn total(a: Option[int], b: Option[int]) -> Option[int] {
-    x := a?
-    y := b?
-    Option.some(x + y)
 }`
 		}
 	];
@@ -222,79 +227,88 @@ fn main() -> int {
 						It aims to be ergonomic and performant but the main goal is for me to learn about language
 						design and compiler development.
 					</p>
+					<Install />
 				</div>
 			</section>
 
-			<!-- 02 Features -->
-			<section id="features" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="types" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[1]}"></span>02
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#features" class="transition-colors hover:text-[var(--accent)]">Features</a>
+						<a href="#types" class="transition-colors hover:text-[var(--accent)]">Types that stay out of the way</a>
 					</h2>
-					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						A modern type system over value types, with the ergonomics you expect and none of the
-						ceremony.
+					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						Static types with few annotations. Generics compile to plain structs and functions, protocols describe behaviour, and there is no null.
 					</p>
-
-					<div class="mt-8 border-t" style="border-color: var(--border)">
-						{#each featureItems as f}
-							<div class="border-b py-7" style="border-color: var(--border)">
-								<h3 class="text-base">{f.title}</h3>
-								<p class="mt-1.5 max-w-[54ch] text-sm leading-snug" style="color: var(--fg-muted)">
-									{@html f.blurb}
-								</p>
-								<div class="mt-4 max-w-2xl">
-									<Code code={f.code} filename={f.file} />
-								</div>
-							</div>
-						{/each}
-					</div>
+					<ExampleTabs examples={typeExamples} />
 				</div>
 			</section>
 
-			<!-- 03 Performance -->
-			<section id="performance" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="control-flow" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[2]}"></span>03
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Performance</a>
+						<a href="#control-flow" class="transition-colors hover:text-[var(--accent)]">Control flow that reads top to bottom</a>
 					</h2>
-					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						toy compiles straight to native machine code with its own backend, linker and code signer. No
-						VM, no interpreter.
+					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						Code reads in the order it runs. <code class="code">match</code> covers every case, pipes chain calls left to right, and closures share the variables they capture.
 					</p>
-					<SpeedBars />
-					<p class="mt-4 text-sm">
-						<a href={resolve('/benchmarks/')} class="link">See every benchmark, commit by commit →</a>
-					</p>
+					<ExampleTabs examples={flowExamples} />
 				</div>
 			</section>
 
-			<!-- 04 Install -->
-			<section id="install" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="tooling" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[3]}"></span>04
 				</div>
 				<div>
 					<h2 class="text-2xl">
-						<a href="#install" class="transition-colors hover:text-[var(--accent)]">Install</a>
+						<a href="#tooling" class="transition-colors hover:text-[var(--accent)]">Tooling from day one</a>
 					</h2>
-					<p class="mt-3 max-w-[48ch] text-sm leading-snug" style="color: var(--fg-muted)">
-						One command to install the <code class="code">toy</code> compiler.
+					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						Errors point at the exact code, say how to fix it, and carry a code that <code class="code">toy explain</code> documents. Add a <code class="code">Triangle</code> to <code class="code">Shape</code> and forget its arm:
 					</p>
-					<Install />
+					<div class="mt-2">
+						<CheckOutput />
+					</div>
+					<p class="mt-5 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						The same compiler runs as a language server, with hover, completion, go to definition and
+						inlay hints. Every example on this page is a live editor that uses it. Hover a name to see its
+						type, or break the code to see the error.
+					</p>
+					<p class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+						<a href={resolve('/docs/errors/')} class="link">Every error code →</a>
+						<a href={resolve('/playground/')} class="link">Open the playground →</a>
+					</p>
 				</div>
 			</section>
 
-			<!-- 05 Learn -->
-			<section id="learn" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+			<section id="performance" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
 				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
 					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[4]}"></span>05
+				</div>
+				<div>
+					<h2 class="text-2xl">
+						<a href="#performance" class="transition-colors hover:text-[var(--accent)]">Fast by default</a>
+					</h2>
+					<p class="mt-3 max-w-[52ch] text-sm leading-snug" style="color: var(--fg-muted)">
+						toy compiles straight to native machine code with its own backend, linker and code signer. No VM, no interpreter.
+					</p>
+					<SpeedBars />
+					<p class="mt-5 text-sm">
+						<a href={resolve('/benchmarks/')} class="link">See every benchmark, commit by commit →</a>
+					</p>
+				</div>
+			</section>
+
+			<!-- 06 Learn -->
+			<section id="learn" class="grid scroll-mt-8 grid-cols-[2.75rem_minmax(0,1fr)] pb-24">
+				<div class="flex h-8 items-center gap-1.5 font-mono text-[0.7rem]" style="color: var(--fg-muted)">
+					<span class="h-2 w-2 rounded-[3px]" style="background: {blockColor[5]}"></span>06
 				</div>
 				<div>
 					<h2 class="text-2xl">
