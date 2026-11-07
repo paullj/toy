@@ -180,6 +180,19 @@ test "hover describes declarations, bindings, type names, fields, and variants" 
     }
 }
 
+test "hover on a const shows its type and value, at its declaration and at a use" {
+    const gpa = testing.allocator;
+    var docs: @import("Documents.zig") = .{};
+    defer docs.deinit(gpa);
+    const ws: Workspace = .{ .io = std.Io.failing, .docs = &docs, .disk = false };
+    const src = "pub LIMIT :=: 2 * 3 - 10\n\nfn main() -> int {\n    return LIMIT + 4\n}\n";
+    for ([_]struct { line: u32, col: u32 }{ .{ .line = 0, .col = 5 }, .{ .line = 3, .col = 12 } }) |c| {
+        var h = (try hoverAt(gpa, ws, src, c.line, c.col, "file:///b/main.toy")) orelse return error.NoHover;
+        defer h.deinit();
+        try testing.expectEqualStrings("```toy\nLIMIT: int =: -4\n```", h.value);
+    }
+}
+
 test "hover on a local fn shows it as a binding of its function type" {
     const gpa = testing.allocator;
     var docs: @import("Documents.zig") = .{};

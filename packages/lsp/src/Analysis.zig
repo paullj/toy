@@ -461,6 +461,10 @@ pub fn declOf(an: *const Analysis, a: std.mem.Allocator, tok: u32) !?Site {
         if (tm.bundled or tm.tokens.len == 0) return null;
         return .{ .module = ex.mod, .tok = 0 };
     }
+    for (an.nodesAt(tok)) |i| if (i < an.resolutions().len) switch (an.resolutions()[i]) {
+        .constant => |c| return an.sourceSite(an.res().consts[c].module, an.res().consts[c].decl_node),
+        else => {},
+    };
     if (an.symbolAt(tok)) |sym| switch (sym) {
         .func => |f| {
             const fns = an.res().fns;

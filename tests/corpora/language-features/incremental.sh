@@ -629,6 +629,22 @@ expect_exits() {
   fi
 }
 
+# const value: a use lowers to the folded value, which the using fn's body text does not
+# hold, so a value edit must re-lower exactly the fns that name the const.
+const_base='N :=: 5
+fn get() -> int { N }
+fn other(n: int) -> int { n - 2 }
+fn main() -> int {
+    return get() + other(2)
+}
+'
+const_value="${const_base/N :=: 5/N :=: 7}"
+for prof in "" "--release"; do
+  tag="${prof:+_release}"
+  run_scenario "const_value$tag" "$const_base" "$const_value" 1 "$prof"
+  expect_exits "const_value$tag" 5 7
+done
+
 # 7) LAMBDA, SPEC AND ADAPTER UNITS (#39) — each is cached under a key built from content
 #    that already exists: a lambda under its owner's fingerprint, a spec unit under its
 #    instance's and its targets', an adapter under what it wraps and the layouts it moves,

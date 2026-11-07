@@ -465,6 +465,11 @@ pub const Node = extern struct {
         /// is the last path segment and `lhs` the path TOKEN range, as for `import_decl`;
         /// `rhs` is a TOKEN range of `(name, alias-or-none)` pairs (`importItems`).
         import_select_decl,
+
+        /// `N :=: e` (and `N: T =: e`): a compile-time constant. Appended at END (frozen
+        /// ordinal; `parse_version` bumped 26->27). `main_token` is the name; `lhs` is the
+        /// type-ref node of the typed form or `none`; `rhs` is the initializer.
+        const_decl,
     };
 };
 
@@ -901,7 +906,7 @@ pub const parse_magic: u32 = 0x544f5950;
 
 /// The packed-encoding version `ParseHeader` writes and `unpack` requires. One constant,
 /// so the writer and the reader can never disagree.
-pub const parse_version: u32 = 26;
+pub const parse_version: u32 = 27;
 
 /// Header prefixing a packed `Tree` blob. `extern` so it serializes by memcpy.
 pub const ParseHeader = extern struct {
@@ -1073,6 +1078,15 @@ fn renderNode(out: *std.Io.Writer, tree: Tree, tokens: []const Token, source: []
         .type_alias_decl => {
             try out.print("(alias {s} ", .{tok_text});
             try renderNode(out, tree, tokens, source, n.lhs);
+            try out.writeByte(')');
+        },
+        .const_decl => {
+            try out.print("(const {s} ", .{tok_text});
+            if (n.lhs != none) {
+                try renderNode(out, tree, tokens, source, n.lhs);
+                try out.writeByte(' ');
+            }
+            try renderNode(out, tree, tokens, source, n.rhs);
             try out.writeByte(')');
         },
         .impl_decl => {

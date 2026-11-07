@@ -1,0 +1,7 @@
+# Feature: a top-level const (N :=: 5) used as main's result.
+# expect: exit 5
+N :=: 5
+
+fn main() -> int {
+    return N
+}

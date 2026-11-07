@@ -74,6 +74,8 @@ const Typecheck = @This();
 /// checker drives it via `LayoutEngine.layoutStruct`/`layoutEnum` (id-ordered, from
 /// `checkGraph`/`runGraph`) and consumes the laid syms through the re-exported aliases.
 const LayoutEngine = @import("layout/Engine.zig");
+const Literal = @import("types/literal.zig");
+const const_fold = @import("types/const_fold.zig");
 const Abi = @import("codegen/abi/Abi.zig");
 const FrameLayout = @import("codegen/frame/FrameLayout.zig");
 
@@ -610,6 +612,18 @@ pub const GraphFnInput = struct {
     recv_type: Ast.Index = Ast.none,
 };
 
+/// A resolver constant: its `const_decl` and owning module.
+pub const GraphConstInput = struct {
+    module: u32,
+    decl_node: Ast.Index,
+};
+
+/// A constant's type and folded value, by global const id. A use lowers to `value`.
+pub const ConstSym = struct {
+    ty: Type,
+    value: i128,
+};
+
 /// The whole-graph typecheck output. Caller owns it; free with `GraphResult.deinit`.
 /// `node_types` is per-module; `layouts`/`enum_layouts`/`sigs` are PROGRAM-WIDE
 /// (global ids), exactly as the lowering stage's Frozen needs.
@@ -623,6 +637,8 @@ pub const GraphResult = struct {
     /// Diagnostics tagged with their owning module id via `Diagnostic.scope`.
     diags: []Diagnostic,
     owned_msgs: [][]u8,
+    /// One entry per global const id (parallel to the resolver's const table).
+    consts: []ConstSym = &.{},
     /// One Sig per GLOBAL fn id (parallel to the resolver's global fn table).
     /// `sigs[i].name` is BORROWED from the resolve `fns[i].name` table; its
     /// lifetime is tied to the sibling resolve result (they are torn down
@@ -696,6 +712,7 @@ pub const GraphResult = struct {
         gpa.free(self.owned_msgs);
         for (self.sigs) |s| gpa.free(@constCast(s.params));
         gpa.free(self.sigs);
+        gpa.free(self.consts);
         LayoutEngine.freeLayouts(gpa, self.layouts);
         for (self.enum_layouts) |e| {
             gpa.free(e.name);
@@ -1805,6 +1822,9 @@ sealed_methods_len: usize = 0,
 /// function indices in source order, and so do we (Pass A below).
 fns: std.ArrayList(FnSym),
 
+/// The constant table, parallel to `Resolve`'s `constant` ids (`foldConsts`).
+consts: std.ArrayList(ConstSym) = .empty,
+
 /// The struct table: one `StructSym` per struct id. The bare-name → global-id
 /// map lives per-module in the graph ctx (`activeStructMap`).
 structs: std.ArrayList(StructSym),
@@ -2027,6 +2047,8 @@ pub const GraphCtx = struct {
     /// fills each module's `struct_ids`/`enum_ids` in place (a put that grows
     /// reallocs the map header, which must be reflected in the ctx, not a copy).
     mods: []ModuleCtx,
+    /// The resolver's constants, by global const id.
+    consts: []const GraphConstInput = &.{},
 
     pub const ModuleCtx = struct {
         /// Per-module tree view (selected as the active tree when checking/laying
@@ -2097,6 +2119,8 @@ pub const Model = struct {
     enums: []const EnumSym,
     graph: *GraphCtx,
     gph_fn_names: ?[]const []const u8,
+    /// The folded constants by global const id, frozen before the body pass.
+    consts: []const ConstSym = &.{},
     /// The program-wide inherent-method table, frozen from Pass A. Read-only
     /// during the parallel body pass; drives `BodyChecker` method dispatch.
     methods: []const Method,
@@ -2141,6 +2165,7 @@ fn buildModel(t: *Typecheck) Model {
         .enums = t.enums.items,
         .graph = t.graph,
         .gph_fn_names = t.gph_fn_names,
+        .consts = t.consts.items,
         .methods = t.methods.items,
         .templates = t.templates.items,
         .rejected_methods = t.rejected_methods.items,
@@ -2394,6 +2419,7 @@ pub fn checkGraph(
             if (f.generic_bound_args.len > 0) gpa.free(@constCast(f.generic_bound_args));
         }
         t.fns.deinit(gpa);
+        t.consts.deinit(gpa);
         // Any instances not transferred into the result (an error path) are freed
         // here; the success path empties `t.mono` via `toOwnedSlice` first.
         for (t.mono.items) |*inst| {
@@ -2585,8 +2611,10 @@ pub fn checkGraph(
     // Diagnostics already carry their owning module in `scope`, sorted by
     // runGraph. Hand the owned slices to the result.
     const owned = try t.sink.toOwned();
+    const consts = try t.consts.toOwnedSlice(gpa);
 
     return GraphResult{
+        .consts = consts,
         .node_types = node_types,
         .callees = callees,
         .diags = owned.diags,
@@ -2861,6 +2889,8 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
             try t.decodeFnSig(gf.decl_node, gf.module, gf.recv_type);
         }
     }
+
+    try t.foldConsts();
 
     // Phase A2: pub-signature coherence. A `pub` fn that names a NON-pub type in a
     // param/return position is an error (an importer could not name that type).
@@ -4519,6 +4549,29 @@ pub fn tokSpan(t: *const Typecheck, tok: u32) Span {
 /// per-fn Pass-C parallelism. `entry_mod` is the entry module id (0 single-file);
 /// the entry is the FIRST fn named `main` in that module, mirroring the driver's
 /// own entry selection so the checker and codegen agree on which `main`.
+/// Fold each constant's initializer, in id order, to the value its uses lower to. A
+/// constant that does not fold is poison, so its uses report nothing more.
+fn foldConsts(t: *Typecheck) !void {
+    try t.consts.ensureTotalCapacity(t.gpa, t.graph.consts.len);
+    for (t.graph.consts) |c| {
+        _ = t.gphSelect(c.module);
+        const decl = t.tree.nodes[c.decl_node.int()];
+        const view: const_fold.View = .{ .tree = t.tree, .tokens = t.tokens, .source = t.source };
+        const at = t.spanOf(decl.rhs);
+        const name = t.tokens[decl.main_token].text(t.source);
+        const value = if (const_fold.isConstInt(view, decl.rhs)) const_fold.constValue(view, decl.rhs, Type.int) else null;
+        const sym: ConstSym = if (value) |v| blk: {
+            if (Literal.fitsValue(v, Type.int)) break :blk .{ .ty = Type.int, .value = v };
+            try t.sink.report(.{ .span = at, .code = .T0034 }, "literal out of range for type 'int'", .{});
+            break :blk .{ .ty = Type.invalid, .value = 0 };
+        } else blk: {
+            try t.sink.report(.{ .span = at, .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{name});
+            break :blk .{ .ty = Type.invalid, .value = 0 };
+        };
+        t.consts.appendAssumeCapacity(sym);
+    }
+}
+
 fn checkMainReturn(t: *Typecheck, entry_mod: u32) !void {
     for (t.fns.items) |f| {
         if (f.kind == .builtin or f.mod != entry_mod) continue;

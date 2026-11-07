@@ -23,6 +23,9 @@ pub const Resolution = union(enum) {
     /// node to a `.func` (cross-module) or stays quiet for a qualified type/enum
     /// reference (resolved later by Typecheck against that module's tables).
     module: u32,
+    /// A compile-time constant, by its graph-global id. Each use lowers to the folded
+    /// value; a constant has no storage.
+    constant: u32,
     /// On a `break`/`continue` node carrying a `@label`: the target's INNER
     /// construct node (the `loop_expr`/`while_stmt`/`for_stmt`/`block` that the
     /// `labeled` wrapper wraps). Typecheck/Codegen match this against their

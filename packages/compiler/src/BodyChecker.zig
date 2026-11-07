@@ -33,6 +33,7 @@ const PatternChecker = @import("PatternChecker.zig");
 const LambdaChecker = @import("LambdaChecker.zig");
 const CallInfer = @import("types/call_infer.zig");
 const Literal = @import("types/literal.zig");
+const const_fold = @import("types/const_fold.zig");
 const nearmiss = @import("diagnostics/nearmiss.zig");
 const Model = Typecheck.Model;
 const FnSym = Typecheck.FnSym;
@@ -1336,6 +1337,7 @@ pub const BodyChecker = struct {
             .identifier => switch (bc.resolutions[(node_idx).int()]) {
                 .local => |slot| bc.slotType(slot),
                 .func => |gid| try bc.typeOfFnValue(node_idx, gid, n.main_token),
+                .constant => |cid| bc.model.consts[cid].ty,
                 .unresolved => blk: {
                     // Resolve quietly skips a struct- or enum-named identifier (a type
                     // name in a position it doesn't bind: a constructor, a variant or an
@@ -5430,51 +5432,16 @@ pub const BodyChecker = struct {
         };
     }
 
-    /// Whether `node` is an integer constant built from literals alone, which, like a bare
-    /// literal, has no width of its own until a place or sibling gives it one.
-    fn isConstInt(bc: *const BodyChecker, node: Ast.Index) bool {
-        if (node == Ast.none) return false;
-        const n = bc.tree.nodes[node.int()];
-        return switch (n.tag) {
-            .literal_number => true,
-            .unary => switch (bc.tokens[n.main_token].tag) {
-                .minus, .tilde => bc.isConstInt(n.lhs),
-                else => false,
-            },
-            .binary => switch (bc.tokens[n.main_token].tag) {
-                // A shift is left out: `constValue` cannot fold it, so a narrow width it
-                // took would go unchecked and wrap (`b + (1 << 10)` at int8).
-                .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent => bc.isConstInt(n.lhs) and bc.isConstInt(n.rhs),
-                else => false,
-            },
-            else => false,
-        };
+    fn foldView(bc: *const BodyChecker) const_fold.View {
+        return .{ .tree = bc.tree, .tokens = bc.tokens, .source = bc.source };
     }
 
-    /// The value constant `node` denotes at integer type `t`, or null when it does not
-    /// fold: a zero divisor or an i128 overflow, which a range check cannot judge.
+    fn isConstInt(bc: *const BodyChecker, node: Ast.Index) bool {
+        return const_fold.isConstInt(bc.foldView(), node);
+    }
+
     fn constValue(bc: *const BodyChecker, node: Ast.Index, t: Type) ?i128 {
-        const n = bc.tree.nodes[node.int()];
-        const op = bc.tokens[n.main_token].tag;
-        if (n.tag == .literal_number) return Literal.intValue(bc.tokens[n.main_token].text(bc.source));
-        const l = bc.constValue(n.lhs, t) orelse return null;
-        if (n.tag == .unary) return if (op == .tilde) Literal.complement(l, t) else -l;
-        const r = bc.constValue(n.rhs, t) orelse return null;
-        return switch (op) {
-            .plus => std.math.add(i128, l, r) catch null,
-            .minus => std.math.sub(i128, l, r) catch null,
-            .star => std.math.mul(i128, l, r) catch null,
-            .slash => if (r == 0) null else @divTrunc(l, r),
-            .percent => if (r == 0) null else @rem(l, r),
-            .amp => l & r,
-            .pipe => l | r,
-            .caret => l ^ r,
-            // Wrapping at 128 bits keeps the low bits `wrap` reads, so no operand can trap.
-            .plus_percent => Literal.wrap(l +% r, t),
-            .minus_percent => Literal.wrap(l -% r, t),
-            .star_percent => Literal.wrap(l *% r, t),
-            else => null,
-        };
+        return const_fold.constValue(bc.foldView(), node, t);
     }
 
     /// T0034 when constant `node`, typed at `t`, folds outside `t` though each operand

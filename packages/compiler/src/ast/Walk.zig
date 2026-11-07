@@ -107,7 +107,7 @@ pub fn nodeSpan(src: Source, idx: Ast.Index) Span {
     // real child follows the name; one that seems to precede it is synthesized (a protocol
     // method's `self` type points at the protocol's name), so the name bounds the start.
     const is_decl = switch (root.tag) {
-        .fn_decl, .extern_fn_decl, .struct_decl, .tuple_struct_decl, .enum_decl, .protocol_decl, .type_alias_decl, .local_fn => true,
+        .fn_decl, .extern_fn_decl, .struct_decl, .tuple_struct_decl, .enum_decl, .protocol_decl, .type_alias_decl, .local_fn, .const_decl => true,
         else => false,
     };
     if (is_decl) first = root.main_token;
@@ -279,6 +279,12 @@ fn walkInner(src: Source, idx: Ast.Index, collect: bool, visitor: anytype) Visit
         .var_decl => {
             try emit(visitor, .{ .leaf = leaf });
             try walkInner(src, n.lhs, collect, visitor);
+        },
+        .const_decl => {
+            try emit(visitor, .{ .leaf = leaf });
+            try emit(visitor, .{ .flag = n.lhs != Ast.none }); // N :=: 5 != N: int =: 5
+            try walkInner(src, n.lhs, collect, visitor);
+            try walkInner(src, n.rhs, collect, visitor);
         },
         .assign => {
             try emit(visitor, .{ .leaf = leaf }); // x = 1 != x += 1 != x -= 1

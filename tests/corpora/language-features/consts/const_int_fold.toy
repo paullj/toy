@@ -1,0 +1,15 @@
+# Feature: a const folded from literal arithmetic; each use reads the value. `pub` exports it.
+# expect: stdout "10\n-7\n"
+# expect: exit 3
+import std/io
+
+pub OFFSET :=: -2 + 3 * 4
+NEG :=: ~6
+
+fn scale(x: int) -> int { x * OFFSET }
+
+fn main() -> int {
+    io.println(OFFSET)
+    io.println(NEG)
+    return scale(3) - 27
+}

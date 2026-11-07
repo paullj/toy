@@ -54,7 +54,7 @@
   "&&" "||" "|" "|>" "&" "^" "~" "<<" ">>"
   "+." "-." "*." "/." "<." ">." "<=." ">=."
   "+%" "-%" "*%"
-  "=" ":=" "->" "?" ".."
+  "=" ":=" ":=:" "->" "?" ".."
   "+=" "-=" "*=" "/=" "%=" "|=" "&=" "^=" "<<=" ">>=" "+.=" "-.=" "*.=" "/.=" "+%=" "-%=" "*%="
 ] @operator
 
@@ -87,6 +87,7 @@
 (enum_declaration name: (identifier) @type)
 (protocol_declaration name: (identifier) @type)
 (type_alias name: (identifier) @type)
+(const_declaration name: (identifier) @constant)
 
 ; An import path and a whole-module alias name modules. A selected name can be any item,
 ; which the grammar cannot tell apart, so a capitalised one is taken for a type.

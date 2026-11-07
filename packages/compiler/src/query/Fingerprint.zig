@@ -173,6 +173,21 @@ pub fn fingerprint(
     return h.final();
 }
 
+/// Fold the constants a body names, in walk order, into its fingerprint `body_fp`. A body
+/// that names none keeps `body_fp`, so its warm-cache entry survives.
+pub fn foldConsts(body_fp: u64, consts: []const Typecheck.ConstSym) u64 {
+    if (consts.len == 0) return body_fp;
+    var h = std.hash.Wyhash.init(body_fp);
+    AstWalk.updateU32(&h, @intCast(consts.len));
+    for (consts) |c| {
+        foldTouched(&h, .{ .kind = c.ty.kind, .int_desc = @bitCast(c.ty.int_desc) });
+        var vb: [16]u8 = undefined;
+        std.mem.writeInt(i128, &vb, c.value, .little);
+        h.update(&vb);
+    }
+    return h.final();
+}
+
 /// Fold callee identities and signatures, in order: the `(b)` component of `fingerprint`.
 pub fn foldSigs(h: *std.hash.Wyhash, sigs: []const Sig) void {
     AstWalk.updateU32(h, @intCast(sigs.len));

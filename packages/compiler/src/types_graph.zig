@@ -96,6 +96,11 @@ pub fn checkGraphWith(
         try bindNamespaces(gpa, graph, mc, @intCast(mi));
     }
 
+    const consts = try gpa.alloc(Typecheck.GraphConstInput, res.consts.len);
+    defer gpa.free(consts);
+    for (res.consts, consts) |rc, *c| c.* = .{ .module = rc.module, .decl_node = rc.decl_node };
+    ctx.consts = consts;
+
     const fns = try gpa.alloc(Typecheck.GraphFnInput, res.fns.len);
     defer gpa.free(fns);
     for (res.fns, 0..) |gf, i| {

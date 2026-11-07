@@ -250,6 +250,12 @@ pub const Tag = enum(u8) {
     minus_percent_eq, // -%=
     star_percent_eq, // *%=
 
+    /// `:=:` declares an inferred const (`N :=: 5`). It differs from `:=` because a
+    /// script with an implicit main will read a top-level `x := 5` as a statement.
+    colon_eq_colon,
+    /// `=:` ends the typed const form (`N: int =: 5`), as `=` ends a typed var.
+    eq_colon,
+
     /// The binary operator a compound assignment applies, or null for any other tag.
     pub fn compoundBase(tag: Tag) ?Tag {
         return switch (tag) {

@@ -436,6 +436,7 @@ const Plan = struct {
                 .sig = sig,
                 .instances = tc.instances,
                 .sigs = tc.sigs,
+                .consts = tc.consts,
                 .methods = tc.methods,
                 .derives = tc.derives,
                 .prelude_ids = tc.prelude_ids,

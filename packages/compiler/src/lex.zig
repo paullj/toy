@@ -264,7 +264,7 @@ fn lexSymbol(l: *Lexer, start: u32) Token {
         '*' => if (l.eat('.')) (if (l.eat('=')) .star_dot_eq else .star_dot) else if (l.eat('%')) (if (l.eat('=')) .star_percent_eq else .star_percent) else if (l.eat('=')) .star_eq else .star,
         '/' => if (l.eat('.')) (if (l.eat('=')) .slash_dot_eq else .slash_dot) else if (l.eat('=')) .slash_eq else .slash,
         '%' => if (l.eat('=')) .percent_eq else .percent,
-        '=' => if (l.eat('=')) .eq_eq else .eq,
+        '=' => if (l.eat('=')) .eq_eq else if (l.eat(':')) .eq_colon else .eq,
         '!' => if (l.eat('=')) .bang_eq else .bang,
         '<' => if (l.eat('<')) (if (l.eat('=')) .lt_lt_eq else .lt_lt) else if (l.eat('=')) (if (l.eat('.')) .le_dot else .lt_eq) else if (l.eat('.')) .lt_dot else .lt,
         '>' => if (l.eat('>')) (if (l.eat('=')) .gt_gt_eq else .gt_gt) else if (l.eat('=')) (if (l.eat('.')) .ge_dot else .gt_eq) else if (l.eat('.')) .gt_dot else .gt,
@@ -279,7 +279,7 @@ fn lexSymbol(l: *Lexer, start: u32) Token {
         '[' => .l_bracket,
         ']' => .r_bracket,
         ',' => .comma,
-        ':' => if (l.eat('=')) .colon_eq else .colon,
+        ':' => if (l.eat('=')) (if (l.eat(':')) .colon_eq_colon else .colon_eq) else .colon,
         '.' => if (l.eat('.')) (if (l.eat('.')) .ellipsis else .dotdot) else .dot,
         '@' => .at,
         '?' => .question,
@@ -353,6 +353,12 @@ test "keywords and identifiers" {
 
 test "operators including := and other two-char" {
     try expectTags("== = != -> := < <= :", &.{ .eq_eq, .eq, .bang_eq, .arrow, .colon_eq, .lt, .lt_eq, .colon, .eof });
+}
+
+test "const tokens :=: and =: are single tokens" {
+    try expectTags("N :=: 5", &.{ .identifier, .colon_eq_colon, .number, .eof });
+    try expectTags("N: int =: 5", &.{ .identifier, .colon, .identifier, .eq_colon, .number, .eof });
+    try expectTags("x := :", &.{ .identifier, .colon_eq, .colon, .eof });
 }
 
 test "logical && and || are two-char operators" {

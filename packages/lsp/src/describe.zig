@@ -54,6 +54,11 @@ pub const Describer = struct {
         var decl: ?u32 = null;
         for (d.an.nodesAt(tok)) |i| {
             const n = m.nodes[i];
+            switch (resolutions[i]) {
+                .constant => |c| return d.constant(c),
+                else => {},
+            }
+            if (n.tag == .const_decl) if (d.constOf(d.an.entry(), i)) |c| return d.constant(c);
             if (resolutions[i] == .func) {
                 // A call of a generic fn shows the instance it runs.
                 if (d.an.freeCallee(d.an.callSlotOf(i))) |fc| if (fc == .instance) if (try d.instance(fc.instance)) return true;
@@ -104,6 +109,28 @@ pub const Describer = struct {
             try d.appendNodeText(tm, decl.lhs.int());
         }
         return true;
+    }
+
+    /// Const `c` as `N: T =: value`, the typed form of its declaration with the value
+    /// folded. A const that did not fold shows nothing.
+    fn constant(d: *Describer, c: u32) !bool {
+        const consts = d.tc().consts;
+        if (c >= consts.len or consts[c].ty.kind == .invalid) return false;
+        const gc = d.an.res().consts[c];
+        const tm = &d.an.graph.modules[gc.module];
+        const name_tok = tm.tokens[tm.nodes[gc.decl_node.int()].main_token];
+        try d.buf.print(d.a, "{s}: ", .{tm.source[name_tok.start..name_tok.end]});
+        try renderType(d.a, &d.buf, consts[c].ty, d.tc().layouts, d.tc().enum_layouts);
+        try d.buf.print(d.a, " =: {d}", .{consts[c].value});
+        return true;
+    }
+
+    /// The global id of the const declared by node `decl` of module `mod`.
+    fn constOf(d: *const Describer, mod: u32, decl: u32) ?u32 {
+        for (d.an.res().consts, 0..) |gc, c| {
+            if (gc.module == mod and gc.decl_node.int() == decl) return @intCast(c);
+        }
+        return null;
     }
 
     /// `Enum.variant` spelled through the type name (`Option.some(x)`) is a field access,
