@@ -84,6 +84,9 @@ pub const GlobalConst = struct {
     module: u32,
     decl_node: Ast.Index,
     is_pub: bool,
+    /// The fn a local constant is declared in, whose type parameters are in scope at
+    /// its type; `Ast.none` at top level.
+    owner_fn: Ast.Index = Ast.none,
 };
 
 /// The whole-graph resolve output. Caller owns it; free with `deinit`.
@@ -125,6 +128,8 @@ const ModuleTables = struct {
     pub_fns: std.StringHashMapUnmanaged(u32) = .empty,
     /// This module's constants, name → global const id.
     consts: std.StringHashMapUnmanaged(u32) = .empty,
+    /// This module's PUB constants, a subset of `consts`. Visible to importers.
+    pub_consts: std.StringHashMapUnmanaged(u32) = .empty,
     /// This module's struct type names (pub flag as value).
     structs: std.StringHashMapUnmanaged(bool) = .empty,
     /// This module's enum type names (pub flag as value).
@@ -144,6 +149,7 @@ const ModuleTables = struct {
         self.fns.deinit(gpa);
         self.pub_fns.deinit(gpa);
         self.consts.deinit(gpa);
+        self.pub_consts.deinit(gpa);
         self.structs.deinit(gpa);
         self.enums.deinit(gpa);
         self.namespaces.deinit(gpa);
@@ -176,7 +182,17 @@ const LaterFn = struct { name: []const u8, declared: bool = false, named_early: 
 /// A lambda or local fn whose body is being resolved: its captures grow as outer locals
 /// are named. A `_` capture's `hole` is the one node that reads its hidden param `hole_slot`.
 const OpenBoundary = struct { node: Ast.Index, rank: u32, slot_floor: u32, label_floor: usize, self_slot: ?u32 = null, group: Closure.Group = .{}, captures: std.ArrayList(Closure.Capture) = .empty, hole: Ast.Index = Ast.none, hole_slot: u32 = 0 };
-const Scope = struct { names: std.StringHashMapUnmanaged(u32) = .empty };
+/// A block's names: its locals (name -> index into `locals`) and its constants (name ->
+/// global const id), which have no slot.
+const Scope = struct {
+    names: std.StringHashMapUnmanaged(u32) = .empty,
+    consts: std.StringHashMapUnmanaged(u32) = .empty,
+
+    fn deinit(s: *Scope, gpa: std.mem.Allocator) void {
+        s.names.deinit(gpa);
+        s.consts.deinit(gpa);
+    }
+};
 const LabelEntry = struct { name: []const u8, construct_node: Ast.Index };
 
 /// One active block's dead-store state: a local's slot -> the name token of the last
@@ -379,6 +395,7 @@ const GraphResolve = struct {
                             continue;
                         }
                         gop.value_ptr.* = @intCast(g.consts.items.len);
+                        if (is_pub) try g.tables[mod].pub_consts.put(g.gpa, name, gop.value_ptr.*);
                         try g.consts.append(g.gpa, .{ .module = mod, .decl_node = decl_idx, .is_pub = is_pub });
                     },
                     .fn_decl => {
@@ -619,6 +636,7 @@ const GraphResolve = struct {
                 // silently win and leaving the qualified call `.unresolved` → a codegen
                 // crash with no user diagnostic.
                 if (g.tables[mod].fns.contains(ns_name) or
+                    g.tables[mod].consts.contains(ns_name) or
                     g.tables[mod].structs.contains(ns_name) or
                     g.tables[mod].enums.contains(ns_name))
                 {
@@ -701,6 +719,10 @@ const GraphResolve = struct {
                     try t.fns.put(g.gpa, local, gid);
                     if (is_pub) try t.pub_fns.put(g.gpa, local, gid);
                 },
+                .const_decl => if (g.tables[found.mod].consts.get(g.nameOf(found.mod, owner.nodes[found.decl.int()].main_token))) |cid| {
+                    try t.consts.put(g.gpa, local, cid);
+                    if (is_pub) try t.pub_consts.put(g.gpa, local, cid);
+                },
                 .struct_decl, .tuple_struct_decl => try t.structs.put(g.gpa, local, is_pub),
                 .enum_decl => try t.enums.put(g.gpa, local, is_pub),
                 .type_alias_decl => try t.selected_kinds.put(g.gpa, local, "type"),
@@ -716,6 +738,7 @@ const GraphResolve = struct {
             .struct_decl, .tuple_struct_decl => "struct",
             .enum_decl => "enum",
             .protocol_decl => "protocol",
+            .const_decl => "constant",
             else => "type alias",
         };
     }
@@ -821,7 +844,7 @@ const GraphResolve = struct {
     }
 
     fn resetFnState(g: *GraphResolve) void {
-        for (g.scopes.items) |*s| s.names.deinit(g.gpa);
+        for (g.scopes.items) |*s| s.deinit(g.gpa);
         g.scopes.clearRetainingCapacity();
         g.locals.clearRetainingCapacity();
         g.slot_next = 0;
@@ -1158,6 +1181,8 @@ const GraphResolve = struct {
             // expression (a bare `match`/`loop`/`if`/block/`unsafe`/labeled reaches statement
             // position wrapped in an `expr_stmt`); those flush.
             .expr_stmt => if (isCfExpr(g.nodes()[stmt.lhs.int()].tag)) top.clearRetainingCapacity(),
+            // A constant writes no local and reads none at run time.
+            .const_decl => {},
             // Every other statement — `if`/`while`/`for`/`for_in`/`break`/`continue`/`return`,
             // an unanalyzable `error_node`, and any future statement tag — flushes (the safe
             // default): pending must never survive across a statement we cannot reason about.
@@ -1206,6 +1231,8 @@ const GraphResolve = struct {
                 // temporary like the call itself.
                 if (target.tag == .field_access or target.tag == .tuple_field or (target.tag == .index and symbols_res.indexesHeldVec(g.nodes(), stmt.lhs))) {
                     try g.resolveExpr(stmt.lhs);
+                    if (g.resolutions[g.cur_mod][stmt.lhs.int()] == .constant)
+                        try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "cannot assign to constant '{s}'", .{g.nameText(target.main_token)});
                 } else if (target.tag != .identifier) {
                     // A call result (`p.get() = v`) or another value with no name: its
                     // main token is no name to look up.
@@ -1289,6 +1316,7 @@ const GraphResolve = struct {
             },
             .labeled => try g.resolveLabeled(stmt_idx),
             .local_fn => try g.resolveLocalFnGroup(&.{stmt_idx}),
+            .const_decl => try g.declareLocalConst(stmt_idx),
             // A poison leaf as a statement: already-diagnosed, resolve nothing.
             .error_node => {},
             else => try g.resolveExpr(stmt_idx),
@@ -1600,6 +1628,13 @@ const GraphResolve = struct {
                 return;
             }
         }
+        if (tt.consts.get(member)) |cid| {
+            // Bound even when private, so the one R0005 is the only error its uses cost.
+            g.res(node_idx, .{ .constant = cid });
+            if (!tt.pub_consts.contains(member))
+                try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, n.main_token), .code = .R0005, .scope = g.cur_mod }, "constant '{s}' is not exported by module '{s}'", .{ member, g.graph.modules[target].path });
+            return;
+        }
         // A pub type member is quiet (the qualified type / enum-variant tail is bound
         // by Typecheck). For a 3-level `mod.Enum.Variant`, this node is the inner
         // `mod.Enum` field_access — leave it unresolved; the outer field_access keeps
@@ -1740,12 +1775,16 @@ const GraphResolve = struct {
 
     fn popScope(g: *GraphResolve) void {
         var s = g.scopes.pop().?;
-        s.names.deinit(g.gpa);
+        s.deinit(g.gpa);
     }
 
     fn declare(g: *GraphResolve, name_tok: u32, comptime dup_fmt: []const u8, comptime warn_code: codes.Code) !?u32 {
         const name = g.nameText(name_tok);
         const scope = &g.scopes.items[g.scopes.items.len - 1];
+        if (scope.consts.get(name)) |cid| {
+            try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, name_tok), .code = .R0011, .related = g.tokSpan(g.cur_mod, g.constNameTok(cid)), .scope = g.cur_mod }, dup_fmt, .{name});
+            return null;
+        }
         const gop = try scope.names.getOrPut(g.gpa, name);
         if (gop.found_existing) {
             const at: DiagnosticSink.Report = .{ .span = g.tokSpan(g.cur_mod, name_tok), .code = .R0011, .related = g.tokSpan(g.cur_mod, g.locals.items[gop.value_ptr.*].name_tok), .scope = g.cur_mod };
@@ -1757,37 +1796,63 @@ const GraphResolve = struct {
                 try g.sink.report(at, dup_fmt, .{name});
             return null;
         }
-        // A shadow-eligible binding (`:=`, for-var, param — `warn_code != .none`) that hides
-        // an enclosing lexical binding or a seeded builtin, silenced by a leading `_`. Search
-        // OUTER scopes only (`0..len-1`): the current scope's key was just half-inserted by
-        // `getOrPut` above (its value_ptr is still uninitialized), and a same-scope name is a
-        // redeclaration handled above — not a shadow. Read the map directly (not
-        // `lookupLocalOrFn`, which also searches the top scope, marks the outer binding used,
-        // and resolves user module fns — none of which we want here).
-        if (warn_code != .none and !(name.len != 0 and name[0] == '_')) {
-            const off = g.tokSpan(g.cur_mod, name_tok);
-            const shadowed: ?u32 = blk: {
-                var i = g.scopes.items.len - 1;
-                while (i > 0) {
-                    i -= 1;
-                    if (g.scopes.items[i].names.get(name)) |outer_idx| break :blk outer_idx;
-                }
-                break :blk null;
-            };
-            if (shadowed) |outer_idx| {
-                const rel = g.tokSpan(g.cur_mod, g.locals.items[outer_idx].name_tok);
-                try g.sink.report(.{ .span = off, .code = .W0009, .related = rel, .scope = g.cur_mod }, "'{s}' shadows an outer binding", .{name});
-            } else if (g.tables[g.cur_mod].fns.get(name)) |gid| {
-                if (g.fns.items[gid].kind == .builtin)
-                    try g.sink.report(.{ .span = off, .code = .W0009, .scope = g.cur_mod }, "'{s}' shadows a builtin", .{name});
-            }
-        }
+        if (warn_code != .none) try g.warnShadow(name, name_tok);
         const slot = g.slot_next;
         g.slot_next += 1;
         const local_idx: u32 = @intCast(g.locals.items.len);
         try g.locals.append(g.gpa, .{ .name_tok = name_tok, .slot = slot, .warn_code = warn_code });
         gop.value_ptr.* = local_idx;
         return slot;
+    }
+
+    /// W0009 when a shadow-eligible binding (`:=`, `=:`, for-var, param) hides a binding
+    /// of an enclosing scope or a seeded builtin, silenced by a leading `_`. Search OUTER
+    /// scopes only (`0..len-1`): the current scope may hold the name half-inserted by a
+    /// `getOrPut`, and a same-scope name is a redeclaration, not a shadow. Read the maps
+    /// directly (not `lookupLocalOrFn`, which also searches the top scope, marks the outer
+    /// binding used, and resolves user module fns, none of which we want here).
+    fn warnShadow(g: *GraphResolve, name: []const u8, name_tok: u32) !void {
+        if (name.len != 0 and name[0] == '_') return;
+        const off = g.tokSpan(g.cur_mod, name_tok);
+        var i = g.scopes.items.len - 1;
+        while (i > 0) {
+            i -= 1;
+            const s = g.scopes.items[i];
+            const outer: ?u32 = if (s.names.get(name)) |li| g.locals.items[li].name_tok else if (s.consts.get(name)) |cid| g.constNameTok(cid) else null;
+            if (outer) |tok| {
+                try g.sink.report(.{ .span = off, .code = .W0009, .related = g.tokSpan(g.cur_mod, tok), .scope = g.cur_mod }, "'{s}' shadows an outer binding", .{name});
+                return;
+            }
+        }
+        if (g.tables[g.cur_mod].fns.get(name)) |gid| {
+            if (g.fns.items[gid].kind == .builtin)
+                try g.sink.report(.{ .span = off, .code = .W0009, .scope = g.cur_mod }, "'{s}' shadows a builtin", .{name});
+        }
+    }
+
+    /// A block's `N :=: e`: a constant with a graph-global id, named from its declaration
+    /// to the end of the block. Its initializer resolves first, so it cannot name itself.
+    fn declareLocalConst(g: *GraphResolve, decl_idx: Ast.Index) error{OutOfMemory}!void {
+        const decl = g.nodes()[decl_idx.int()];
+        try g.resolveTypeRef(decl.lhs);
+        try g.resolveExpr(decl.rhs);
+        const name = g.nameText(decl.main_token);
+        const scope = &g.scopes.items[g.scopes.items.len - 1];
+        const prior: ?u32 = if (scope.names.get(name)) |li| g.locals.items[li].name_tok else if (scope.consts.get(name)) |cid| g.constNameTok(cid) else null;
+        if (prior) |tok| {
+            try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, decl.main_token), .code = .R0011, .related = g.tokSpan(g.cur_mod, tok), .scope = g.cur_mod }, "redeclaration of '{s}'", .{name});
+            return;
+        }
+        try g.warnShadow(name, decl.main_token);
+        const cid: u32 = @intCast(g.consts.items.len);
+        try g.consts.append(g.gpa, .{ .module = g.cur_mod, .decl_node = decl_idx, .is_pub = false, .owner_fn = g.cur_fn });
+        try scope.consts.put(g.gpa, name, cid);
+    }
+
+    /// The name token of const `cid`'s declaration.
+    fn constNameTok(g: *GraphResolve, cid: u32) u32 {
+        const c = g.consts.items[cid];
+        return g.graph.modules[c.module].nodes[c.decl_node.int()].main_token;
     }
 
     /// Whether a name resolves to a local or this module's fn (used to decide if a
@@ -1801,6 +1866,7 @@ const GraphResolve = struct {
                 g.locals.items[local_idx].used = true;
                 return .{ .local = g.locals.items[local_idx].slot };
             }
+            if (g.scopes.items[i].consts.get(name)) |cid| return .{ .constant = cid };
         }
         if (g.tables[g.cur_mod].fns.get(name)) |gid| {
             // A selected import of a core extern is bound (its R0005 is the one error)
@@ -2121,7 +2187,7 @@ pub fn resolveGraph(gpa: std.mem.Allocator, graph: *const Graph.Graph) !GraphRes
     defer {
         for (tables) |*t| t.deinit(gpa);
         gpa.free(tables);
-        for (g.scopes.items) |*s| s.names.deinit(gpa);
+        for (g.scopes.items) |*s| s.deinit(gpa);
         g.scopes.deinit(gpa);
         g.locals.deinit(gpa);
         g.label_stack.deinit(gpa);
@@ -2712,6 +2778,30 @@ test "a same-scope redeclaration stays the redeclaration error, not W0009" {
         }
     };
     try withResolvedGraph(".toy-test-shadow-dup", files, "main.toy", Check.run);
+}
+
+test "a local const shadows like a local: W0009 either way round" {
+    const files = &[_]FixtureFile{.{ .path = "main.toy", .source =
+        \\fn f(a: int) -> int {
+        \\ a :=: 3
+        \\ K :=: 1
+        \\ if a > 0 {
+        \\  K := 2
+        \\  return K
+        \\ }
+        \\ return K
+        \\}
+        \\
+    }};
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 2), countCode(r, .W0009));
+            for (r.diags) |d| if (d.code == .W0009)
+                try testing.expect(d.related != @import("diagnostics/Diagnostic.zig").NO_RELATED);
+        }
+    };
+    try withResolvedGraph(".toy-test-shadow-const", files, "main.toy", Check.run);
 }
 
 test "two non-nested sibling blocks reusing a name do not warn W0009" {
@@ -5364,4 +5454,44 @@ test "a selected namespace used only through a type it makes bare is used" {
         }
     };
     try withResolvedGraph(".toy-test-select-ns-used", files, "main.toy", Check.run);
+}
+
+test "a local const is named to the end of its block and a pub one across modules" {
+    const files = &[_]FixtureFile{
+        .{ .path = "main.toy", .source =
+        \\import lib/conf
+        \\fn main() -> int {
+        \\    {
+        \\        K :=: 3
+        \\        _k := K
+        \\    }
+        \\    _a := conf.N
+        \\    _b := conf.HIDDEN
+        \\    K
+        \\}
+        \\
+        },
+        .{ .path = "lib/conf.toy", .source =
+        \\pub N :=: 5
+        \\HIDDEN :=: 6
+        \\
+        },
+    };
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 3), r.consts.len);
+            try testing.expect(!r.consts[2].is_pub);
+            try testing.expectEqual(@as(usize, 1), countCode(r, .R0001));
+            try testing.expectEqual(@as(usize, 1), countCode(r, .R0005));
+            var bound: usize = 0;
+            for (r.resolutions[0]) |res_| switch (res_) {
+                .constant => bound += 1,
+                else => {},
+            };
+            // `K` in the block, `conf.N` and the private `conf.HIDDEN` (bound, and R0005).
+            try testing.expectEqual(@as(usize, 3), bound);
+        }
+    };
+    try withResolvedGraph(".toy-test-local-const", files, "main.toy", Check.run);
 }

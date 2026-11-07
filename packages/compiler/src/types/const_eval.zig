@@ -35,6 +35,7 @@ pub fn foldAll(t: *Typecheck) !void {
     defer t.gpa.free(state);
     @memset(state, .unseen);
     var ev: Eval = .{ .t = t, .state = state };
+    defer ev.stack.deinit(t.gpa);
     for (0..n) |cid| _ = try ev.constant(@intCast(cid));
 }
 
@@ -52,6 +53,8 @@ const Eval = struct {
     state: []State,
     /// The name of the constant being folded, for the T0083 message.
     name: []const u8 = "",
+    /// The constants being folded, outermost first: a use of one of them is a cycle.
+    stack: std.ArrayList(u32) = .empty,
 
     fn constant(ev: *Eval, cid: u32) Error!ConstSym {
         switch (ev.state[cid]) {
@@ -61,6 +64,8 @@ const Eval = struct {
             .unseen => {},
         }
         ev.state[cid] = .folding;
+        try ev.stack.append(ev.t.gpa, cid);
+        defer _ = ev.stack.pop();
         const t = ev.t;
         const c = t.graph.consts[cid];
         const prev_mod = t.gphSelect(c.module);
@@ -71,7 +76,7 @@ const Eval = struct {
         }
         const decl = t.tree.nodes[c.decl_node.int()];
         ev.name = t.tokens[decl.main_token].text(t.source);
-        const declared: ?Type = if (decl.lhs != Ast.none) t.typeFromNode(decl.lhs) else null;
+        const declared: ?Type = if (decl.lhs != Ast.none) try ev.declaredType(c, decl.lhs) else null;
         const sym: ConstSym = blk: {
             if (declared) |d| if (d.kind == .invalid) break :blk poison;
             const f = (try ev.eval(decl.rhs, declared)) orelse break :blk poison;
@@ -83,6 +88,25 @@ const Eval = struct {
         t.consts.items[cid] = sym;
         ev.state[cid] = .done;
         return sym;
+    }
+
+    /// A constant's declared type, read with its fn's type parameters in scope so that
+    /// naming one is rejected as such rather than as an unknown type: a value has no one
+    /// type across the fn's instantiations.
+    fn declaredType(ev: *Eval, c: Typecheck.GraphConstInput, type_node: Ast.Index) Error!Type {
+        const t = ev.t;
+        if (c.owner_fn == Ast.none) return t.typeFromNode(type_node);
+        const proto = Ast.protoAt(t.tree, t.tree.nodes[c.owner_fn.int()].lhs.int());
+        const names = try t.gpa.alloc([]const u8, proto.generic_params.len);
+        defer t.gpa.free(names);
+        for (proto.generic_params, names) |gp, *name| name.* = t.tokens[t.tree.nodes[gp.int()].main_token].text(t.source);
+        const prev = t.cur_generic_params;
+        t.cur_generic_params = names;
+        defer t.cur_generic_params = prev;
+        const ty = t.typeFromNode(type_node);
+        if (ty.kind != .type_var) return ty;
+        try t.sink.report(.{ .span = t.spanOf(type_node), .code = .T0083 }, "constant '{s}' cannot have a type parameter as its type", .{ev.name});
+        return Type.invalid;
     }
 
     /// The constant's type and value once `f` meets its declared type, if any.
@@ -159,16 +183,14 @@ const Eval = struct {
                 },
             },
             .identifier => switch (t.resolutions[node.int()]) {
-                .constant => |cid| {
-                    if (ev.state[cid] == .folding) return ev.notFolded(node);
-                    const c = try ev.constant(cid);
-                    if (c.ty.kind == .invalid) return null;
-                    const v: Value = if (c.value == .str) .{ .str = try t.gpa.dupe(u8, c.value.str) } else c.value;
-                    return .{ .ty = c.ty, .v = v };
-                },
+                .constant => |cid| return ev.use(node, cid),
                 else => return ev.notFolded(node),
             },
-            .field_access => return ev.variant(node, n, null),
+            // `mod.N`: the resolver bound an imported constant to the access itself.
+            .field_access => switch (t.resolutions[node.int()]) {
+                .constant => |cid| return ev.use(node, cid),
+                else => return ev.variant(node, n, null),
+            },
             .enum_init_unit => {
                 if (n.lhs != Ast.none) return ev.notFolded(node);
                 const e = expected orelse return ev.notFolded(node);
@@ -179,6 +201,41 @@ const Eval = struct {
             .binary => return ev.binary(node, n, expected),
             else => return ev.notFolded(node),
         }
+    }
+
+    /// The value of constant `cid`, named at `node`.
+    fn use(ev: *Eval, node: Ast.Index, cid: u32) Error!?Folded {
+        const t = ev.t;
+        if (ev.state[cid] == .folding) {
+            try ev.reportCycle(node, cid);
+            return null;
+        }
+        const c = try ev.constant(cid);
+        if (c.ty.kind == .invalid) return null;
+        const v: Value = if (c.value == .str) .{ .str = try t.gpa.dupe(u8, c.value.str) } else c.value;
+        return .{ .ty = c.ty, .v = v };
+    }
+
+    /// T0084 at the use of `cid` that closes a cycle, spelling the cycle from `cid` round
+    /// to itself. Each constant on it is poison, so this is the cycle's one error.
+    fn reportCycle(ev: *Eval, node: Ast.Index, cid: u32) Error!void {
+        const t = ev.t;
+        var path: std.Io.Writer.Allocating = .init(t.gpa);
+        defer path.deinit();
+        const from = std.mem.indexOfScalar(u32, ev.stack.items, cid).?;
+        for (ev.stack.items[from..]) |c| {
+            path.writer.print("{s} -> ", .{ev.constName(c)}) catch return error.OutOfMemory;
+        }
+        path.writer.writeAll(ev.constName(cid)) catch return error.OutOfMemory;
+        try t.sink.report(.{ .span = t.spanOf(node), .code = .T0084 }, "constant '{s}' depends on itself: {s}", .{ ev.constName(cid), path.written() });
+    }
+
+    fn constName(ev: *Eval, cid: u32) []const u8 {
+        const t = ev.t;
+        const c = t.graph.consts[cid];
+        const prev = t.gphSelect(c.module);
+        defer _ = t.gphSelect(prev);
+        return t.tokens[t.tree.nodes[c.decl_node.int()].main_token].text(t.source);
     }
 
     /// `E.V` (or `.V` at an expected enum `inferred`): a unit variant of a non-generic enum.
@@ -439,13 +496,15 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     try Typecheck.expectDiagCodes("fn f() -> int { 1 }\nN :=: f()\nM :=: N + 1\n", &.{C.T0083});
     try Typecheck.expectDiagCodes("struct P { x: int }\nN :=: P { x: 1 }\n", &.{C.T0083});
     try Typecheck.expectDiagCodes("N :=: 1 << 64\n", &.{C.T0083});
-    try Typecheck.expectDiagCodes("N :=: N\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("N :=: N\n", &.{C.T0084});
+    try Typecheck.expectDiagCodes("A :=: B + 1\nB :=: C\nC :=: A * 2\nD :=: A\n", &.{C.T0084});
     try Typecheck.expectDiagCodes("N: uint8 =: 256\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("A: uint8 =: 200\nN :=: A + 56\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("N: uint8 =: 200 + 100 - 100\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("N: int8 =: -128 - 1 + 1\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("N: uint8 =: -1 + 2\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("enum E { A, B }\nN :=: E.A < E.B\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("fn f[T](x: T) -> T {\n    K: T =: 5\n    x\n}\n", &.{C.T0083});
     try Typecheck.expectDiagCodes("N: int =: 1.5\n", &.{C.T0041});
     try Typecheck.expectDiagCodes("A: int8 =: 1\nB: int16 =: 1\nN :=: A + B\n", &.{C.T0044});
     try Typecheck.expectDiagCodes("enum E { A }\nN :=: E.Z\n", &.{C.T0061});

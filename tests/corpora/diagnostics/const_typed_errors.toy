@@ -10,6 +10,15 @@ SUM :=: W + 100  #~ ERROR [T0034] constant value 300 out of range for type 'uint
 WIDE: uint8 =: 200 + 100 - 100  #~ ERROR [T0034] literal out of range for type 'uint8'
 MIX :=: W + 1.5  #~ ERROR [T0044] operands of '+' must have the same type
 
+fn _call() -> int {
+    W()  #~ ERROR [T0055] called value is not a function
+}
+
+fn _pick[T](x: T) -> T {
+    N: T =: 5  #~ ERROR [T0083] constant 'N' cannot have a type parameter as its type
+    x
+}
+
 fn main() -> int {
     return 0
 }

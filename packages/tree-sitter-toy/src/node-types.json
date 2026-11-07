@@ -566,6 +566,10 @@
           "named": true
         },
         {
+          "type": "const_declaration",
+          "named": true
+        },
+        {
           "type": "continue_statement",
           "named": true
         },

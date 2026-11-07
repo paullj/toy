@@ -1,0 +1,26 @@
+# Feature: consts in fn bodies, with block scope. An inner block's const shadows an
+# outer one until the block ends, a lambda names one without a capture, and a typed
+# local const checks its value like a top-level one.
+# expect: stdout "hey\n"
+# expect: exit 117
+import std/io
+
+TOP :=: 100
+
+fn f(n: int) -> int {
+    K :=: 3
+    if n > 0 {
+        K :=: 4
+        TOP :=: 1
+        return K + TOP
+    }
+    g := fn(x: int) -> int { x * K }
+    W: int =: K * 2
+    g(n) + K + TOP + W
+}
+
+fn main() -> int {
+    S :=: "hey"
+    io.println(S)
+    f(1) + f(0) + S.len()
+}

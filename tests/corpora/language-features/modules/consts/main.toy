@@ -1,0 +1,16 @@
+# Feature: a `pub` const named through its module (`limits.N`) and selected bare
+# (`import cfg/limits.{N as NN}`), in a body and in another const's initializer. A pub
+# const may fold a private one of its own module.
+# expect: exit 40
+import cfg/limits
+import cfg/limits.{N as NN, DOUBLE}
+
+X :=: limits.N + 1
+
+fn main() -> int {
+    m := match limits.M {
+        .Fast -> 1
+        .Slow -> 2
+    }
+    limits.N + X + NN + DOUBLE + limits.NAME.len() + m
+}

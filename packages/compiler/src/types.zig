@@ -616,6 +616,7 @@ pub const GraphFnInput = struct {
 pub const GraphConstInput = struct {
     module: u32,
     decl_node: Ast.Index,
+    owner_fn: Ast.Index = Ast.none,
 };
 
 /// A constant's type and folded value, by global const id. A use lowers to `value`.
@@ -13945,6 +13946,11 @@ test "type args on a function value or a plain fn are T0054; on a generic fn val
 
 test "a call of a module or an enum is T0055, not a silent poison" {
     try expectSoleDiagAt("enum Color { red, green }\nfn main() -> int {\n _c := Color(1)\n return 0\n}\n", .T0055, "enum 'Color' is not a function; construct one of its variants, as in 'Color.v(..)'", "Color");
+}
+
+test "a call of a constant is T0055 at check time, not a lower failure" {
+    try expectSoleDiagAt("fn main() -> int {\n K :=: 3\n K()\n}\n", .T0055, "called value is not a function", "K");
+    try expectSoleDiagAt("N :=: 3\nfn main() -> int {\n N(1)\n}\n", .T0055, "called value is not a function", "N");
 }
 
 test "main with parameters is T0073 at check time" {

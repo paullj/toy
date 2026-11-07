@@ -243,6 +243,48 @@ from two angles — assignability is directional (want ← got), join is symmetr
 * Every `return e` **and** the body's trailing expression are checked against the
   declared return type.
 
+## Constants
+
+A constant is a name for a value known at compile time. It has no storage: each use
+is replaced by the value.
+
+```
+N :=: 5                # inferred: int
+LIMIT: uint8 =: 200    # typed: the value is checked against uint8
+GREETING :=: "hi"
+pub DEFAULT: Mode =: .Fast
+```
+
+* `N :=: e` infers the type from `e`, as `x := e` does: an integer literal is `int`
+  and a float literal is `float`. `N: T =: e` checks `e` against `T`; a literal that
+  does not fit `T` is **T0034**, and a value of another type is **T0041**. The token
+  is `=:` in place of `=`, so the pair mirrors `x := e` / `x: T = e`.
+* The value must fold at compile time: literals (int, float, bool, char, str), other
+  constants, an enum's unit variant, and the integer, float, comparison and boolean
+  operators over them. `<`, `<=`, `>` and `>=` fold over int, char, bool and str; over
+  any other type, whose order is a user `Ord` impl, they are **T0083**. Each literal
+  intermediate is range-checked at the declared width, as in a body, so
+  `N: uint8 =: 200 + 100 - 100` is **T0034**. A call, a struct literal, a `Vec`, a
+  payload variant (or a variant of a generic enum, such as `Option[int].None`), a local
+  variable, a division by zero or a shift past the width is **T0083**, as is a local
+  constant typed by its function's type parameter (`N: T =: 5`). A constant
+  whose initializer reaches itself, directly or through other constants, is
+  **T0084**; the error spells the cycle (`A -> B -> A`) at the use that closes it.
+* A constant is allowed at the top level and in a function body. A top-level one is
+  named everywhere in its module, in any order. A local one is named from its
+  declaration to the end of its block, like a local variable, and may be named in a
+  lambda or local function there without a capture. Its initializer is resolved
+  before the name is bound, so it cannot name itself. A local constant that hides an
+  outer binding, or a local that hides a local constant, warns **W0009** as a
+  shadowing variable does. Calling a constant is **T0055**.
+* `pub N :=: e` exports it: an importer names it `mod.N`, or selects it with
+  `import mod.{N}`. Naming a constant that is not `pub` from another module is
+  **R0005**. Assigning to a constant is **R0007**.
+* A use lowers to the value: an immediate for an int, float or bool, and a fresh
+  temporary for a str, char or enum variant, as the literal would. A function's
+  incremental fingerprint folds the values of the constants it names, so changing a
+  constant's value rebuilds the functions that name it and nothing else.
+
 ## Function signatures
 
 * **Parameters must be user-typed** — `fn f(x: int)`. *(documented existing.)*

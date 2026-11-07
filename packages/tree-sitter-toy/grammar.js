@@ -286,6 +286,7 @@ module.exports = grammar({
           // `fn`. Its body is required, so a bodyless signature cannot swallow a following
           // block statement.
           alias($._local_function_declaration, $.function_declaration),
+          alias($._local_const_declaration, $.const_declaration),
           $.let_declaration,
           $.assignment,
           $.return_statement,
@@ -294,6 +295,14 @@ module.exports = grammar({
           $.expression_statement,
         ),
         optional($._newline),
+      ),
+
+    // A block's `N :=: 5` or `N: T =: 5`: no `pub`, and `_statement` takes its terminator.
+    _local_const_declaration: ($) =>
+      seq(
+        field("name", $.identifier),
+        choice(":=:", seq(":", field("type", $._type), "=:")),
+        field("value", $._expression),
       ),
 
     let_declaration: ($) =>

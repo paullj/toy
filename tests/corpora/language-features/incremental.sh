@@ -670,6 +670,57 @@ for prof in "" "--release"; do
   expect_exits "const_kinds$tag" 31 52
 done
 
+# const across modules and in a body: a pub const's value edit in an imported module must
+# re-lower exactly the fns that name it (here through `limits.N` and a local const folding
+# it); the module's other fns and the importer's other fns are served from the cache.
+run_cross_const() {
+  local prof="$1" tag="${1:+_release}"
+  local name="cross_const$tag" d="$work/cross_const$tag"; mkdir -p "$d/lib"
+  ( cd "$d" && rm -rf .toy )
+  cat > "$d/main.toy" <<'TOY'
+import lib/limits
+fn cap() -> int {
+    K :=: limits.N * 2
+    K
+}
+fn other(n: int) -> int { n - 2 }
+fn main() -> int { return cap() + limits.unrelated() + other(2) }
+TOY
+  cat > "$d/lib/limits.toy" <<'TOY'
+pub N :=: 5
+pub fn unrelated() -> int { 1 }
+TOY
+  ( cd "$d" && "$toyc" $prof -o base.bin main.toy >/dev/null 2>&1 ) \
+    || { fail_one "$name: cold build failed"; return; }
+  local full_compiled
+  full_compiled="$( cd "$d" && "$toyc" $prof -o /dev/null --codegen-stats --no-cache main.toy 2>&1 )"; full_compiled="$(compiled_of "$full_compiled")"
+  cat > "$d/lib/limits.toy" <<'TOY'
+pub N :=: 7
+pub fn unrelated() -> int { 1 }
+TOY
+  local inc_out
+  inc_out="$( cd "$d" && "$toyc" $prof -o inc.bin --codegen-stats main.toy 2>&1 )"
+  ( cd "$d" && "$toyc" $prof -o force.bin --no-cache main.toy >/dev/null 2>&1 ) \
+    || { fail_one "$name: force build failed"; return; }
+  local ih fh
+  ih="$(texthash "$d/inc.bin")"; fh="$(texthash "$d/force.bin")"
+  if [ "$ih" != "$fh" ]; then
+    fail_one "$name: SOUNDNESS — inc __text ($ih) != force __text ($fh) [STALE-CACHE MISCOMPILE]"
+    return
+  fi
+  local comp
+  comp="$(compiled_of "$inc_out")"
+  if [ -n "$comp" ] && [ -n "$full_compiled" ] && [ "$comp" -lt "$full_compiled" ]; then
+    echo "  OK   $name: SOUND; CUTOFF codegen compiled=$comp < full=$full_compiled"
+    pass=$((pass + 1))
+  else
+    fail_one "$name: CUTOFF — codegen compiled=$comp NOT < full=$full_compiled"
+  fi
+  expect_exits "$name" 11 15
+}
+run_cross_const ""
+run_cross_const "--release"
+
 # 7) LAMBDA, SPEC AND ADAPTER UNITS (#39) — each is cached under a key built from content
 #    that already exists: a lambda under its owner's fingerprint, a spec unit under its
 #    instance's and its targets', an adapter under what it wraps and the layouts it moves,

@@ -764,6 +764,8 @@ pub const BodyChecker = struct {
             .for_in2_stmt => try bc.checkForIn2(stmt_idx, null),
             .labeled => _ = try bc.checkLabeled(stmt_idx, false),
             .local_fn => try LambdaChecker.checkLocalFn(bc, stmt_idx, stmt),
+            // Folded with the top-level constants, before any body is checked.
+            .const_decl => {},
             .break_stmt => {
                 const ctx = bc.targetCtx(stmt_idx) orelse {
                     // No matching context: a bare break with an empty stack ("outside a
@@ -1738,6 +1740,7 @@ pub const BodyChecker = struct {
         // A qualified `mod.f` in value position: the resolver bound the access itself.
         switch (bc.resolutions[(node_idx).int()]) {
             .func => |gid| return bc.typeOfFnValue(node_idx, gid, n.main_token),
+            .constant => |cid| return bc.model.consts[cid].ty,
             else => {},
         }
         if (try bc.reportTypeNotValue(node_idx)) return bc.poison();
@@ -4199,7 +4202,8 @@ pub const BodyChecker = struct {
         if (callee_res != .func) {
             // Type the args anyway so their own errors surface, then poison.
             for (Ast.rangeSlice(bc.tree, (n.rhs).int())) |arg| _ = try bc.typeOf(arg);
-            if (callee_res == .local) {
+            // A constant is a scalar, never a fn; a poisoned one was already reported.
+            if (callee_res == .local or (callee_res == .constant and bc.model.consts[callee_res.constant].ty.kind != .invalid)) {
                 try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0055 }, "called value is not a function", .{});
             } else if (bc.tree.nodes[(n.lhs).int()].tag == .identifier) {
                 // A struct-named callee `Point(1,2)` is positional construction, which
