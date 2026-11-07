@@ -1,0 +1,2 @@
+# A module with a private const an importer may not name.
+SECRET :=: 9

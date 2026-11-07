@@ -193,6 +193,19 @@ test "hover on a const shows its type and value, at its declaration and at a use
     }
 }
 
+test "hover on a local const shows its value, at its declaration and at a use" {
+    const gpa = testing.allocator;
+    var docs: @import("Documents.zig") = .{};
+    defer docs.deinit(gpa);
+    const ws: Workspace = .{ .io = std.Io.failing, .docs = &docs, .disk = false };
+    const src = "fn f() -> int8 {\n    K: int8 =: 7\n    return K\n}\n";
+    for ([_]struct { line: u32, col: u32 }{ .{ .line = 1, .col = 4 }, .{ .line = 2, .col = 11 } }) |c| {
+        var h = (try hoverAt(gpa, ws, src, c.line, c.col, "file:///b/main.toy")) orelse return error.NoHover;
+        defer h.deinit();
+        try testing.expectEqualStrings("```toy\nK: int8 =: 7\n```", h.value);
+    }
+}
+
 test "hover on a const of each scalar kind shows its folded value" {
     const gpa = testing.allocator;
     var docs: @import("Documents.zig") = .{};

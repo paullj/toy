@@ -1,0 +1,7 @@
+# Feature: naming a const without `pub` from another module is an error.
+# expect: compile-error "constant 'SECRET' is not exported by module 'limits'"
+import limits
+
+fn main() -> int {
+    limits.SECRET
+}

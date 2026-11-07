@@ -1079,8 +1079,14 @@ fn parseConstDecl(p: *Parser) Error!Ast.Index {
         type_ref = try p.parseType();
         try p.expect(.eq_colon, "expected '=:' after a constant's type");
     } else p.bump(.colon_eq_colon);
-    const init_expr = try p.parseExpr(0);
+    const decl = try p.parseConstInit(name_tok, type_ref);
     try p.expectTerminator();
+    return decl;
+}
+
+/// The initializer of a const named `name_tok`, after its `:=:` or `=:`.
+fn parseConstInit(p: *Parser, name_tok: u32, type_ref: Ast.Index) Error!Ast.Index {
+    const init_expr = try p.parseExpr(0);
     return p.addNode(.{ .tag = .const_decl, .main_token = name_tok, .lhs = type_ref, .rhs = init_expr });
 }
 
@@ -1963,11 +1969,18 @@ fn parseStmt(p: *Parser) Error!Ast.Index {
             // `x: T = e` — explicitly-typed local. The type ref lands in the
             // otherwise-unused var_decl.rhs slot; the checker prefers it over
             // inferring from the initializer (the resolver ignores rhs).
+            .colon_eq_colon => {
+                const name_tok = p.index;
+                p.bump(.identifier);
+                p.bump(.colon_eq_colon);
+                return p.parseConstInit(name_tok, Ast.none);
+            },
             .colon => {
                 const name_tok = p.index;
                 p.bump(.identifier);
                 p.bump(.colon);
                 const type_ref = try p.parseType();
+                if (p.eat(.eq_colon)) return p.parseConstInit(name_tok, type_ref);
                 try p.expect(.eq, "expected '=' after type in typed declaration");
                 const init_expr = try p.parseExpr(0);
                 return p.addNode(.{ .tag = .var_decl, .main_token = name_tok, .lhs = init_expr, .rhs = type_ref });
@@ -6290,6 +6303,10 @@ test "a typed const parses its type before '=:'" {
     defer freeTree(gpa, res.tree);
     try testing.expectEqual(codes.Code.P0001, res.diags[0].code);
     try testing.expectEqualStrings("expected '=:' after a constant's type", res.diags[0].message);
+}
+
+test "a const statement in a block parses in both forms" {
+    try expectProgram("fn main() -> int {\n    N :=: 5\n    M: uint8 =: 2\n    x: int = N\n    x\n}\n", "(program (fn main () int (block (const N 5) (const M uint8 2) (:= x N) x)))");
 }
 
 test "a malformed const is a parse error and the decls after it still parse" {

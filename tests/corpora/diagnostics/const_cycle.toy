@@ -1,0 +1,12 @@
+# A const whose value reaches itself through other consts has none: one error at the
+# use that closes the cycle, spelling the cycle, and nothing more for the consts that
+# name it.
+A :=: B + 1
+B :=: C
+C :=: A * 2  #~ ERROR [T0084] constant 'A' depends on itself: A -> B -> C -> A
+D :=: A
+SELF :=: SELF + 1  #~ ERROR [T0084] constant 'SELF' depends on itself: SELF -> SELF
+
+fn main() -> int {
+    return D + SELF
+}

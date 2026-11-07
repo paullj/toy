@@ -1,0 +1,7 @@
+# Constants exported for importers; a private one is named only in this module.
+pub N :=: 5
+pub NAME: str =: "abc"
+pub enum Mode { Fast, Slow }
+pub M: Mode =: .Slow
+SECRET :=: 9
+pub DOUBLE :=: N * 2 + SECRET

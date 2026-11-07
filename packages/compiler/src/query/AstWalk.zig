@@ -424,7 +424,7 @@ pub fn walkConsts(gpa: std.mem.Allocator, frozen: *const lower.Inputs, idx: Ast.
                 .enter => |e| e,
                 else => return,
             };
-            if (e.tag != .identifier) return;
+            if (e.tag != .identifier and e.tag != .field_access) return;
             switch (self.frozen.resolutions[e.idx.int()]) {
                 .constant => |cid| try self.out.append(self.gpa, self.frozen.consts[cid]),
                 else => {},

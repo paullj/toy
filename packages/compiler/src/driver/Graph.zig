@@ -301,7 +301,7 @@ pub const Graph = struct {
         for (Ast.rangeSlice(tree, prog.lhs.int())) |decl_idx| {
             const decl = m.nodes[decl_idx.int()];
             switch (decl.tag) {
-                .fn_decl, .extern_fn_decl, .struct_decl, .tuple_struct_decl, .enum_decl, .protocol_decl, .type_alias_decl => {
+                .fn_decl, .extern_fn_decl, .struct_decl, .tuple_struct_decl, .enum_decl, .protocol_decl, .type_alias_decl, .const_decl => {
                     if (std.mem.eql(u8, m.tokens[decl.main_token].text(m.source), name)) return decl_idx;
                 },
                 .import_decl => if (scope == .with_imports) {

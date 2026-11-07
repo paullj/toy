@@ -1,0 +1,15 @@
+# A local const is named only to the end of its block, cannot be assigned,
+# cannot share a name with a binding of its own block, and warns when it shadows.
+fn main() -> int {
+    {
+        K :=: 3
+        K = 4  #~ ERROR [R0007] cannot assign to constant 'K'
+    }
+    M :=: 1
+    M := 2  #~ ERROR [R0011] redeclaration of 'M'
+    if M > 0 {
+        M :=: 5  #~ WARN [W0009] 'M' shadows an outer binding
+        return M
+    }
+    K  #~ ERROR [R0001] undeclared identifier 'K'
+}

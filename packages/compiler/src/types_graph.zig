@@ -98,7 +98,7 @@ pub fn checkGraphWith(
 
     const consts = try gpa.alloc(Typecheck.GraphConstInput, res.consts.len);
     defer gpa.free(consts);
-    for (res.consts, consts) |rc, *c| c.* = .{ .module = rc.module, .decl_node = rc.decl_node };
+    for (res.consts, consts) |rc, *c| c.* = .{ .module = rc.module, .decl_node = rc.decl_node, .owner_fn = rc.owner_fn };
     ctx.consts = consts;
 
     const fns = try gpa.alloc(Typecheck.GraphFnInput, res.fns.len);

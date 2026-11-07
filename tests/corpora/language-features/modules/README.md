@@ -37,6 +37,8 @@ on each `main.toy` entry.
 | `errors/folder_mod_path/`     | `import util/mod` instead of `import util` (R0003)              |
 | `errors/path_alias/`          | one file imported under two paths through nested roots (R0014)  |
 | `errors/private_ref/`         | referencing a non-`pub` decl across modules                    |
+| `consts/`                     | a `pub` const named through its module and selected bare, in a body and in another const |
+| `errors/private_const/`       | a const without `pub` named through its module (R0005)         |
 | `ffi_extern/`                 | a module's `pub extern` called qualified and selected inside `unsafe`; a private block extern behind a safe wrapper |
 | `ffi_dylib/`                  | two modules name one user library (loaded once); safe wrappers over a C handle |
 | `errors/extern_conflict/`     | one C symbol bound to libz in one module and to libSystem in another (R0018) |

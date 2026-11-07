@@ -701,6 +701,8 @@ fn lowerStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
         .for_in2_stmt => try lowerForIn2(b, stmt_idx, null),
         .labeled => try lowerLabeledStmt(b, stmt_idx),
         .local_fn => try closure.lowerLocalFn(b, stmt_idx),
+        // A constant has no storage; each use lowers to its value.
+        .const_decl => {},
         .break_stmt => try lowerBreak(b, stmt_idx),
         .continue_stmt => try lowerContinue(b, stmt_idx),
         // A poison leaf must never reach lower: a tainted tree is gated out before
@@ -3469,6 +3471,10 @@ pub fn aggregateValue(b: *Builder, expr: Ast.Index, ty: Typecheck.Type) error{Ou
 /// is materialized to a temp first.
 fn lowerFieldAccess(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (closure.fnValueRef(b, node_idx)) |gid| return try closure.lowerFnValue(b, node_idx, gid, ty);
+    switch (b.in.resolutions[node_idx.int()]) {
+        .constant => |cid| return try lowerConst(b, b.in.consts[cid]),
+        else => {},
+    }
     if (closure.boundMethodRef(b, node_idx)) |mi| return try closure.lowerBoundValue(b, node_idx, mi, ty);
     // A function-typed member that is no field of its base is a bound method the seal
     // could not resolve; reading it as a field would read the base itself.
