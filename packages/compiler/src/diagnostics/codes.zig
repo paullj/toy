@@ -143,6 +143,7 @@ pub const Code = enum(u16) {
     T0080, // callback-not-capture-free (a C callback argument that is no named fn or capture-free lambda or local fn)
     T0081, // vararg-not-promoted (an extra argument of a C variadic extern that is no int64, float, cstr or rawptr)
     T0082, // runtime-allocates (a `core/rt` fn can reach a GC allocation, directly or through calls)
+    T0083, // const-not-folded (a constant's initializer has no value at compile time)
 
     // Warning band (W####).
     W0001, // unused-variable
@@ -300,6 +301,7 @@ pub const table = [_]Entry{
     .{ .code = .T0080, .str = "T0080", .slug = "callback-not-capture-free" },
     .{ .code = .T0081, .str = "T0081", .slug = "vararg-not-promoted" },
     .{ .code = .T0082, .str = "T0082", .slug = "runtime-allocates", .related = "the call path starts here" },
+    .{ .code = .T0083, .str = "T0083", .slug = "const-not-folded" },
     .{ .code = .W0001, .str = "W0001", .slug = "unused-variable", .default_severity = .warning },
     .{ .code = .W0002, .str = "W0002", .slug = "unused-parameter", .default_severity = .warning },
     .{ .code = .W0003, .str = "W0003", .slug = "unused-function", .default_severity = .warning },

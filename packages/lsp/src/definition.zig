@@ -418,3 +418,15 @@ test "definition: a selected name, its alias, a re-exported name and an import p
         try testing.expectEqual(tu.posOf(c.target, c.decl), d.range.start);
     }
 }
+
+test "definition: a const use jumps to its declaration" {
+    const gpa = testing.allocator;
+    var docs: Documents = .{};
+    defer docs.deinit(gpa);
+    const ws: Workspace = .{ .io = std.Io.failing, .docs = &docs, .disk = false };
+    const src = "N :=: 5\nfn main() -> int {\n    return N\n}\n";
+    const d = (try definitionAt(gpa, ws, src, 2, 11, "file:///p/main.toy")) orelse return error.NoDefinition;
+    defer gpa.free(d.uri);
+    try testing.expectEqual(@as(u32, 0), d.range.start.line);
+    try testing.expectEqual(@as(u32, 0), d.range.start.character);
+}

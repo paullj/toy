@@ -82,6 +82,8 @@ pub const Inputs = struct {
     instances: []const Mono.Instance = &.{},
     /// Program-wide callee signatures by global fn id.
     sigs: []const Sig = &.{},
+    /// The folded constants by global const id; a `.constant` identifier lowers to one.
+    consts: []const Typecheck.ConstSym = &.{},
     /// The program-wide method table. `callees` selects a method call's entry by index;
     /// the operator/derive/`?`-widen witness sites resolve theirs here by protocol.
     ///
@@ -910,6 +912,12 @@ fn lowerStrLiteral(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Opera
 
 fn lowerIdentifier(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (closure.fnValueRef(b, node_idx)) |gid| return try closure.lowerFnValue(b, node_idx, gid, ty);
+    if (b.in.resolutions[node_idx.int()] == .constant) {
+        const c = b.in.consts[b.in.resolutions[node_idx.int()].constant];
+        // The low 64 bits are the register's bits at any width, signed or not.
+        const bits: i64 = @bitCast(@as(u64, @truncate(@as(u128, @bitCast(c.value)))));
+        return .{ .value = try b.emit(.{ .iconst = bits }, c.ty) };
+    }
     const home = try places.bindingHome(b, node_idx, ty);
     // A managed box reads as an 8-byte scalar cell pointer (its own value), not by slot.
     switch (passKind(b, ty)) {

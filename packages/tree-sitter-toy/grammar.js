@@ -87,6 +87,7 @@ module.exports = grammar({
         $.impl_block,
         $.protocol_declaration,
         $.type_alias,
+        $.const_declaration,
         $.import_declaration,
       ),
 
@@ -202,6 +203,16 @@ module.exports = grammar({
         "{",
         repeat($.function_declaration),
         "}",
+      ),
+
+    // `N :=: 5`; the external scanner's `_newline` ends it like a statement.
+    const_declaration: ($) =>
+      seq(
+        optional("pub"),
+        field("name", $.identifier),
+        ":=:",
+        field("value", $._expression),
+        optional($._newline),
       ),
 
     type_alias: ($) =>

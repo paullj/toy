@@ -110,6 +110,7 @@ test {
     _ = Mangle;
     _ = ControlFlow;
     _ = TypecheckGraph;
+    _ = @import("types/const_fold.zig");
     _ = LayoutEngine;
     _ = Aarch64;
     _ = CodegenMir;

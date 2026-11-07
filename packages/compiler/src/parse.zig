@@ -198,6 +198,7 @@ fn findNextDecl(p: *Parser) void {
         // A lambda's `fn(` sits inside a body, so stopping there would report every
         // lambda after a broken region as a declaration missing its name.
         if (decl_first.contains(p.peek().tag) and !p.atLambda()) return;
+        if (p.at(.identifier) and p.peek2().tag == .colon_eq_colon) return;
         p.advance();
     }
 }
@@ -452,6 +453,10 @@ fn parseDeclRecoverable(p: *Parser, decls: *std.ArrayList(Ast.Index)) Error!void
         .kw_enum => try p.parseEnumDecl(),
         .kw_protocol => try p.parseProtocolDecl(),
         .kw_type => try p.parseTypeAlias(),
+        .identifier => if (p.peek2().tag == .colon_eq_colon) try p.parseConstDecl() else return p.fail(p.peek(), .P0003, if (is_pub)
+            "expected a function, struct, enum, or import declaration after 'pub'"
+        else
+            "expected a function, struct, enum, or import declaration"),
         else => return p.fail(p.peek(), .P0003, if (is_pub)
             "expected a function, struct, enum, or import declaration after 'pub'"
         else
@@ -1065,6 +1070,16 @@ fn parseTypeAlias(p: *Parser) Error!Ast.Index {
     try p.expect(.eq, "expected '=' after the type alias name");
     const target = try p.parseType();
     return p.addNode(.{ .tag = .type_alias_decl, .main_token = name_tok, .lhs = target, .rhs = Ast.none });
+}
+
+/// `N :=: e`. The initializer ends at the line's end like a statement's.
+fn parseConstDecl(p: *Parser) Error!Ast.Index {
+    const name_tok = p.index;
+    p.bump(.identifier);
+    p.bump(.colon_eq_colon);
+    const init_expr = try p.parseExpr(0);
+    try p.expectTerminator();
+    return p.addNode(.{ .tag = .const_decl, .main_token = name_tok, .lhs = Ast.none, .rhs = init_expr });
 }
 
 /// `enum N { Empty, Circle(int), Rect { w: int, h: int } }`. Variants are
@@ -3681,6 +3696,7 @@ test "root is program and children precede parents" {
                 try testing.expect(n.rhs.int() < self);
             },
             .var_decl, .expr_stmt => try testing.expect(n.lhs.int() < self),
+            .const_decl => try testing.expect(n.rhs.int() < self),
             // Postfix `?`: the operand is `lhs`, created before the try_expr node.
             .try_expr => try testing.expect(n.lhs.int() < self),
             .return_stmt => if (n.lhs != Ast.none) try testing.expect(n.lhs.int() < self),
@@ -6244,4 +6260,31 @@ test "a long flat infix chain or postfix chain hits the depth cap, not the check
         try testing.expectEqual(@as(usize, 1), res.diags.len);
         try testing.expectEqual(codes.Code.P0005, res.diags[0].code);
     }
+}
+
+test "a top-level const parses, with or without pub" {
+    try expectProgram("N :=: 5\nfn main() -> int { N }\n", "(program (const N 5) (fn main () int (block N)))");
+    try expectProgram("pub M :=: -1 + 2\n", "(program (pub (const M (+ (- 1) 2))))");
+    const gpa = testing.allocator;
+    const source = "pub N :=: 5\nM :=: 6\n";
+    const tokens = try Lexer.tokenize(gpa, source);
+    defer gpa.free(tokens);
+    const tree = try expectTree(gpa, tokens, source);
+    defer freeTree(gpa, tree);
+    const decls = Ast.rangeSlice(tree, tree.nodes[Ast.root(tree.nodes).int()].lhs.int());
+    try testing.expect(tree.isPub(decls[0]));
+    try testing.expect(!tree.isPub(decls[1]));
+}
+
+test "a malformed const is a parse error and the decls after it still parse" {
+    const gpa = testing.allocator;
+    const res = try parseResult(gpa, "fn f( {\nM :=: 3 4\nN :=: 5\nfn main() -> int { 0 }\n");
+    defer gpa.free(@constCast(res.diags));
+    defer freeTree(gpa, res.tree);
+    try testing.expectEqual(@as(usize, 2), res.diags.len);
+    try testing.expectEqual(codes.Code.P0004, res.diags[1].code);
+    const decls = Ast.rangeSlice(res.tree, res.tree.nodes[Ast.root(res.tree.nodes).int()].lhs.int());
+    try testing.expectEqual(@as(usize, 2), decls.len);
+    try testing.expectEqual(Ast.Node.Tag.const_decl, res.tree.nodes[decls[0].int()].tag);
+    try testing.expectEqual(Ast.Node.Tag.fn_decl, res.tree.nodes[decls[1].int()].tag);
 }

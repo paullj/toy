@@ -79,6 +79,13 @@ pub const GlobalFn = struct {
     recv_type: Ast.Index = Ast.none,
 };
 
+/// A graph-global compile-time constant: a `const_decl` and its owning module.
+pub const GlobalConst = struct {
+    module: u32,
+    decl_node: Ast.Index,
+    is_pub: bool,
+};
+
 /// The whole-graph resolve output. Caller owns it; free with `deinit`.
 pub const GraphResult = struct {
     /// One `[]Resolution` per module, parallel to `Graph.modules` (indexed by
@@ -86,6 +93,8 @@ pub const GraphResult = struct {
     resolutions: [][]Resolution,
     /// The merged program-wide function table; `.func` resolutions index it.
     fns: []GlobalFn,
+    /// The program-wide constant table; `.constant` resolutions index it.
+    consts: []GlobalConst = &.{},
     /// Diagnostics, each tagged with its owning module via `Diagnostic.scope`.
     diags: []Diagnostic,
     owned_msgs: [][]u8,
@@ -99,6 +108,7 @@ pub const GraphResult = struct {
         gpa.free(self.resolutions);
         for (self.fns) |f| gpa.free(@constCast(f.name));
         gpa.free(self.fns);
+        gpa.free(self.consts);
         gpa.free(self.diags);
         for (self.owned_msgs) |m| gpa.free(m);
         gpa.free(self.owned_msgs);
@@ -113,6 +123,8 @@ const ModuleTables = struct {
     fns: std.StringHashMapUnmanaged(u32) = .empty,
     /// This module's PUB fns, name → global fn id. Visible to importers.
     pub_fns: std.StringHashMapUnmanaged(u32) = .empty,
+    /// This module's constants, name → global const id.
+    consts: std.StringHashMapUnmanaged(u32) = .empty,
     /// This module's struct type names (pub flag as value).
     structs: std.StringHashMapUnmanaged(bool) = .empty,
     /// This module's enum type names (pub flag as value).
@@ -131,6 +143,7 @@ const ModuleTables = struct {
     fn deinit(self: *ModuleTables, gpa: std.mem.Allocator) void {
         self.fns.deinit(gpa);
         self.pub_fns.deinit(gpa);
+        self.consts.deinit(gpa);
         self.structs.deinit(gpa);
         self.enums.deinit(gpa);
         self.namespaces.deinit(gpa);
@@ -182,6 +195,8 @@ const GraphResolve = struct {
     resolutions: [][]Resolution,
     /// The growing global fn table.
     fns: std.ArrayList(GlobalFn),
+    /// The growing global const table.
+    consts: std.ArrayList(GlobalConst) = .empty,
 
     sink: DiagnosticSink,
 
@@ -356,8 +371,22 @@ const GraphResolve = struct {
                         const name = g.nameOf(mod, decl.main_token);
                         try g.tables[mod].enums.put(g.gpa, name, is_pub);
                     },
+                    .const_decl => {
+                        const name = g.nameOf(mod, decl.main_token);
+                        const gop = try g.tables[mod].consts.getOrPut(g.gpa, name);
+                        if (gop.found_existing or g.tables[mod].fns.contains(name)) {
+                            try g.sink.report(.{ .span = g.tokSpan(mod, decl.main_token), .code = .R0002, .scope = mod }, "duplicate name '{s}'", .{name});
+                            continue;
+                        }
+                        gop.value_ptr.* = @intCast(g.consts.items.len);
+                        try g.consts.append(g.gpa, .{ .module = mod, .decl_node = decl_idx, .is_pub = is_pub });
+                    },
                     .fn_decl => {
                         const name = g.nameOf(mod, decl.main_token);
+                        if (g.tables[mod].consts.contains(name)) {
+                            try g.sink.report(.{ .span = g.tokSpan(mod, decl.main_token), .code = .R0002, .scope = mod }, "duplicate name '{s}'", .{name});
+                            continue;
+                        }
                         const gop = try g.tables[mod].fns.getOrPut(g.gpa, name);
                         if (gop.found_existing) {
                             const dup_off = g.tokSpan(mod, decl.main_token);
@@ -1168,6 +1197,7 @@ const GraphResolve = struct {
                         .unresolved => try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "assignment to undeclared name '{s}'; declare it first with ':='", .{g.nameText(target.main_token)}),
                         .func => try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "cannot assign to function '{s}'", .{g.nameText(target.main_token)}),
                         .module => try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "cannot assign to module '{s}'", .{g.nameText(target.main_token)}),
+                        .constant => try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "cannot assign to constant '{s}'", .{g.nameText(target.main_token)}),
                         .local => |slot| if (g.locals.items[slot].is_fn) {
                             try g.sink.report(.{ .span = g.tokSpan(g.cur_mod, target.main_token), .code = .R0007, .scope = g.cur_mod }, "cannot assign to function '{s}'", .{g.nameText(target.main_token)});
                         } else {
@@ -1757,6 +1787,7 @@ const GraphResolve = struct {
             if (g.externHidden(gid)) return null;
             return .{ .func = gid };
         }
+        if (g.tables[g.cur_mod].consts.get(name)) |cid| return .{ .constant = cid };
         return null;
     }
 
@@ -2098,6 +2129,7 @@ pub fn resolveGraph(gpa: std.mem.Allocator, graph: *const Graph.Graph) !GraphRes
         gpa.free(resolutions);
         for (g.fns.items) |f| gpa.free(@constCast(f.name));
         g.fns.deinit(gpa);
+        g.consts.deinit(gpa);
         g.sink.deinit();
     }
 
@@ -2132,6 +2164,7 @@ pub fn resolveGraph(gpa: std.mem.Allocator, graph: *const Graph.Graph) !GraphRes
     return GraphResult{
         .resolutions = resolutions,
         .fns = try g.fns.toOwnedSlice(gpa),
+        .consts = try g.consts.toOwnedSlice(gpa),
         .diags = owned.diags,
         .owned_msgs = owned.owned,
         .closures = out_closures,

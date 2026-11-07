@@ -778,7 +778,10 @@ pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, sig:
         confs.deinit(gpa);
     }
     try AstWalk.walkConformances(gpa, in, fr.conformances, &confs);
-    var fp = Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts);
+    var consts: std.ArrayList(Typecheck.ConstSym) = .empty;
+    defer consts.deinit(gpa);
+    try AstWalk.walkConsts(gpa, in, decl, &consts);
+    var fp = Fingerprint.foldConsts(Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts), consts.items);
     if (in.lines.tracked()) {
         var h = std.hash.Wyhash.init(fp);
         var lv = AstWalk.LineVisitor{ .h = &h, .in = in };

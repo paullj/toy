@@ -1,0 +1,8 @@
+# A const takes one expression after ':=:', ended by its line: a second one is an error,
+# and the declarations after it still parse.
+M :=: 3 4  #~ ERROR [P0004] expected a newline or '}' after statement
+N :=: 5
+
+fn main() -> int {
+    return N
+}

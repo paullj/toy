@@ -1,0 +1,11 @@
+# A const's value must be known at compile time: no call, no division by zero, and an
+# int const fits int.
+fn _ten() -> int { 10 }
+
+N :=: _ten()  #~ ERROR [T0083] the value of constant 'N' is not known at compile time
+M :=: 1 / 0  #~ ERROR [T0083] the value of constant 'M' is not known at compile time
+B :=: 9223372036854775807 + 1  #~ ERROR [T0034] literal out of range for type 'int'
+
+fn main() -> int {
+    return N + M + B
+}
