@@ -74,8 +74,8 @@ const Typecheck = @This();
 /// checker drives it via `LayoutEngine.layoutStruct`/`layoutEnum` (id-ordered, from
 /// `checkGraph`/`runGraph`) and consumes the laid syms through the re-exported aliases.
 const LayoutEngine = @import("layout/Engine.zig");
-const Literal = @import("types/literal.zig");
 const const_fold = @import("types/const_fold.zig");
+const const_eval = @import("types/const_eval.zig");
 const Abi = @import("codegen/abi/Abi.zig");
 const FrameLayout = @import("codegen/frame/FrameLayout.zig");
 
@@ -621,7 +621,7 @@ pub const GraphConstInput = struct {
 /// A constant's type and folded value, by global const id. A use lowers to `value`.
 pub const ConstSym = struct {
     ty: Type,
-    value: i128,
+    value: const_fold.Value,
 };
 
 /// The whole-graph typecheck output. Caller owns it; free with `GraphResult.deinit`.
@@ -712,6 +712,7 @@ pub const GraphResult = struct {
         gpa.free(self.owned_msgs);
         for (self.sigs) |s| gpa.free(@constCast(s.params));
         gpa.free(self.sigs);
+        const_eval.freeValues(gpa, self.consts);
         gpa.free(self.consts);
         LayoutEngine.freeLayouts(gpa, self.layouts);
         for (self.enum_layouts) |e| {
@@ -2419,6 +2420,7 @@ pub fn checkGraph(
             if (f.generic_bound_args.len > 0) gpa.free(@constCast(f.generic_bound_args));
         }
         t.fns.deinit(gpa);
+        const_eval.freeValues(gpa, t.consts.items);
         t.consts.deinit(gpa);
         // Any instances not transferred into the result (an error path) are freed
         // here; the success path empties `t.mono` via `toOwnedSlice` first.
@@ -2890,7 +2892,7 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
         }
     }
 
-    try t.foldConsts();
+    try const_eval.foldAll(t);
 
     // Phase A2: pub-signature coherence. A `pub` fn that names a NON-pub type in a
     // param/return position is an error (an importer could not name that type).
@@ -4549,29 +4551,6 @@ pub fn tokSpan(t: *const Typecheck, tok: u32) Span {
 /// per-fn Pass-C parallelism. `entry_mod` is the entry module id (0 single-file);
 /// the entry is the FIRST fn named `main` in that module, mirroring the driver's
 /// own entry selection so the checker and codegen agree on which `main`.
-/// Fold each constant's initializer, in id order, to the value its uses lower to. A
-/// constant that does not fold is poison, so its uses report nothing more.
-fn foldConsts(t: *Typecheck) !void {
-    try t.consts.ensureTotalCapacity(t.gpa, t.graph.consts.len);
-    for (t.graph.consts) |c| {
-        _ = t.gphSelect(c.module);
-        const decl = t.tree.nodes[c.decl_node.int()];
-        const view: const_fold.View = .{ .tree = t.tree, .tokens = t.tokens, .source = t.source };
-        const at = t.spanOf(decl.rhs);
-        const name = t.tokens[decl.main_token].text(t.source);
-        const value = if (const_fold.isConstInt(view, decl.rhs)) const_fold.constValue(view, decl.rhs, Type.int) else null;
-        const sym: ConstSym = if (value) |v| blk: {
-            if (Literal.fitsValue(v, Type.int)) break :blk .{ .ty = Type.int, .value = v };
-            try t.sink.report(.{ .span = at, .code = .T0034 }, "literal out of range for type 'int'", .{});
-            break :blk .{ .ty = Type.invalid, .value = 0 };
-        } else blk: {
-            try t.sink.report(.{ .span = at, .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{name});
-            break :blk .{ .ty = Type.invalid, .value = 0 };
-        };
-        t.consts.appendAssumeCapacity(sym);
-    }
-}
-
 fn checkMainReturn(t: *Typecheck, entry_mod: u32) !void {
     for (t.fns.items) |f| {
         if (f.kind == .builtin or f.mod != entry_mod) continue;
@@ -5280,14 +5259,14 @@ const Graph = @import("driver/Graph.zig");
 const ResolveGraph = @import("resolve_graph.zig");
 const TypecheckGraph = @import("types_graph.zig");
 
-const Checked = struct {
+pub const Checked = struct {
     tokens: []Token,
     tree: Ast.Tree,
     resolve: ResolveGraph.GraphResult,
     result: GraphResult,
     source: []const u8,
 
-    fn deinit(self: *Checked, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *Checked, gpa: std.mem.Allocator) void {
         self.result.deinit(gpa);
         self.resolve.deinit(gpa);
         gpa.free(self.tokens);
@@ -5305,7 +5284,7 @@ const Checked = struct {
 /// never spawns anyway). Program-global fields (`result.diags`/`.sigs`) read
 /// directly; the node-parallel `result.node_types[0]`/`resolve.resolutions[0]` are
 /// the entry module (module 0 IS the file).
-fn checkSource(source: []const u8) !Checked {
+pub fn checkSource(source: []const u8) !Checked {
     return checkSourceAs(source, .user);
 }
 

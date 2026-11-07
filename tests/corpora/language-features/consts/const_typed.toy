@@ -1,0 +1,29 @@
+# Feature: the typed const form (N: T =: e) at each int width. A literal or literal
+# expression takes the declared width; an operator over typed consts keeps their type.
+# expect: stdout "255\n-128\n4000000000\n100\n-56\n40\n8\n"
+# expect: exit 7
+import std/io
+
+MAX_BYTE: uint8 =: 255
+MIN_I8: int8 =: -128
+BIG: uint32 =: 4000000000
+PERCENT: int16 =: 50 * 2
+WRAPPED: int8 =: 100 +% 100
+BITS: uint8 =: 1 << 3
+SHIFTED: uint8 =: BITS * 5
+HALF :=: BITS >> 1
+
+fn take(b: uint8) -> uint8 { b }
+
+fn main() -> int {
+    io.println(take(MAX_BYTE))
+    io.println(MIN_I8)
+    io.println(BIG)
+    io.println(PERCENT)
+    io.println(WRAPPED)
+    io.println(SHIFTED)
+    io.println(BITS)
+    m: uint8 = MAX_BYTE - 248
+    if m != 7 { return 1 }
+    return 7
+}

@@ -1,0 +1,15 @@
+# A typed const checks its value against the declared type: a literal must fit the
+# width, as does each literal intermediate, and a value of another kind does not bind.
+SMALL: uint8 =: 300  #~ ERROR [T0034] literal out of range for type 'uint8'
+NEG: uint =: -1  #~ ERROR [T0034] literal out of range for type 'uint'
+OVER: int8 =: 100 * 2  #~ ERROR [T0034] literal out of range for type 'int8'
+FLAG: int =: true  #~ ERROR [T0041] cannot bind bool to 'FLAG' of type int
+RATIO: float =: 1  #~ ERROR [T0041] cannot bind int to 'RATIO' of type float
+W: uint8 =: 200
+SUM :=: W + 100  #~ ERROR [T0034] constant value 300 out of range for type 'uint8'
+WIDE: uint8 =: 200 + 100 - 100  #~ ERROR [T0034] literal out of range for type 'uint8'
+MIX :=: W + 1.5  #~ ERROR [T0044] operands of '+' must have the same type
+
+fn main() -> int {
+    return 0
+}

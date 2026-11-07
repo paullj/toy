@@ -181,9 +181,18 @@ pub fn foldConsts(body_fp: u64, consts: []const Typecheck.ConstSym) u64 {
     AstWalk.updateU32(&h, @intCast(consts.len));
     for (consts) |c| {
         foldTouched(&h, .{ .kind = c.ty.kind, .int_desc = @bitCast(c.ty.int_desc) });
+        h.update(&.{@intFromEnum(c.value)});
         var vb: [16]u8 = undefined;
-        std.mem.writeInt(i128, &vb, c.value, .little);
+        switch (c.value) {
+            .int => |v| std.mem.writeInt(i128, &vb, v, .little),
+            .float => |v| std.mem.writeInt(i128, &vb, @as(u64, @bitCast(v)), .little),
+            .bool => |v| std.mem.writeInt(i128, &vb, @intFromBool(v), .little),
+            .char => |v| std.mem.writeInt(i128, &vb, v, .little),
+            .variant => |v| std.mem.writeInt(i128, &vb, v, .little),
+            .str => |v| std.mem.writeInt(i128, &vb, @intCast(v.len), .little),
+        }
         h.update(&vb);
+        if (c.value == .str) h.update(c.value.str);
     }
     return h.final();
 }

@@ -193,6 +193,28 @@ test "hover on a const shows its type and value, at its declaration and at a use
     }
 }
 
+test "hover on a const of each scalar kind shows its folded value" {
+    const gpa = testing.allocator;
+    var docs: @import("Documents.zig") = .{};
+    defer docs.deinit(gpa);
+    const ws: Workspace = .{ .io = std.Io.failing, .docs = &docs, .disk = false };
+    const src = "enum Color { Red, Green }\nB: uint8 =: 200 + 5\nF :=: 1.5 +. 1.0\nT :=: !false\nC :=: 'a'\nS :=: \"hi\\n\"\nE: Color =: .Green\n\nfn main() -> int {\n    return 0\n}\n";
+    for ([_]struct { line: u32, want: []const u8 }{
+        .{ .line = 1, .want = "B: uint8 =: 205" },
+        .{ .line = 2, .want = "F: float =: 2.5" },
+        .{ .line = 3, .want = "T: bool =: true" },
+        .{ .line = 4, .want = "C: char =: 'a'" },
+        .{ .line = 5, .want = "S: str =: \"hi\\n\"" },
+        .{ .line = 6, .want = "E: Color =: Color.Green" },
+    }) |c| {
+        var h = (try hoverAt(gpa, ws, src, c.line, 0, "file:///b/main.toy")) orelse return error.NoHover;
+        defer h.deinit();
+        const want = try std.fmt.allocPrint(gpa, "```toy\n{s}\n```", .{c.want});
+        defer gpa.free(want);
+        try testing.expectEqualStrings(want, h.value);
+    }
+}
+
 test "hover on a local fn shows it as a binding of its function type" {
     const gpa = testing.allocator;
     var docs: @import("Documents.zig") = .{};

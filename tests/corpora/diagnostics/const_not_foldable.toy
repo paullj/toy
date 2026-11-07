@@ -1,0 +1,15 @@
+# A const's initializer folds only scalars: literals, operators, other consts and enum
+# unit variants. A struct literal, a Vec, a payload variant and a shift past the width
+# have no value at compile time.
+struct Point { x: int, y: int }
+enum Shape { Empty, Circle(int) }
+
+ORIGIN :=: Point { x: 0, y: 0 }  #~ ERROR [T0083] the value of constant 'ORIGIN' is not known at compile time
+LIST :=: [1, 2, 3]  #~ ERROR [T0083] the value of constant 'LIST' is not known at compile time
+RING :=: Shape.Circle(1)  #~ ERROR [T0083] the value of constant 'RING' is not known at compile time
+FAR :=: 1 << 200  #~ ERROR [T0083] the value of constant 'FAR' is not known at compile time
+USES :=: ORIGIN
+
+fn main() -> int {
+    return 0
+}

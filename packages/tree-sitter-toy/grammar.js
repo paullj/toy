@@ -205,12 +205,12 @@ module.exports = grammar({
         "}",
       ),
 
-    // `N :=: 5`; the external scanner's `_newline` ends it like a statement.
+    // `N :=: 5` or `N: T =: 5`; the external scanner's `_newline` ends it like a statement.
     const_declaration: ($) =>
       seq(
         optional("pub"),
         field("name", $.identifier),
-        ":=:",
+        choice(":=:", seq(":", field("type", $._type), "=:")),
         field("value", $._expression),
         optional($._newline),
       ),

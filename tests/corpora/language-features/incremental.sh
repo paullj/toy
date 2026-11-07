@@ -645,6 +645,31 @@ for prof in "" "--release"; do
   expect_exits "const_value$tag" 5 7
 done
 
+# const kinds: a str or enum-variant const lowers to a temp the using fn builds, so a
+# change of its bytes or variant must re-lower exactly the fns that name it.
+const_kinds_base='enum Mode { Fast, Slow }
+NAME :=: "abc"
+M: Mode =: .Fast
+fn name_len() -> int { NAME.len() }
+fn mode() -> int {
+    match M {
+        .Fast -> 1
+        .Slow -> 2
+    }
+}
+fn other(n: int) -> int { n - 2 }
+fn main() -> int {
+    return name_len() * 10 + mode() + other(2)
+}
+'
+const_kinds_edit="${const_kinds_base/NAME :=: \"abc\"/NAME :=: \"abcde\"}"
+const_kinds_edit="${const_kinds_edit/M: Mode =: .Fast/M: Mode =: .Slow}"
+for prof in "" "--release"; do
+  tag="${prof:+_release}"
+  run_scenario "const_kinds$tag" "$const_kinds_base" "$const_kinds_edit" 1 "$prof"
+  expect_exits "const_kinds$tag" 31 52
+done
+
 # 7) LAMBDA, SPEC AND ADAPTER UNITS (#39) — each is cached under a key built from content
 #    that already exists: a lambda under its owner's fingerprint, a spec unit under its
 #    instance's and its targets', an adapter under what it wraps and the layouts it moves,

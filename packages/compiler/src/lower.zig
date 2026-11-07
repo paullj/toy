@@ -893,9 +893,14 @@ pub fn lowerExpr(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Operand
 fn lowerStrLiteral(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Operand {
     const n = b.in.tree.nodes[(node_idx).int()];
     const bytes = (try decodeStringLiteral(b, n.main_token)) orelse return .none;
+    return try strValue(b, bytes);
+}
+
+/// A str of `bytes` (owned; `addLiteral` takes them) in a fresh temp slot.
+fn strValue(b: *Builder, bytes: []u8) error{OutOfMemory}!Ir.Operand {
     // Content-hash the decoded bytes; `cstr_ptr` carries the hash and the bytes
     // are registered in the fn's literal table (codegen recovers them there and
-    // emits the adrp+add). `addLiteral` takes ownership of `bytes`.
+    // emits the adrp+add).
     const h = std.hash.Wyhash.hash(Ir.lit_seed, bytes);
     const len: i64 = @intCast(bytes.len);
     try b.addLiteral(h, bytes);
@@ -910,13 +915,34 @@ fn lowerStrLiteral(b: *Builder, node_idx: Ast.Index) error{OutOfMemory}!Ir.Opera
     return .{ .slot = slot };
 }
 
+/// A constant has no storage: each use materializes its folded value, a scalar as an
+/// immediate and a str, char or enum variant in a fresh temp like the literal it stands for.
+fn lowerConst(b: *Builder, c: Typecheck.ConstSym) error{OutOfMemory}!Ir.Operand {
+    const int_ty = Typecheck.Type.int;
+    switch (c.value) {
+        // The low 64 bits are the register's bits at any width, signed or not.
+        .int => |v| return .{ .value = try b.emit(.{ .iconst = @bitCast(@as(u64, @truncate(@as(u128, @bitCast(v))))) }, c.ty) },
+        .float => |v| return .{ .value = try b.emit(.{ .fconst = v }, c.ty) },
+        .bool => |v| return .{ .value = try b.emit(.{ .bconst = v }, Typecheck.Type.bool) },
+        .str => |bytes| return try strValue(b, try b.gpa.dupe(u8, bytes)),
+        // A char stores its codepoint and an enum its tag at offset 0, as their literals do.
+        .char, .variant => {
+            const slot = try b.addSlot(c.ty);
+            const dst = try b.emit(.{ .slot_addr = slot }, int_ty);
+            const word: Typecheck.Type = if (c.value == .char) Typecheck.Type.uint32 else int_ty;
+            const v: i64 = if (c.value == .char) c.value.char else c.value.variant;
+            const k = try b.emit(.{ .iconst = v }, word);
+            _ = try b.emit(.{ .store = .{ .addr = dst, .val = k, .ty = word } }, null);
+            return .{ .slot = slot };
+        },
+    }
+}
+
 fn lowerIdentifier(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (closure.fnValueRef(b, node_idx)) |gid| return try closure.lowerFnValue(b, node_idx, gid, ty);
-    if (b.in.resolutions[node_idx.int()] == .constant) {
-        const c = b.in.consts[b.in.resolutions[node_idx.int()].constant];
-        // The low 64 bits are the register's bits at any width, signed or not.
-        const bits: i64 = @bitCast(@as(u64, @truncate(@as(u128, @bitCast(c.value)))));
-        return .{ .value = try b.emit(.{ .iconst = bits }, c.ty) };
+    switch (b.in.resolutions[node_idx.int()]) {
+        .constant => |cid| return try lowerConst(b, b.in.consts[cid]),
+        else => {},
     }
     const home = try places.bindingHome(b, node_idx, ty);
     // A managed box reads as an 8-byte scalar cell pointer (its own value), not by slot.

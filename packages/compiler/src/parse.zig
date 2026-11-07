@@ -443,7 +443,8 @@ fn parseDeclRecoverable(p: *Parser, decls: *std.ArrayList(Ast.Index)) Error!void
     }
     // An optional `pub` modifier precedes a fn/struct/enum decl and exports it.
     const is_pub = p.eat(.kw_pub);
-    const decl = switch (p.peek().tag) {
+    const is_const = p.peek().tag == .identifier and (p.peek2().tag == .colon_eq_colon or p.peek2().tag == .colon);
+    const decl = if (is_const) try p.parseConstDecl() else switch (p.peek().tag) {
         .kw_fn => try p.parseFnDecl(.top_level),
         .kw_extern => if (p.peek2().tag == .kw_struct) blk: {
             p.bump(.kw_extern);
@@ -453,14 +454,10 @@ fn parseDeclRecoverable(p: *Parser, decls: *std.ArrayList(Ast.Index)) Error!void
         .kw_enum => try p.parseEnumDecl(),
         .kw_protocol => try p.parseProtocolDecl(),
         .kw_type => try p.parseTypeAlias(),
-        .identifier => if (p.peek2().tag == .colon_eq_colon) try p.parseConstDecl() else return p.fail(p.peek(), .P0003, if (is_pub)
-            "expected a function, struct, enum, or import declaration after 'pub'"
-        else
-            "expected a function, struct, enum, or import declaration"),
         else => return p.fail(p.peek(), .P0003, if (is_pub)
-            "expected a function, struct, enum, or import declaration after 'pub'"
+            "expected a function, struct, enum, constant, or import declaration after 'pub'"
         else
-            "expected a function, struct, enum, or import declaration"),
+            "expected a function, struct, enum, constant, or import declaration"),
     };
     if (is_pub) try p.pub_decls.append(p.gpa, decl);
     try decls.append(p.gpa, decl);
@@ -1072,14 +1069,19 @@ fn parseTypeAlias(p: *Parser) Error!Ast.Index {
     return p.addNode(.{ .tag = .type_alias_decl, .main_token = name_tok, .lhs = target, .rhs = Ast.none });
 }
 
-/// `N :=: e`. The initializer ends at the line's end like a statement's.
+/// `N :=: e` or `N: T =: e`. The initializer ends at the line's end like a statement's.
 fn parseConstDecl(p: *Parser) Error!Ast.Index {
     const name_tok = p.index;
     p.bump(.identifier);
-    p.bump(.colon_eq_colon);
+    var type_ref = Ast.none;
+    if (p.at(.colon)) {
+        p.bump(.colon);
+        type_ref = try p.parseType();
+        try p.expect(.eq_colon, "expected '=:' after a constant's type");
+    } else p.bump(.colon_eq_colon);
     const init_expr = try p.parseExpr(0);
     try p.expectTerminator();
-    return p.addNode(.{ .tag = .const_decl, .main_token = name_tok, .lhs = Ast.none, .rhs = init_expr });
+    return p.addNode(.{ .tag = .const_decl, .main_token = name_tok, .lhs = type_ref, .rhs = init_expr });
 }
 
 /// `enum N { Empty, Circle(int), Rect { w: int, h: int } }`. Variants are
@@ -3696,7 +3698,10 @@ test "root is program and children precede parents" {
                 try testing.expect(n.rhs.int() < self);
             },
             .var_decl, .expr_stmt => try testing.expect(n.lhs.int() < self),
-            .const_decl => try testing.expect(n.rhs.int() < self),
+            .const_decl => {
+                if (n.lhs != Ast.none) try testing.expect(n.lhs.int() < self);
+                try testing.expect(n.rhs.int() < self);
+            },
             // Postfix `?`: the operand is `lhs`, created before the try_expr node.
             .try_expr => try testing.expect(n.lhs.int() < self),
             .return_stmt => if (n.lhs != Ast.none) try testing.expect(n.lhs.int() < self),
@@ -4832,7 +4837,7 @@ test "pub modifier requires a declaration" {
     defer gpa.free(@constCast(result.diags));
     defer freeTree(gpa, result.tree);
     try testing.expect(result.diags.len >= 1);
-    try testing.expectEqualStrings("expected a function, struct, enum, or import declaration after 'pub'", result.diags[0].message);
+    try testing.expectEqualStrings("expected a function, struct, enum, constant, or import declaration after 'pub'", result.diags[0].message);
 }
 
 test "pub import of either shape renders with a pub wrapper" {
@@ -6274,6 +6279,17 @@ test "a top-level const parses, with or without pub" {
     const decls = Ast.rangeSlice(tree, tree.nodes[Ast.root(tree.nodes).int()].lhs.int());
     try testing.expect(tree.isPub(decls[0]));
     try testing.expect(!tree.isPub(decls[1]));
+}
+
+test "a typed const parses its type before '=:'" {
+    try expectProgram("N: uint8 =: 5\n", "(program (const N uint8 5))");
+    try expectProgram("pub C: Color =: .Red\n", "(program (pub (const C Color (enew.unit Red))))");
+    const gpa = testing.allocator;
+    const res = try parseResult(gpa, "N: int = 5\nM :=: 1\n");
+    defer gpa.free(@constCast(res.diags));
+    defer freeTree(gpa, res.tree);
+    try testing.expectEqual(codes.Code.P0001, res.diags[0].code);
+    try testing.expectEqualStrings("expected '=:' after a constant's type", res.diags[0].message);
 }
 
 test "a malformed const is a parse error and the decls after it still parse" {

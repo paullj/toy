@@ -766,6 +766,7 @@ const GraphResolve = struct {
         for (Ast.rangeSlice(t, prog.lhs.int())) |decl_idx| {
             switch (m.nodes[decl_idx.int()].tag) {
                 .fn_decl => try g.resolveFn(decl_idx),
+                .const_decl => try g.resolveConst(decl_idx),
                 // A struct's field type-refs may name a qualified cross-module type
                 // (`box: rect.Rect`). Resolve those for namespace binding + pub-type
                 // visibility (mirrors the param/return type-ref check below).
@@ -802,7 +803,24 @@ const GraphResolve = struct {
         }
     }
 
-    fn resolveFn(g: *GraphResolve, fn_idx: Ast.Index) error{OutOfMemory}!void {
+    /// A constant's type and initializer, in a scope of their own: the initializer may
+    /// name other constants. What it may not hold (a block's locals, a lambda) the checker
+    /// rejects, so it is resolved like a body to keep that rejection the only one, and a
+    /// lambda in it records no closure: no unit is ever built for one.
+    fn resolveConst(g: *GraphResolve, decl_idx: Ast.Index) error{OutOfMemory}!void {
+        g.resetFnState();
+        g.cur_fn = Ast.none;
+        g.mut_params = 0;
+        const decl = g.nodes()[decl_idx.int()];
+        try g.pushScope();
+        try g.resolveTypeRef(decl.lhs);
+        try g.resolveExpr(decl.rhs);
+        g.popScope();
+        for (g.fn_boundaries.items) |b| g.gpa.free(b.captures);
+        g.fn_boundaries.clearRetainingCapacity();
+    }
+
+    fn resetFnState(g: *GraphResolve) void {
         for (g.scopes.items) |*s| s.names.deinit(g.gpa);
         g.scopes.clearRetainingCapacity();
         g.locals.clearRetainingCapacity();
@@ -812,7 +830,10 @@ const GraphResolve = struct {
         g.captured_so_far.clearRetainingCapacity();
         g.group_links.clearRetainingCapacity();
         g.next_rank = 0;
+    }
 
+    fn resolveFn(g: *GraphResolve, fn_idx: Ast.Index) error{OutOfMemory}!void {
+        g.resetFnState();
         const decl = g.nodes()[fn_idx.int()];
         const proto = Ast.protoAt(g.tree(g.cur_mod), decl.lhs.int());
         g.mut_params = Modes.ofProto(g.tree(g.cur_mod), g.tokens(), proto);

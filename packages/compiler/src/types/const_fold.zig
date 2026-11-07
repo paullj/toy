@@ -1,10 +1,12 @@
-//! Folding an integer expression built from literals alone. The body checker reads it to
-//! give such an expression the width of its place, and a const declaration reads it for
-//! its value, so the two can never disagree on what folds.
+//! Folding an integer expression built from literals alone, and the integer arithmetic
+//! a constant's initializer folds with. The body checker reads `isConstInt`/`constValue`
+//! to give such an expression the width of its place, and the const evaluator folds its
+//! integer operators through `intBinary`, so the two can never disagree on a value.
 
 const std = @import("std");
 const Ast = @import("../ast/Ast.zig");
-const Token = @import("../ast/Token.zig").Token;
+const token = @import("../ast/Token.zig");
+const Token = token.Token;
 const Type = @import("../layout/Type.zig").Type;
 const Literal = @import("literal.zig");
 
@@ -26,8 +28,9 @@ pub fn isConstInt(v: View, node: Ast.Index) bool {
             else => false,
         },
         .binary => switch (v.tokens[n.main_token].tag) {
-            // A shift is left out: `constValue` cannot fold it, so a narrow width it
-            // took would go unchecked and wrap (`b + (1 << 10)` at int8).
+            // A shift is left out: its amount is no sibling of the left operand, and
+            // `constValue` gives no value for an amount of the place's width or more, so
+            // a narrow width it took would go unchecked and wrap (`b + (1 << 10)` at int8).
             .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent => isConstInt(v, n.lhs) and isConstInt(v, n.rhs),
             else => false,
         },
@@ -44,6 +47,13 @@ pub fn constValue(v: View, node: Ast.Index, t: Type) ?i128 {
     const l = constValue(v, n.lhs, t) orelse return null;
     if (n.tag == .unary) return if (op == .tilde) Literal.complement(l, t) else -l;
     const r = constValue(v, n.rhs, t) orelse return null;
+    return intBinary(op, l, r, t);
+}
+
+/// `l op r` for integer operator `op` at integer type `t`, or null when it does not fold:
+/// a zero divisor, an i128 overflow, a shift by a negative amount or by `t`'s width or
+/// more, or an operator that is no integer operator.
+pub fn intBinary(op: token.Tag, l: i128, r: i128, t: Type) ?i128 {
     return switch (op) {
         .plus => std.math.add(i128, l, r) catch null,
         .minus => std.math.sub(i128, l, r) catch null,
@@ -57,9 +67,26 @@ pub fn constValue(v: View, node: Ast.Index, t: Type) ?i128 {
         .plus_percent => Literal.wrap(l +% r, t),
         .minus_percent => Literal.wrap(l -% r, t),
         .star_percent => Literal.wrap(l *% r, t),
+        // A shift past the width is no value the program could compute: the machine
+        // masks the amount, so it would not mean what it says.
+        .lt_lt => if (r < 0 or r >= t.intBits()) null else std.math.shlExact(i128, l, @intCast(r)) catch null,
+        .gt_gt => if (r < 0 or r >= t.intBits()) null else l >> @intCast(r),
         else => null,
     };
 }
+
+/// A constant's folded value. Its type is kept beside it (`ConstSym.ty`).
+pub const Value = union(enum) {
+    int: i128,
+    float: f64,
+    bool: bool,
+    /// The codepoint a `char` holds.
+    char: u32,
+    /// The decoded bytes, owned by the const table.
+    str: []const u8,
+    /// The index of an enum's unit variant.
+    variant: u32,
+};
 
 const testing = std.testing;
 
