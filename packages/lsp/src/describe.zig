@@ -121,7 +121,18 @@ pub const Describer = struct {
         const name_tok = tm.tokens[tm.nodes[gc.decl_node.int()].main_token];
         try d.buf.print(d.a, "{s}: ", .{tm.source[name_tok.start..name_tok.end]});
         try renderType(d.a, &d.buf, consts[c].ty, d.tc().layouts, d.tc().enum_layouts);
-        try d.buf.print(d.a, " =: {d}", .{consts[c].value});
+        try d.buf.appendSlice(d.a, " =: ");
+        switch (consts[c].value) {
+            .int => |v| try d.buf.print(d.a, "{d}", .{v}),
+            .float => |v| try d.buf.print(d.a, "{d}", .{v}),
+            .bool => |v| try d.buf.print(d.a, "{}", .{v}),
+            .char => |v| try d.buf.print(d.a, "'{f}'", .{std.zig.fmtChar(@intCast(v))}),
+            .str => |v| try d.buf.print(d.a, "\"{f}\"", .{std.zig.fmtString(v)}),
+            .variant => |v| {
+                try renderType(d.a, &d.buf, consts[c].ty, d.tc().layouts, d.tc().enum_layouts);
+                try d.buf.print(d.a, ".{s}", .{d.tc().enum_layouts[consts[c].ty.enum_id].variants[v].name});
+            },
+        }
         return true;
     }
 

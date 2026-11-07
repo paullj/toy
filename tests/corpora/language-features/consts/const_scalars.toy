@@ -1,0 +1,50 @@
+# Feature: consts of every scalar kind: float, float32, bool, char, str and an enum unit
+# variant, folded over literals and other consts.
+# expect: stdout "2.5\n0.75\ntrue\nfalse\nZ\nhello\nhello\n"
+# expect: exit 42
+import std/io
+
+enum Color { Red, Green, Blue }
+enum Shape { Empty, Circle(int) }
+
+RATE :=: 1.5 +. 1.0
+QUARTER: float32 =: 0.25 *. 3.0
+DEBUG :=: true
+QUIET :=: !DEBUG || 2 > 3
+BIGGER :=: RATE >. 2.0 && 3 * 4 == 12
+LETTER :=: 'Z'
+LATER :=: LETTER > 'A'
+GREETING :=: "hello"
+ALSO: str =: GREETING
+SAME :=: GREETING == "hello"
+FAVOURITE :=: Color.Blue
+DEFAULT: Color =: .Green
+NOTHING :=: Shape.Empty
+
+fn code(c: Color) -> int {
+    match c {
+        .Red -> 1
+        .Green -> 2
+        .Blue -> 3
+    }
+}
+
+fn main() -> int {
+    io.println(RATE)
+    io.println(QUARTER)
+    io.println(BIGGER)
+    io.println(QUIET)
+    io.println(LETTER)
+    io.println(GREETING)
+    io.println(ALSO)
+    if !LATER || !SAME { return 1 }
+    if GREETING.len() != 5 { return 2 }
+    c: char = LETTER
+    n: int = c.into()
+    if n != 90 { return 3 }
+    shape_code := match NOTHING {
+        .Empty -> 30
+        .Circle(r) -> r
+    }
+    return shape_code + code(FAVOURITE) * code(DEFAULT) + 6
+}
