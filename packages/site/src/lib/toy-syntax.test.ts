@@ -34,3 +34,8 @@ it('marks pub, import and as keywords in a selective re-export', () => {
 	const cls = (text: string) => toks.find((t) => t.text === text)?.cls;
 	for (const kw of ['pub', 'import', 'as']) expect(cls(kw)).toBe('tok-kw');
 });
+
+it('marks when as a keyword', () => {
+	const toks = highlightLines('x := when true { 1 } else { 2 }').flat();
+	expect(toks.find((t) => t.text === 'when')?.cls).toBe('tok-kw');
+});

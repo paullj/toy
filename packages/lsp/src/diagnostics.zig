@@ -18,6 +18,8 @@ const Diagnostic = Sink.Diagnostic;
 const codes = toyc.diagnostics.codes;
 const model = toyc.diagnostics.model;
 const SourceMap = toyc.term.render.SourceMap;
+const Ast = toyc.Ast;
+const Span = toyc.Walk.Span;
 
 /// The LSP diagnostics of `an`'s document, allocated in `a` (strings included). A compile
 /// problem is reported as diagnostics, never an error.
@@ -58,7 +60,63 @@ pub fn collect(a: std.mem.Allocator, an: *const Analysis) ![]const protocol.LspD
     Sink.sortSlice(combined);
 
     try mapInto(a, sm, an.encoding, graph, an.uri, &out, combined);
+    try dimUntakenArms(a, an, &out);
     return out.items;
+}
+
+/// A Hint tagged Unnecessary over each `when` arm the build skips, for the target and
+/// profile this analysis checks. An arm inside another untaken arm is covered by that
+/// one's range, so it gets none of its own.
+fn dimUntakenArms(a: std.mem.Allocator, an: *const Analysis, out: *std.ArrayList(protocol.LspDiagnostic)) !void {
+    const m = an.module();
+    const tree = m.tree();
+    const callees = an.callees();
+    const arms = try a.alloc(?u32, m.nodes.len);
+    for (arms, 0..) |*arm, i| arm.* = if (i < callees.len) callees[i].whenTaken() else null;
+    // A generic fn's body is checked only per instance, into the instance's own table.
+    // A `when`'s condition is constant, so every instance takes the same arm.
+    for (an.tc().bodies.items) |b| {
+        if (b.of != .instance or b.mod != an.entry()) continue;
+        for (b.nodes.callees, b.nodes.base..) |c, i| if (c.whenTaken()) |k| {
+            arms[i] = k;
+        };
+    }
+    var ranges: std.ArrayList(Span) = .empty;
+    for (m.nodes, 0..) |n, i| {
+        const idx = Ast.Index.from(@intCast(i));
+        if (!Ast.isWhen(tree, m.tokens, idx)) continue;
+        const taken = arms[i] orelse continue;
+        if (n.tag == .match_expr) {
+            for (Ast.rangeSlice(tree, n.rhs.int()), 0..) |arm, k| {
+                if (k != taken) try ranges.append(a, an.span(arm.int()));
+            }
+            continue;
+        }
+        const h = Ast.ifHeaderAt(tree, n.rhs.int());
+        const then = an.span(h.then_block.int());
+        if (taken != 0) {
+            try ranges.append(a, then);
+        } else if (h.else_node != Ast.none) {
+            // From the then block's `}`, so the `else` keyword fades with its arm.
+            try ranges.append(a, .{ .start = then.end, .end = an.span(h.else_node.int()).end });
+        }
+    }
+    std.mem.sort(Span, ranges.items, {}, struct {
+        fn before(_: void, x: Span, y: Span) bool {
+            return x.start < y.start or (x.start == y.start and x.end > y.end);
+        }
+    }.before);
+    var covered: u32 = 0;
+    for (ranges.items) |r| {
+        if (r.end <= covered) continue;
+        covered = r.end;
+        try out.append(a, .{
+            .range = an.rangeOf(r.start, r.end),
+            .severity = protocol.severity.hint,
+            .message = "not compiled: this when arm is not taken",
+            .tags = &.{protocol.diagnostic_tag.unnecessary},
+        });
+    }
 }
 
 /// Append every diagnostic that belongs to the ENTRY module (unscoped, or the entry's
@@ -277,4 +335,61 @@ test "checkBuffer publishes a private field read from another module as a T0078 
     const at = tu.posOf(tu.privacy_main, "y + q");
     try testing.expectEqual(at, d.range.start);
     try testing.expectEqual(at.character + 1, d.range.end.character);
+}
+
+test "checkBuffer dims each untaken when arm, in generic fns too, and keeps its errors" {
+    const gpa = testing.allocator;
+    const src =
+        \\FAST :=: true
+        \\N :=: 2
+        \\M :=: when N { 2 -> 20, _ -> 30 }
+        \\fn main() -> int {
+        \\    K :=: when FAST { M } else { 40 }
+        \\    x := when FAST { K } else { 2 }
+        \\    when FAST {
+        \\        x = 3
+        \\    } else when N == 2 {
+        \\        _y: int = "no"
+        \\    } else {
+        \\        x = 4
+        \\    }
+        \\    return when N { 1 -> 10, _ -> x } + pick(1, 2) + sel(3, 4)
+        \\}
+        \\fn pick[T](a: T, b: T) -> T {
+        \\    return when FAST { a } else { b }
+        \\}
+        \\fn sel[T](a: T, b: T) -> T {
+        \\    when N { 2 -> a, _ -> b }
+        \\}
+        \\
+    ;
+    var mapped = try checkBuffer(gpa, src);
+    defer mapped.deinit();
+    const tu = @import("test_util.zig");
+    const Want = struct { from: []const u8, to: []const u8 };
+    const want = [_]Want{
+        .{ .from = "_ -> 30", .to = "_ -> 30" },
+        .{ .from = " else { 40 }", .to = " else { 40 }" },
+        .{ .from = " else { 2 }", .to = " else { 2 }" },
+        .{ .from = " else when N", .to = "        x = 4\n    }" },
+        .{ .from = "1 -> 10", .to = "1 -> 10" },
+        .{ .from = " else { b }", .to = " else { b }" },
+        .{ .from = "_ -> b", .to = "_ -> b" },
+    };
+    var dims: std.ArrayList(protocol.LspDiagnostic) = .empty;
+    defer dims.deinit(gpa);
+    var t0041: usize = 0;
+    for (mapped.items) |d| {
+        if (d.tags) |tags| {
+            try testing.expectEqualSlices(u32, &.{protocol.diagnostic_tag.unnecessary}, tags);
+            try testing.expectEqual(protocol.severity.hint, d.severity);
+            try dims.append(gpa, d);
+        } else if (std.mem.eql(u8, d.code.?, "T0041")) t0041 += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), t0041);
+    try testing.expectEqual(want.len, dims.items.len);
+    for (want, dims.items) |w, d| {
+        try testing.expectEqual(tu.posOf(src, w.from), d.range.start);
+        try testing.expectEqual(tu.posAt(src, std.mem.indexOf(u8, src, w.to).? + w.to.len), d.range.end);
+    }
 }

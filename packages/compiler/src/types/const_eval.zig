@@ -15,6 +15,7 @@ const ControlFlow = @import("../ControlFlow.zig");
 const PatternChecker = @import("../PatternChecker.zig");
 const Walk = @import("../ast/Walk.zig");
 const Span = @import("../diagnostics/model.zig").Span;
+const Callee = @import("../symbols/Callee.zig").Callee;
 
 const Value = const_fold.Value;
 const ConstSym = Typecheck.ConstSym;
@@ -347,7 +348,7 @@ const Eval = struct {
 
     /// `when c { a } else { b }` in a constant's initializer: both arms fold and agree on
     /// a type, as a value `if`'s arms are checked, and the value is the taken arm's.
-    fn when(ev: *Eval, n: Ast.Node, expected: ?Type) Error!?Folded {
+    fn when(ev: *Eval, node: Ast.Index, n: Ast.Node, expected: ?Type) Error!?Folded {
         const t = ev.t;
         const c = (try ev.whenPart("condition", n.lhs, Type.bool)) orelse return null;
         if (c.v != .bool) {
@@ -360,7 +361,7 @@ const Eval = struct {
             try ev.report(.{ .span = t.tokSpan(n.main_token), .code = .T0059 }, "value-when requires else", .{});
             return null;
         }
-        return ev.arms(&.{ h.then_block, h.else_node }, &.{}, null, if (c.v.bool) 0 else 1, n.main_token, expected);
+        return ev.arms(node, &.{ h.then_block, h.else_node }, &.{}, null, if (c.v.bool) 0 else 1, n.main_token, expected);
     }
 
     /// `when x { pat -> e, .. }` in a constant's initializer: every arm folds and the
@@ -409,7 +410,7 @@ const Eval = struct {
         if (ev.quiet) {
             if (taken == null) return ev.notFolded(node);
         } else if (!try PatternChecker.checkWhenCoverage(ctx, &t.sink, t.gpa, span, arm_nodes, st)) return null;
-        return ev.arms(bodies, pats, s, taken orelse return ev.notFolded(node), n.main_token, expected);
+        return ev.arms(node, bodies, pats, s, taken orelse return ev.notFolded(node), n.main_token, expected);
     }
 
     /// A `when`'s `part` (condition, scrutinee or guard), whose missing value is T0085.
@@ -452,8 +453,11 @@ const Eval = struct {
     /// or `match`'s arms do, a literal arm taking a typed arm's type or the declaration's
     /// and fitting it whether taken or not, and the value is arm `taken`'s. A match form
     /// passes its arms' patterns `pats`, whose bindings name its scrutinee's value `scrut`.
-    fn arms(ev: *Eval, bodies: []const Ast.Index, pats: []const Ast.Index, scrut: ?Folded, taken: usize, kw: u32, expected: ?Type) Error!?Folded {
+    fn arms(ev: *Eval, node: Ast.Index, bodies: []const Ast.Index, pats: []const Ast.Index, scrut: ?Folded, taken: usize, kw: u32, expected: ?Type) Error!?Folded {
         const t = ev.t;
+        // No body pass checks a constant's initializer, so the arm it takes is recorded
+        // here, where the LSP reads it as it reads a body `when`'s.
+        if (t.gph_callees) |cs| cs[t.graph_mod][node.int()] = Callee.whenArm(@intCast(taken));
         const folded = try t.gpa.alloc(Folded, bodies.len);
         defer t.gpa.free(folded);
         var n_folded: usize = 0;
@@ -593,7 +597,7 @@ const Eval = struct {
             .binary => return ev.binary(node, n, expected),
             .if_stmt, .match_expr => {
                 if (!Ast.isWhen(t.tree, t.tokens, node)) return ev.notFolded(node);
-                return if (n.tag == .if_stmt) ev.when(n, expected) else ev.whenMatch(node, n, expected);
+                return if (n.tag == .if_stmt) ev.when(node, n, expected) else ev.whenMatch(node, n, expected);
             },
             .call => return if (ev.isCompileError(n)) ev.compileError(node, n) else ev.notFolded(node),
             else => return ev.notFolded(node),

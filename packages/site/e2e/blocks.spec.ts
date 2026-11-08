@@ -102,6 +102,14 @@ test('a type error is reported while typing and cleared once fixed', async ({ pa
 	await expect(b.locator('.cm-lintRange-error, .cm-lintPoint-error')).toHaveCount(0);
 });
 
+test('an untaken when arm is faded, not underlined', async ({ page }) => {
+	const b = await live(page, 'order.toy');
+	await typeAtEndOfLine(page, b, 'quantity := 3', '\n_w := when true { 1 } else { 2 }');
+	await expect(b.locator('.toy-unnecessary')).toHaveText(' else { 2 }');
+	await expect(b.locator('.toy-unnecessary')).toHaveCSS('opacity', '0.5');
+	await expect(b.locator('.cm-lintRange-error, .cm-lintRange-warning')).toHaveCount(0);
+});
+
 test('diagnostics land on the right characters after non-ASCII text', async ({ page }) => {
 	const b = await live(page, 'order.toy');
 	await typeAtEndOfLine(page, b, 'quantity := 3', '\nlabel := "日本" == "x" || nope');
