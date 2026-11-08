@@ -670,6 +670,24 @@ for prof in "" "--release"; do
   expect_exits "const_kinds$tag" 31 52
 done
 
+# when: flipping the const its condition reads must re-lower the fn on the other arm,
+# which the fn's body text alone does not show.
+when_base='DEBUG :=: false
+fn pick() -> int {
+    when DEBUG { 1 } else when !DEBUG && 2 > 1 { 2 } else { 3 }
+}
+fn other(n: int) -> int { n - 2 }
+fn main() -> int {
+    return pick() + other(2)
+}
+'
+when_flip="${when_base/DEBUG :=: false/DEBUG :=: true}"
+for prof in "" "--release"; do
+  tag="${prof:+_release}"
+  run_scenario "when_flip$tag" "$when_base" "$when_flip" 1 "$prof"
+  expect_exits "when_flip$tag" 2 1
+done
+
 # const across modules and in a body: a pub const's value edit in an imported module must
 # re-lower exactly the fns that name it (here through `limits.N` and a local const folding
 # it); the module's other fns and the importer's other fns are served from the cache.

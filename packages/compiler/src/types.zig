@@ -1826,6 +1826,8 @@ fns: std.ArrayList(FnSym),
 
 /// The constant table, parallel to `Resolve`'s `constant` ids (`foldConsts`).
 consts: std.ArrayList(ConstSym) = .empty,
+/// Every `when`'s folded condition, by `const_eval.whenKey`.
+when_conds: std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = .empty,
 
 /// The struct table: one `StructSym` per struct id. The bare-name → global-id
 /// map lives per-module in the graph ctx (`activeStructMap`).
@@ -2123,6 +2125,7 @@ pub const Model = struct {
     gph_fn_names: ?[]const []const u8,
     /// The folded constants by global const id, frozen before the body pass.
     consts: []const ConstSym = &.{},
+    when_conds: *const std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = &empty_when_conds,
     /// The program-wide inherent-method table, frozen from Pass A. Read-only
     /// during the parallel body pass; drives `BodyChecker` method dispatch.
     methods: []const Method,
@@ -2154,9 +2157,16 @@ pub const Model = struct {
     pub fn preludeProtocols(model: *const Model) PreludeProtocolIds {
         return if (model.prelude) |p| p.protocols else .{};
     }
+
+    /// The folded condition of the `when` at `node` in module `mod`.
+    pub fn whenCond(model: *const Model, mod: u32, node: Ast.Index) const_eval.WhenCond {
+        return model.when_conds.get(const_eval.whenKey(mod, node)) orelse .invalid;
+    }
 };
 
 const BodyChecker = @import("BodyChecker.zig").BodyChecker;
+
+const empty_when_conds: std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = .empty;
 
 /// Freeze the Pass-A tables into a read-only `Model`. The slices alias the live
 /// `Typecheck` ArrayLists; valid for as long as those are not mutated (Pass C).
@@ -2168,6 +2178,7 @@ fn buildModel(t: *Typecheck) Model {
         .graph = t.graph,
         .gph_fn_names = t.gph_fn_names,
         .consts = t.consts.items,
+        .when_conds = &t.when_conds,
         .methods = t.methods.items,
         .templates = t.templates.items,
         .rejected_methods = t.rejected_methods.items,
@@ -2423,6 +2434,7 @@ pub fn checkGraph(
         t.fns.deinit(gpa);
         const_eval.freeValues(gpa, t.consts.items);
         t.consts.deinit(gpa);
+        t.when_conds.deinit(gpa);
         // Any instances not transferred into the result (an error path) are freed
         // here; the success path empties `t.mono` via `toOwnedSlice` first.
         for (t.mono.items) |*inst| {

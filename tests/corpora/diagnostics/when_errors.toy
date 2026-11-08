@@ -1,0 +1,39 @@
+# when: every arm is checked, even one no constant takes; the arms agree on one type; and
+# the condition is a bool known while compiling, in a body or a constant's initializer.
+DEBUG :=: false
+
+fn ten() -> int { 10 }
+
+fn mismatch() -> int {
+    when DEBUG { 1 } else { "one" }  #~ ERROR [T0058] branches yield different types (int vs str)
+}
+
+fn untaken(n: int) -> int {
+    when DEBUG {
+        return n + "x"  #~ ERROR [T0044] operands of '+' must have the same type
+    }
+    n
+}
+
+fn runtime(n: int) -> int {
+    when n > 0 { 1 } else { 2 }  #~ ERROR [T0085] when condition is not known at compile time
+}
+
+fn not_bool() -> int {
+    when 1 { 1 } else { 2 }  #~ ERROR [T0045] when condition must be bool
+}
+
+fn no_else() -> int {
+    x := when DEBUG { 1 }  #~ ERROR [T0059] value-when requires else
+    x
+}
+
+A :=: when DEBUG { 1 } else { "x" }  #~ ERROR [T0058] branches yield different types (int vs str)
+B :=: when ten() > 1 { 1 } else { 2 }  #~ ERROR [T0085] when condition is not known at compile time
+C :=: when DEBUG { ten() } else { 2 }  #~ ERROR [T0083] constant 'C' is not known at compile time
+D: uint8 =: when DEBUG { 300 } else { 2 }  #~ ERROR [T0034] literal out of range for type 'uint8'
+E :=: when DEBUG { 1 }  #~ ERROR [T0059] value-when requires else
+
+fn main() -> int {
+    mismatch() + untaken(1) + runtime(1) + not_bool() + no_else() + A + B + C + E
+}

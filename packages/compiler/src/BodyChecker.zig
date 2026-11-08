@@ -745,10 +745,7 @@ pub const BodyChecker = struct {
             .expr_stmt => _ = try bc.typeOf(stmt.lhs),
             .block => _ = try bc.checkBlock(stmt_idx, false),
             .if_stmt => {
-                const ct = try bc.typeOf(stmt.lhs);
-                if (!condFits(ct))
-                    try bc.sink.report(.{ .span = bc.spanOf(stmt.lhs), .code = .T0045 }, "if condition must be bool", .{});
-                try bc.warnConstIfCond(stmt.lhs);
+                try bc.checkIfCond(stmt_idx, stmt, try bc.typeOf(stmt.lhs));
                 const h = Ast.ifHeaderAt(bc.tree, (stmt.rhs).int());
                 _ = try bc.checkBlock(h.then_block, false);
                 if (h.else_node != Ast.none) {
@@ -2572,17 +2569,30 @@ pub const BodyChecker = struct {
         return payload;
     }
 
+    /// The condition of an `if` or `when` at `node_idx`, typed `ct`. A `when`'s must also
+    /// fold, and the arm it picks is recorded for lowering.
+    fn checkIfCond(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, ct: Type) error{OutOfMemory}!void {
+        const kw = bc.nameText(n.main_token);
+        if (!condFits(ct)) {
+            try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0045 }, "{s} condition must be bool", .{kw});
+            return;
+        }
+        if (!Ast.isWhen(bc.tree, bc.tokens, node_idx)) return bc.warnConstIfCond(n.lhs);
+        switch (bc.model.whenCond(bc.graph_mod, node_idx)) {
+            .then => bc.setCalleeAt(node_idx, Callee.whenArm(true)),
+            .@"else" => bc.setCalleeAt(node_idx, Callee.whenArm(false)),
+            .not_const => try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when condition is not known at compile time", .{}),
+            .invalid => {},
+        }
+    }
+
     fn typeOfIf(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!Type {
-        _ = node_idx;
         // The expected type is the arms', not the condition's, which types as it does in a
         // statement `if`.
-        const ct = try bc.typeOfExpected(n.lhs, null);
-        if (!condFits(ct))
-            try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0045 }, "if condition must be bool", .{});
-        try bc.warnConstIfCond(n.lhs);
+        try bc.checkIfCond(node_idx, n, try bc.typeOfExpected(n.lhs, null));
         const h = Ast.ifHeaderAt(bc.tree, (n.rhs).int());
         if (h.else_node == Ast.none) {
-            try bc.sink.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0059 }, "value-if requires else", .{});
+            try bc.sink.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0059 }, "value-{s} requires else", .{bc.nameText(n.main_token)});
             _ = try bc.checkBlock(h.then_block, false); // validate the arm anyway
             return .invalid;
         }

@@ -438,6 +438,7 @@ module.exports = grammar({
       choice(
         $._primary_expression,
         $.if_expression,
+        $.when_expression,
         $.match_expression,
         $.loop_expression,
         $.while_expression,
@@ -486,6 +487,17 @@ module.exports = grammar({
           field("condition", $._expression),
           field("consequence", $.block),
           optional(seq("else", field("alternative", choice($.block, $.if_expression)))),
+        ),
+      ),
+
+    // Checked as an `if`; the compiler picks the arm while compiling.
+    when_expression: ($) =>
+      prec.right(
+        seq(
+          "when",
+          field("condition", $._expression),
+          field("consequence", $.block),
+          optional(seq("else", field("alternative", choice($.block, $.when_expression)))),
         ),
       ),
 

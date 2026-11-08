@@ -51,7 +51,7 @@ fn classifyTag(tag: toyc.Tag) ?Class {
         // Every keyword, including the boolean literals `true`/`false` (which the compiler
         // lexes as keywords). Highlighting may show `true`/`false` as @boolean, but for
         // agreement they fold to keyword.
-        .kw_fn, .kw_return, .kw_if, .kw_else, .kw_while, .kw_true, .kw_false, .kw_struct, .kw_loop, .kw_for, .kw_in, .kw_break, .kw_continue, .kw_enum, .kw_match, .kw_import, .kw_pub, .kw_as, .kw_impl, .kw_mut, .kw_protocol, .kw_has, .kw_type, .kw_extern, .kw_unsafe => .keyword,
+        .kw_fn, .kw_return, .kw_if, .kw_else, .kw_while, .kw_true, .kw_false, .kw_struct, .kw_loop, .kw_for, .kw_in, .kw_break, .kw_continue, .kw_enum, .kw_match, .kw_import, .kw_pub, .kw_as, .kw_impl, .kw_mut, .kw_protocol, .kw_has, .kw_type, .kw_extern, .kw_unsafe, .kw_when => .keyword,
 
         .plus, .minus, .star, .slash, .percent, .eq, .eq_eq, .bang, .bang_eq, .lt, .lt_eq, .gt, .gt_eq, .amp_amp, .pipe_pipe, .pipe_gt, .pipe, .amp, .caret, .tilde, .lt_lt, .gt_gt, .arrow, .question, .dotdot, .colon_eq, .plus_dot, .minus_dot, .star_dot, .slash_dot, .lt_dot, .gt_dot, .le_dot, .ge_dot, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq, .pipe_eq, .amp_eq, .caret_eq, .lt_lt_eq, .gt_gt_eq, .plus_dot_eq, .minus_dot_eq, .star_dot_eq, .slash_dot_eq, .plus_percent, .minus_percent, .star_percent, .plus_percent_eq, .minus_percent_eq, .star_percent_eq, .colon_eq_colon, .eq_colon => .operator,
 

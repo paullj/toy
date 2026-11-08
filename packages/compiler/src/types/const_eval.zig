@@ -10,6 +10,7 @@ const Literal = @import("literal.zig");
 const const_fold = @import("const_fold.zig");
 const symbols_res = @import("../symbols/Resolution.zig");
 const Typecheck = @import("../types.zig");
+const DiagnosticSink = @import("../diagnostics/Sink.zig");
 
 const Value = const_fold.Value;
 const ConstSym = Typecheck.ConstSym;
@@ -37,6 +38,17 @@ pub fn foldAll(t: *Typecheck) !void {
     var ev: Eval = .{ .t = t, .state = state };
     defer ev.stack.deinit(t.gpa);
     for (0..n) |cid| _ = try ev.constant(@intCast(cid));
+    try ev.whenConds();
+}
+
+/// What folding a `when` condition in a body gave. The body pass types the condition
+/// itself, so the fold reports nothing and this keeps only what the type check cannot
+/// tell: the arm taken, or that the condition is no constant.
+pub const WhenCond = enum { then, @"else", not_const, invalid };
+
+/// The key of the `when` at `node` of module `mod` in `Typecheck.when_conds`.
+pub fn whenKey(mod: u32, node: Ast.Index) u64 {
+    return @as(u64, mod) << 32 | node.int();
 }
 
 pub const poison: ConstSym = .{ .ty = Type.invalid, .value = .{ .int = 0 } };
@@ -55,6 +67,42 @@ const Eval = struct {
     name: []const u8 = "",
     /// The constants being folded, outermost first: a use of one of them is a cycle.
     stack: std.ArrayList(u32) = .empty,
+    /// Report nothing, and note in `not_const` that a part had no value.
+    quiet: bool = false,
+    not_const: bool = false,
+    /// Folding a `when` condition, whose missing value is T0085 rather than T0083.
+    in_when_cond: bool = false,
+
+    fn report(ev: *Eval, at: DiagnosticSink.Report, comptime fmt: []const u8, args: anytype) Error!void {
+        if (ev.quiet) return;
+        try ev.t.sink.report(at, fmt, args);
+    }
+
+    /// Fold the condition of every `when`, quietly, for the body pass to read.
+    fn whenConds(ev: *Eval) Error!void {
+        const t = ev.t;
+        ev.quiet = true;
+        defer ev.quiet = false;
+        const prev = t.graph_mod;
+        defer _ = t.gphSelect(prev);
+        for (0..t.graph.mods.len) |m| {
+            _ = t.gphSelect(@intCast(m));
+            for (t.tree.nodes, 0..) |n, i| {
+                if (n.tag != .if_stmt or t.tokens[n.main_token].tag != .kw_when) continue;
+                ev.not_const = false;
+                const f = try ev.eval(n.lhs, Type.bool);
+                const cond: WhenCond = if (f) |v| switch (v.v) {
+                    .bool => |b| if (b) .then else .@"else",
+                    .str => |bytes| blk: {
+                        t.gpa.free(bytes);
+                        break :blk .invalid;
+                    },
+                    else => .invalid,
+                } else if (ev.not_const) .not_const else .invalid;
+                try t.when_conds.put(t.gpa, whenKey(@intCast(m), Ast.Index.from(@intCast(i))), cond);
+            }
+        }
+    }
 
     fn constant(ev: *Eval, cid: u32) Error!ConstSym {
         switch (ev.state[cid]) {
@@ -105,7 +153,7 @@ const Eval = struct {
         defer t.cur_generic_params = prev;
         const ty = t.typeFromNode(type_node);
         if (ty.kind != .type_var) return ty;
-        try t.sink.report(.{ .span = t.spanOf(type_node), .code = .T0083 }, "constant '{s}' cannot have a type parameter as its type", .{ev.name});
+        try ev.report(.{ .span = t.spanOf(type_node), .code = .T0083 }, "constant '{s}' cannot have a type parameter as its type", .{ev.name});
         return Type.invalid;
     }
 
@@ -121,7 +169,7 @@ const Eval = struct {
         };
         if (f.lit and f.ty.kind == want.kind) return try ev.adopt(f, want, at);
         if (!f.ty.eql(want)) {
-            try t.sink.report(.{ .span = at, .code = .T0041 }, "cannot bind {s} to '{s}' of type {s}", .{ t.typeName(f.ty), ev.name, t.typeName(want) });
+            try ev.report(.{ .span = at, .code = .T0041 }, "cannot bind {s} to '{s}' of type {s}", .{ t.typeName(f.ty), ev.name, t.typeName(want) });
             return null;
         }
         return .{ .ty = want, .value = f.v };
@@ -131,7 +179,7 @@ const Eval = struct {
     fn adopt(ev: *Eval, f: Folded, want: Type, at: anytype) Error!?ConstSym {
         switch (f.v) {
             .int => |v| if (!Literal.fitsValue(v, want)) {
-                try ev.t.sink.report(.{ .span = at, .code = .T0034 }, "literal out of range for type '{s}'", .{ev.t.typeName(want)});
+                try ev.report(.{ .span = at, .code = .T0034 }, "literal out of range for type '{s}'", .{ev.t.typeName(want)});
                 return null;
             },
             .float => |v| if (want.isFloat32()) return .{ .ty = want, .value = .{ .float = round32(v) } },
@@ -141,8 +189,79 @@ const Eval = struct {
     }
 
     fn notFolded(ev: *Eval, node: Ast.Index) Error!?Folded {
-        try ev.t.sink.report(.{ .span = ev.t.spanOf(node), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{ev.name});
+        ev.not_const = true;
+        if (ev.in_when_cond)
+            try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0085 }, "when condition is not known at compile time", .{})
+        else
+            try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{ev.name});
         return null;
+    }
+
+    /// `when c { a } else { b }` in a constant's initializer: both arms fold and agree on
+    /// a type, as a value `if`'s arms are checked, and the value is the taken arm's.
+    fn when(ev: *Eval, n: Ast.Node, expected: ?Type) Error!?Folded {
+        const t = ev.t;
+        const taken = blk: {
+            const prev = ev.in_when_cond;
+            ev.in_when_cond = true;
+            defer ev.in_when_cond = prev;
+            const c = (try ev.eval(n.lhs, Type.bool)) orelse return null;
+            if (c.v != .bool) {
+                if (c.v == .str) t.gpa.free(c.v.str);
+                try ev.report(.{ .span = t.spanOf(n.lhs), .code = .T0045 }, "when condition must be bool", .{});
+                return null;
+            }
+            break :blk c.v.bool;
+        };
+        const h = Ast.ifHeaderAt(t.tree, n.rhs.int());
+        if (h.else_node == Ast.none) {
+            try ev.report(.{ .span = t.tokSpan(n.main_token), .code = .T0059 }, "value-when requires else", .{});
+            return null;
+        }
+        var a = (try ev.arm(h.then_block, expected)) orelse return null;
+        var b = (try ev.arm(h.else_node, expected)) orelse {
+            if (a.v == .str) t.gpa.free(a.v.str);
+            return null;
+        };
+        const keep, const drop = if (taken) .{ &a, &b } else .{ &b, &a };
+        defer if (drop.v == .str) t.gpa.free(drop.v.str);
+        if (a.ty.kind == b.ty.kind and (a.lit or b.lit) and (a.ty.kind == .int or a.ty.kind == .float)) {
+            if (a.lit and b.lit) {
+                // The declaration adopts the taken arm; the other must fit its type too.
+                const e = expected orelse return keep.*;
+                if (e.kind != drop.ty.kind) return keep.*;
+                const drop_node = if (taken) h.else_node else h.then_block;
+                _ = (try ev.adopt(drop.*, e, t.spanOf(drop_node))) orelse return null;
+                return keep.*;
+            }
+            // The literal arm takes the typed one's type and must fit it, taken or not.
+            const lit, const lit_node, const typed = if (a.lit) .{ &a, h.then_block, b.ty } else .{ &b, h.else_node, a.ty };
+            const sym = (try ev.adopt(lit.*, typed, t.spanOf(lit_node))) orelse return null;
+            lit.* = .{ .ty = sym.ty, .v = sym.value };
+            return keep.*;
+        }
+        if (!a.ty.eql(b.ty)) {
+            try ev.report(.{ .span = t.tokSpan(n.main_token), .code = .T0058 }, "branches yield different types ({s} vs {s})", .{ t.typeName(a.ty), t.typeName(b.ty) });
+            if (keep.v == .str) t.gpa.free(keep.v.str);
+            return null;
+        }
+        return keep.*;
+    }
+
+    /// An arm of a `when` in an initializer: a block holding one value, or the `when`
+    /// an `else when` chains on.
+    fn arm(ev: *Eval, node: Ast.Index, expected: ?Type) Error!?Folded {
+        const t = ev.t;
+        const n = t.tree.nodes[node.int()];
+        if (n.tag != .block) return ev.eval(node, expected);
+        const stmts = Ast.rangeSlice(t.tree, n.lhs.int());
+        if (stmts.len != 1) return ev.notFolded(node);
+        const s = t.tree.nodes[stmts[0].int()];
+        return switch (s.tag) {
+            .expr_stmt => ev.eval(s.lhs, expected),
+            .if_stmt, .block => ev.arm(stmts[0], expected),
+            else => ev.notFolded(stmts[0]),
+        };
     }
 
     fn opText(ev: *Eval, n: Ast.Node) []const u8 {
@@ -171,14 +290,14 @@ const Eval = struct {
             .literal_char => switch (Literal.decodeChar(text)) {
                 .ok => |cp| return .{ .ty = ev.charType(), .v = .{ .char = cp } },
                 else => {
-                    try t.sink.report(.{ .span = t.spanOf(node), .code = .T0036 }, "malformed char literal", .{});
+                    try ev.report(.{ .span = t.spanOf(node), .code = .T0036 }, "malformed char literal", .{});
                     return null;
                 },
             },
             .literal_string => switch (try Literal.decodeString(t.gpa, text)) {
                 .ok => |bytes| return .{ .ty = Type.str, .v = .{ .str = bytes } },
                 else => {
-                    try t.sink.report(.{ .span = t.spanOf(node), .code = .T0036 }, "malformed string literal", .{});
+                    try ev.report(.{ .span = t.spanOf(node), .code = .T0036 }, "malformed string literal", .{});
                     return null;
                 },
             },
@@ -199,6 +318,10 @@ const Eval = struct {
             },
             .unary => return ev.unary(node, n, expected),
             .binary => return ev.binary(node, n, expected),
+            .if_stmt => {
+                if (t.tokens[n.main_token].tag != .kw_when) return ev.notFolded(node);
+                return ev.when(n, expected);
+            },
             else => return ev.notFolded(node),
         }
     }
@@ -227,7 +350,7 @@ const Eval = struct {
             path.writer.print("{s} -> ", .{ev.constName(c)}) catch return error.OutOfMemory;
         }
         path.writer.writeAll(ev.constName(cid)) catch return error.OutOfMemory;
-        try t.sink.report(.{ .span = t.spanOf(node), .code = .T0084 }, "constant '{s}' depends on itself: {s}", .{ ev.constName(cid), path.written() });
+        try ev.report(.{ .span = t.spanOf(node), .code = .T0084 }, "constant '{s}' depends on itself: {s}", .{ ev.constName(cid), path.written() });
     }
 
     fn constName(ev: *Eval, cid: u32) []const u8 {
@@ -255,7 +378,7 @@ const Eval = struct {
             if (vs.form != .unit) return ev.notFolded(node);
             return .{ .ty = ty, .v = .{ .variant = @intCast(i) } };
         }
-        try t.sink.report(.{ .span = t.spanOf(node), .code = .T0061 }, "enum '{s}' has no variant '{s}'", .{ t.typeName(ty), name });
+        try ev.report(.{ .span = t.spanOf(node), .code = .T0061 }, "enum '{s}' has no variant '{s}'", .{ t.typeName(ty), name });
         return null;
     }
 
@@ -280,7 +403,7 @@ const Eval = struct {
     }
 
     fn operandError(ev: *Eval, node: Ast.Index, msg: []const u8) Error!?Folded {
-        try ev.t.sink.report(.{ .span = ev.t.spanOf(node), .code = .T0044 }, "{s}", .{msg});
+        try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0044 }, "{s}", .{msg});
         return null;
     }
 
@@ -298,9 +421,9 @@ const Eval = struct {
         if (f.v != .int or Literal.fitsValue(f.v.int, at)) return f;
         const span = ev.t.spanOf(node);
         if (f.lit)
-            try ev.t.sink.report(.{ .span = span, .code = .T0034 }, "literal out of range for type '{s}'", .{ev.t.typeName(at)})
+            try ev.report(.{ .span = span, .code = .T0034 }, "literal out of range for type '{s}'", .{ev.t.typeName(at)})
         else
-            try ev.t.sink.report(.{ .span = span, .code = .T0034 }, "constant value {d} out of range for type '{s}'", .{ f.v.int, ev.t.typeName(at) });
+            try ev.report(.{ .span = span, .code = .T0034 }, "constant value {d} out of range for type '{s}'", .{ f.v.int, ev.t.typeName(at) });
         return null;
     }
 
@@ -383,7 +506,7 @@ const Eval = struct {
     }
 
     fn binaryError(ev: *Eval, node: Ast.Index, n: Ast.Node, comptime fmt: []const u8) Error!?Folded {
-        try ev.t.sink.report(.{ .span = ev.t.spanOf(node), .code = .T0044 }, fmt, .{ev.opText(n)});
+        try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0044 }, fmt, .{ev.opText(n)});
         return null;
     }
 
@@ -401,7 +524,7 @@ const Eval = struct {
             return typed;
         }
         if (l.ty.eql(r.ty)) return l.ty;
-        try t.sink.report(.{ .span = t.spanOf(node), .code = .T0044 }, "operands of '{s}' must have the same type", .{ev.opText(n)});
+        try ev.report(.{ .span = t.spanOf(node), .code = .T0044 }, "operands of '{s}' must have the same type", .{ev.opText(n)});
         return null;
     }
 };
@@ -465,6 +588,9 @@ test "each scalar kind folds over literals, operators and other consts" {
         .{ .src = "N: float32 =: 16777217.0 +. 1.0\n", .ty = Type.float32, .value = .{ .float = 16777216.0 } },
         .{ .src = "enum E { A, B }\nN :=: E.B\n", .ty = Type.enumT(0), .value = .{ .variant = 1 } },
         .{ .src = "enum E { A, B(int) }\nN: E =: .A\n", .ty = Type.enumT(0), .value = .{ .variant = 0 } },
+        .{ .src = "C :=: false\nN :=: when C { 1 } else when !C { 2 } else { 3 }\n", .ty = Type.int, .value = .{ .int = 2 } },
+        .{ .src = "A: uint8 =: 7\nN :=: when A > 5 { A } else { 255 }\n", .ty = Type.uint8, .value = .{ .int = 7 } },
+        .{ .src = "N: str =: when 1 < 2 { \"a\" } else { \"b\" }\n", .ty = Type.str, .value = .{ .str = "a" } },
     };
     for (cases) |c| {
         var got = try lastValue(c.src);
@@ -508,4 +634,12 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     try Typecheck.expectDiagCodes("N: int =: 1.5\n", &.{C.T0041});
     try Typecheck.expectDiagCodes("A: int8 =: 1\nB: int16 =: 1\nN :=: A + B\n", &.{C.T0044});
     try Typecheck.expectDiagCodes("enum E { A }\nN :=: E.Z\n", &.{C.T0061});
+    try Typecheck.expectDiagCodes("fn f() -> bool { true }\nN :=: when f() { 1 } else { 2 }\n", &.{C.T0085});
+    try Typecheck.expectDiagCodes("N :=: when 1 { 1 } else { 2 }\n", &.{C.T0045});
+    try Typecheck.expectDiagCodes("fn f(n: int) -> int {\n    when n > 0 { 1 } else { 2 }\n}\n", &.{C.T0085});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f(n: int) -> int {\n    when K > 1 { 1 } else { n + true }\n}\n", &.{C.T0044});
+    try Typecheck.expectDiagCodes("N :=: when true { 1 }\n", &.{C.T0059});
+    try Typecheck.expectDiagCodes("N :=: when true { 1 } else { \"x\" }\n", &.{C.T0058});
+    try Typecheck.expectDiagCodes("N :=: when true { 1 } else { x := 2\n x }\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("A: uint8 =: 1\nN :=: when true { A } else { 256 }\n", &.{C.T0034});
 }
