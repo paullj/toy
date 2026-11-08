@@ -1,0 +1,17 @@
+# Each extern the program calls must be exported by the library it binds to: a bare extern
+# by libSystem (and what it re-exports, such as libm), a block's by its library, here a
+# shared-cache one that dyld answers for.
+# expect: compile-error "[R0019]: C symbol 'putz' is not exported by libSystem; a bare 'extern fn' binds to libSystem"
+extern fn labs(x: int) -> int
+extern fn sqrt(x: float) -> float
+extern fn putz(x: int) -> int
+
+extern "z" {
+    fn crc32(crc: int, p: int, n: int) -> int
+}
+
+fn main() -> int {
+    n := unsafe { labs(-1) + crc32(0, 0, 0) + putz(1) }
+    root := unsafe { sqrt(4.0) }
+    if root == 2.0 { n } else { 0 }
+}

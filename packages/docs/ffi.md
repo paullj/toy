@@ -365,7 +365,7 @@ R0018 and R0019), or for a `-l` as a usage error (exit 2) naming the flag:
 | R0016 | no `lib<name>.dylib` in any searched folder; the error lists them |
 | R0017 | the file is not an arm64 Mach-O dynamic library |
 | R0018 | one C symbol is bound to two different libraries, or a block binds one the toy runtime or std imports from libSystem |
-| R0019 | the library does not export the extern's C symbol (a bare `extern fn` is checked against libSystem); reported at the extern |
+| R0019 | the library does not export the extern's C symbol (a bare `extern fn` is checked against libSystem); reported at the extern, and only for an extern the program calls outside an untaken `when` arm |
 
 Static linking (`.a`, `.o`) is not supported; build the library with `cc -shared`.
 

@@ -1,0 +1,11 @@
+# Feature: an extern that the taken when arm calls is imported, so its library must export
+# it.
+# expect: compile-error "[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem"
+extern fn labs(x: int) -> int
+extern fn toy_no_such_symbol(x: int) -> int
+
+ON :=: true
+
+fn main() -> int {
+    when ON { unsafe { toy_no_such_symbol(1) } } else { unsafe { labs(-7) } }
+}

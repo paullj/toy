@@ -1,11 +1,12 @@
 //! The libraries a program links: every `-l` the command line names, then every
 //! library an `extern "name" { .. }` block names, each loaded once, libSystem first.
-//! It also binds each extern's C symbol to the ordinal of its block's library, and
-//! checks that the library exports it.
+//! It also binds each extern's C symbol to the ordinal of its block's library. Once the
+//! program is checked, `Result.unexportedCalls` checks that each library exports the
+//! symbols the program calls.
 //!
-//! It reads only the module ASTs and the file system, so `check` reports the same
-//! library errors `build` does, and a warm build recomputes the set from the
-//! current sources and flags (the linked image is never cached).
+//! It reads only the module ASTs, the checked program and the file system, so `check`
+//! reports the same library errors `build` does, and a warm build recomputes the set
+//! from the current sources and flags (the linked image is never cached).
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,6 +14,11 @@ const Ast = @import("../ast/Ast.zig");
 const Graph = @import("Graph.zig");
 const Dylib = @import("../link/Dylib.zig");
 const MachO = @import("../link/MachO.zig");
+const Walk = @import("../ast/Walk.zig");
+const Typecheck = @import("../types.zig");
+const Callee = @import("../symbols/Callee.zig").Callee;
+const Body = @import("../symbols/Body.zig");
+const Sig = @import("../symbols/Sig.zig").Sig;
 const codes = @import("../diagnostics/codes.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const runtime = @import("../codegen/runtime/runtime.zig");
@@ -32,9 +38,13 @@ pub const Result = struct {
     arena: std.heap.ArenaAllocator,
     linking: Dylib.Linking,
     cli_errors: []const CliError,
-    /// At the library string of an `extern "name"` block, or at a conflicting or
-    /// missing extern.
+    /// At the library string of an `extern "name"` block, or at a conflicting extern.
     diags: []const Diagnostic,
+    sites: []const Site,
+    /// Parallel to `linking.dylibs`.
+    exports: []const Dylib.Exports,
+    reexports: Dylib.Cache,
+    conflicted: std.StringHashMapUnmanaged(void),
 
     pub fn deinit(self: *Result) void {
         self.arena.deinit();
@@ -43,7 +53,118 @@ pub const Result = struct {
     pub fn ok(self: *const Result) bool {
         return self.cli_errors.len == 0 and self.diags.len == 0;
     }
+
+    /// R0019 at each extern the checked program `tc` calls (see `calledExterns`) whose
+    /// library does not export it. Allocated in the arena.
+    pub fn unexportedCalls(self: *Result, io: Io, graph: *const Graph.Graph, tc: *const Typecheck.GraphResult) ![]const Diagnostic {
+        return self.unexported(io, try calledExterns(self.arena.allocator(), graph, tc));
+    }
+
+    /// R0019 at each extern whose C symbol is in `called` but whose library does not
+    /// export it. Allocated in the arena.
+    pub fn unexported(self: *Result, io: Io, called: []const []const u8) ![]const Diagnostic {
+        const a = self.arena.allocator();
+        var imported: std.StringHashMapUnmanaged(void) = .empty;
+        for (called) |s| try imported.put(a, s, {});
+        var diags: std.ArrayList(Diagnostic) = .empty;
+        // A symbol already in conflict is not checked as well: one error per bad extern.
+        for (self.sites) |site| {
+            if (!imported.contains(site.sym) or self.conflicted.contains(site.sym)) continue;
+            const exports: Dylib.Exports = if (site.bound.ordinal == 1) .libsystem else self.exports[site.bound.ordinal - 2];
+            if (try exports.has(a, io, &self.reexports, site.sym)) continue;
+            const s = site.bound.site.?;
+            try diags.append(a, .{
+                .byte_offset = s.start,
+                .end = s.end,
+                .message = if (site.bare)
+                    try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by libSystem; a bare 'extern fn' binds to libSystem", .{site.sym})
+                else
+                    try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by library '{s}'", .{ site.sym, site.bound.lib }),
+                .scope = s.module,
+                .code = .R0019,
+            });
+        }
+        return diags.items;
+    }
 };
+
+/// The C symbols of the externs that some lowered body calls outside an untaken `when`
+/// arm. Read from the checked program, not from the lowered code, so the IR passes of
+/// one opt level cannot drop a call, and with it an error, that another keeps; and
+/// `check` reports what `build` does. A dead fn's calls count: it is lowered too.
+pub fn calledExterns(a: std.mem.Allocator, graph: *const Graph.Graph, tc: *const Typecheck.GraphResult) ![]const []const u8 {
+    var names: std.StringArrayHashMapUnmanaged(void) = .empty;
+    const untaken = try a.alloc(?std.DynamicBitSetUnmanaged, graph.modules.len);
+    @memset(untaken, null);
+    for (tc.bodies.items) |body| {
+        const m = &graph.modules[body.mod];
+        if (untaken[body.mod] == null) untaken[body.mod] = try .initEmpty(a, m.nodes.len);
+        var v: CallVisitor = .{
+            .a = a,
+            .src = .{ .tree = m.tree(), .tokens = m.tokens, .source = m.source },
+            .nodes = body.nodes,
+            .sigs = tc.sigs,
+            .untaken = &untaken[body.mod].?,
+            .names = &names,
+        };
+        try Walk.walk(v.src, body.decl, &v);
+    }
+    return names.keys();
+}
+
+/// Records the extern each call in a body names, skipping the arms its `when`s leave out.
+/// The walk enters a `when` before its arms, so their nodes are marked before it reaches
+/// them; every instance of a template takes the same arm, so marks are per module.
+const CallVisitor = struct {
+    a: std.mem.Allocator,
+    src: Walk.Source,
+    nodes: Body.Nodes,
+    sigs: []const Sig,
+    untaken: *std.DynamicBitSetUnmanaged,
+    names: *std.StringArrayHashMapUnmanaged(void),
+
+    pub fn on(v: *CallVisitor, ev: Walk.Event) !void {
+        const e = switch (ev) {
+            .enter => |e| e,
+            else => return,
+        };
+        if (v.untaken.isSet(e.idx.int())) return;
+        const tree = v.src.tree;
+        const n = tree.nodes[e.idx.int()];
+        if (n.tag == .call) {
+            const slot = Callee.callSlot(tree, n) orelse return;
+            switch (v.nodes.callee(slot).view()) {
+                .direct => |gid| if (v.sigs[gid].kind == .import) try v.names.put(v.a, v.sigs[gid].name, {}),
+                else => {},
+            }
+            return;
+        }
+        if (!Ast.isWhen(tree, v.src.tokens, e.idx)) return;
+        const taken = v.nodes.callee(e.idx).whenTaken() orelse return;
+        if (n.tag == .match_expr) {
+            for (Ast.rangeSlice(tree, n.rhs.int()), 0..) |arm, k| if (k != taken) try v.mark(arm);
+            return;
+        }
+        const h = Ast.ifHeaderAt(tree, n.rhs.int());
+        if (taken != 0) try v.mark(h.then_block) else if (h.else_node != Ast.none) try v.mark(h.else_node);
+    }
+
+    fn mark(v: *CallVisitor, arm: Ast.Index) !void {
+        var m: struct {
+            set: *std.DynamicBitSetUnmanaged,
+            pub fn on(self: *@This(), ev: Walk.Event) void {
+                switch (ev) {
+                    .enter => |e| self.set.set(e.idx.int()),
+                    else => {},
+                }
+            }
+        } = .{ .set = v.untaken };
+        try Walk.walk(v.src, arm, &m);
+    }
+};
+
+/// An extern declaration and where it binds its C symbol `sym`.
+const Site = struct { bound: Bound, bare: bool, sym: []const u8 };
 
 const Builder = struct {
     a: std.mem.Allocator,
@@ -76,10 +197,6 @@ const Builder = struct {
             } else try b.rpaths.append(b.a, r);
         }
         return @intCast(b.dylibs.items.len + 1);
-    }
-
-    fn exportsOf(b: *const Builder, ordinal: u8) Dylib.Exports {
-        return if (ordinal == 1) .libsystem else b.exports.items[ordinal - 2];
     }
 
     /// Why `name` cannot be linked, or null with `ordinal` set.
@@ -169,7 +286,7 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
     // block that names one for another library would move the runtime's call there.
     var bound: std.StringArrayHashMapUnmanaged(Bound) = .empty;
     for (runtime.libsystem_imports) |sym| try bound.put(a, sym, .{ .ordinal = 1, .lib = "libSystem", .site = null });
-    var sites: std.ArrayList(struct { bound: Bound, bare: bool }) = .empty;
+    var sites: std.ArrayList(Site) = .empty;
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     for (graph.modules, 0..) |*m, mi| {
         const tree = m.tree();
@@ -202,26 +319,8 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
                 try diags.append(a, try conflict(a, graph, sym, gop.value_ptr.*, here));
                 try conflicted.put(a, sym, {});
             }
-            try sites.append(a, .{ .bound = here, .bare = lib == null });
+            try sites.append(a, .{ .bound = here, .bare = lib == null, .sym = sym });
         }
-    }
-
-    // A symbol already in conflict is not checked as well: one error per bad extern.
-    for (sites.items) |site| {
-        const s = site.bound.site.?;
-        const sym = graph.modules[s.module].source[s.start..s.end];
-        if (conflicted.contains(sym)) continue;
-        if (try b.exportsOf(site.bound.ordinal).has(a, io, &b.reexports, sym)) continue;
-        try diags.append(a, .{
-            .byte_offset = s.start,
-            .end = s.end,
-            .message = if (site.bare)
-                try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by libSystem; a bare 'extern fn' binds to libSystem", .{sym})
-            else
-                try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by library '{s}'", .{ sym, site.bound.lib }),
-            .scope = s.module,
-            .code = .R0019,
-        });
     }
 
     var bindings: std.ArrayList(Dylib.Binding) = .empty;
@@ -239,6 +338,10 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
         .linking = .{ .dylibs = b.dylibs.items, .rpaths = b.rpaths.items, .bindings = bindings.items },
         .cli_errors = cli_errors.items,
         .diags = diags.items,
+        .sites = sites.items,
+        .exports = b.exports.items,
+        .reexports = b.reexports,
+        .conflicted = conflicted,
     };
 }
 
@@ -482,15 +585,53 @@ test "an extern its library does not export is R0019 at the extern, bare externs
     defer freeGraphOfMods(gpa, &g);
     var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
     defer r.deinit();
+    try testing.expect(r.ok());
+    const diags = try r.unexported(io, &.{ "q_one", "q_nope", "labs", "putz" });
     const expect_bare = @import("builtin").os.tag == .macos;
-    try testing.expectEqual(@as(usize, if (expect_bare) 2 else 1), r.diags.len);
-    try testing.expectEqual(codes.Code.R0019, r.diags[0].code);
-    try testing.expectEqualStrings("q_nope", src[r.diags[0].byte_offset..r.diags[0].end]);
-    try testing.expectEqualStrings("C symbol 'q_nope' is not exported by library 'toyq'", r.diags[0].message);
+    try testing.expectEqual(@as(usize, if (expect_bare) 2 else 1), diags.len);
+    try testing.expectEqual(codes.Code.R0019, diags[0].code);
+    try testing.expectEqualStrings("q_nope", src[diags[0].byte_offset..diags[0].end]);
+    try testing.expectEqualStrings("C symbol 'q_nope' is not exported by library 'toyq'", diags[0].message);
     if (expect_bare) {
-        try testing.expectEqualStrings("putz", src[r.diags[1].byte_offset..r.diags[1].end]);
-        try testing.expect(std.mem.indexOf(u8, r.diags[1].message, "libSystem") != null);
+        try testing.expectEqualStrings("putz", src[diags[1].byte_offset..diags[1].end]);
+        try testing.expect(std.mem.indexOf(u8, diags[1].message, "libSystem") != null);
     }
+}
+
+test "an extern the program does not call is not checked, in the program or in core" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pa: std.heap.ArenaAllocator = .init(gpa);
+    defer pa.deinit();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", pa.allocator());
+    var buf: [128]u8 = undefined;
+    try tmp.dir.writeFile(io, .{ .sub_path = "libtoyq.dylib", .data = Dylib.fakeDylibExporting(&buf, "/opt/libtoyq.dylib", 6, &.{"q_one"}) });
+    const user =
+        \\extern "toyq" {
+        \\    fn q_one() -> int
+        \\    fn q_nope() -> int
+        \\}
+        \\extern fn putz(p: rawptr) -> int
+        \\fn main() -> int { 0 }
+        \\
+    ;
+    const core = "pub extern fn __errno_location() -> rawptr\npub extern fn __error() -> rawptr\n";
+    var g = try graphOfMods(gpa, &.{ .{ .path = "main", .src = user }, .{ .path = "core/os", .src = core, .bundled = true } });
+    defer freeGraphOfMods(gpa, &g);
+    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+    defer r.deinit();
+    try testing.expect(r.ok());
+    try testing.expectEqual(@as(usize, 0), (try r.unexported(io, &.{ "q_one", "__error" })).len);
+    try testing.expectEqual(@as(usize, 0), (try r.unexported(io, &.{})).len);
+    if (@import("builtin").os.tag != .macos) return;
+    const diags = try r.unexported(io, &.{"__errno_location"});
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(@as(u32, 1), diags[0].scope);
+    try testing.expectEqualStrings("__errno_location", core[diags[0].byte_offset..diags[0].end]);
 }
 
 test "-l z and /usr/lib/libz.1.dylib load one shared-cache library" {
