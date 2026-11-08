@@ -1,0 +1,56 @@
+# Feature: the match form of when picks the arm whose pattern takes a constant's value
+# while compiling. Each arm is checked, and only the one taken runs: on an enum constant,
+# on an int constant with '_', with or-patterns, a guard and a binding, as a statement
+# and as a value, and in a constant's initializer.
+# expect: stdout "mac\nsmall\nmac-os\nfast\n"
+# expect: exit 65
+import std/io
+
+enum Os { Mac, Linux, Windows }
+enum Mode { Fast, Small(int) }
+
+OS :=: Os.Mac
+LEVEL :=: 4
+DEBUG :=: false
+MODE :=: Mode.Fast
+
+MAP_ANON :=: when OS { .Mac -> 4096, .Linux -> 32, .Windows -> 0 }
+WIDTH: uint8 =: when LEVEL { 0 | 1 -> 8, 2 -> 16, _ -> 64 }
+NAME: str =: when OS { .Linux -> "linux", _ -> "mac" }
+
+fn size() -> str {
+    when LEVEL > 3 {
+        true -> "small"
+        false -> "big"
+    }
+}
+
+fn level() -> int {
+    when LEVEL {
+        0 -> 100
+        n if DEBUG -> n * 1000
+        n -> n
+    }
+}
+
+fn mode() -> int {
+    when MODE {
+        .Fast -> 1
+        .Small(k) -> k
+    }
+}
+
+fn main() -> int {
+    io.println(NAME)
+    io.println(size())
+    when OS {
+        .Mac -> io.println("mac-os")
+        _ -> io.println("other")
+    }
+    when MODE {
+        .Fast -> io.println("fast")
+        .Small(_) -> io.println("small")
+    }
+    wide := when WIDTH == 64 { 64 } else { 0 }
+    MAP_ANON / 4096 + wide + mode() - 3 + level() - 2
+}

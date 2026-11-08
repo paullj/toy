@@ -13,6 +13,12 @@ const ControlFlow = @import("ControlFlow.zig");
 const BC = @import("BodyChecker.zig");
 const Typecheck = @import("types.zig");
 const BodyChecker = BC.BodyChecker;
+const Literal = @import("types/literal.zig");
+const Callee = @import("symbols/Callee.zig").Callee;
+const const_eval = @import("types/const_eval.zig");
+const WhenCond = const_eval.WhenCond;
+const DiagnosticSink = @import("diagnostics/Sink.zig");
+const Span = @import("diagnostics/model.zig").Span;
 
 /// Coverage state for a match, by scrutinee kind. Enum: a per-variant seen bitmap.
 /// Bool: which of true/false a literal arm has covered. Int: nothing (an infinite
@@ -100,28 +106,123 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
         const body_ty: Type = if (armDiverges(bc, h.body)) Type.never else body_ty0;
         result = try bc.merge(n.main_token, result, body_ty);
     }
-    if (!has_wildcard) switch (cov) {
+    try reportUncovered(&bc.sink, bc.gpa, scrutineeSpan(bc, n), bc.nameText(n.main_token), cov, has_wildcard, if (enum_id) |eid| bc.model.enums[eid].variants else &.{});
+    if (Ast.isWhen(bc.tree, bc.tokens, node_idx)) try chooseWhenArm(bc, node_idx, n, st);
+    bc.node_types[(node_idx).int()] = result;
+    return result;
+}
+
+/// T0048 at `span` for the values of a `match` or `when` (`kw`) that `cov` leaves out.
+fn reportUncovered(sink: *DiagnosticSink, gpa: std.mem.Allocator, span: Span, kw: []const u8, cov: Cov, has_wildcard: bool, variants: []const VariantSym) error{OutOfMemory}!void {
+    if (has_wildcard) return;
+    switch (cov) {
         .@"enum" => |sv| {
-            const e = bc.model.enums[enum_id.?];
             var names: std.ArrayList(u8) = .empty;
-            defer names.deinit(bc.gpa);
+            defer names.deinit(gpa);
             var n_missing: usize = 0;
-            for (e.variants, 0..) |v, i| if (!sv[i]) {
-                if (n_missing != 0) try names.appendSlice(bc.gpa, ", ");
-                try names.append(bc.gpa, '\'');
-                try names.appendSlice(bc.gpa, v.name);
-                try names.append(bc.gpa, '\'');
+            for (variants, 0..) |v, i| if (!sv[i]) {
+                if (n_missing != 0) try names.appendSlice(gpa, ", ");
+                try names.append(gpa, '\'');
+                try names.appendSlice(gpa, v.name);
+                try names.append(gpa, '\'');
                 n_missing += 1;
             };
             if (n_missing > 0)
-                try bc.sink.report(.{ .span = scrutineeSpan(bc, n), .code = .T0048 }, "non-exhaustive match: missing {s} {s}; add the missing arm(s) or a '_' arm", .{ if (n_missing == 1) "variant" else "variants", names.items });
+                try sink.report(.{ .span = span, .code = .T0048 }, "non-exhaustive {s}: missing {s} {s}; add the missing arm(s) or a '_' arm", .{ kw, if (n_missing == 1) "variant" else "variants", names.items });
         },
         .bool => |bcov| if (!(bcov.t and bcov.f))
-            try bc.sink.report(.{ .span = scrutineeSpan(bc, n), .code = .T0048 }, "non-exhaustive match: bool requires both true and false (or '_')", .{}),
-        .int => try bc.sink.report(.{ .span = scrutineeSpan(bc, n), .code = .T0048 }, "non-exhaustive match: int match requires '_'", .{}),
+            try sink.report(.{ .span = span, .code = .T0048 }, "non-exhaustive {s}: bool requires both true and false (or '_')", .{kw}),
+        .int => try sink.report(.{ .span = span, .code = .T0048 }, "non-exhaustive {s}: int {s} requires '_'", .{ kw, kw }),
+    }
+}
+
+/// A `when`'s scrutinee and guards fold before the body pass; the first arm whose guard
+/// holds and whose pattern takes the scrutinee's value is the one lowering emits.
+fn chooseWhenArm(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, st: Type) error{OutOfMemory}!void {
+    const v = bc.model.whenCond(bc.graph_mod, node_idx);
+    var chosen: ?u32 = null;
+    var folded = true;
+    if (v == .not_const) {
+        try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when scrutinee is not known at compile time", .{});
+        folded = false;
+    }
+    for (Ast.rangeSlice(bc.tree, n.rhs.int()), 0..) |arm_idx, i| {
+        const arm = bc.tree.nodes[arm_idx.int()];
+        const h = Ast.armHeaderAt(bc.tree, arm.rhs.int());
+        const guard_holds = h.guard == Ast.none or switch (bc.model.whenCond(bc.graph_mod, h.guard)) {
+            .bool => |b| b,
+            .not_const => blk: {
+                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0085 }, "when guard is not known at compile time", .{});
+                folded = false;
+                break :blk false;
+            },
+            else => blk: {
+                folded = false;
+                break :blk false;
+            },
+        };
+        if (chosen == null and guard_holds and takes(bc.cflow(), arm.lhs, st, v)) chosen = @intCast(i);
+    }
+    if (!folded) return;
+    if (chosen) |arm| bc.setCalleeAt(node_idx, Callee.whenArm(arm));
+}
+
+/// Whether `pat` matches `v`, the folded value of a `when` scrutinee of type `ty`. A
+/// variant pattern takes only a payload it matches irrefutably, so for an enum this is
+/// also whether the pattern covers that variant.
+pub fn takes(ctx: ControlFlow.Ctx, pat_idx: Ast.Index, ty: Type, v: WhenCond) bool {
+    const pat = ctx.tree.nodes[pat_idx.int()];
+    const tok = ctx.tokens[pat.main_token];
+    return switch (pat.tag) {
+        .pattern_wildcard => true,
+        .pattern_binding => pat.rhs == Ast.none or takes(ctx, pat.rhs, ty, v),
+        .pattern_literal => switch (v) {
+            .int => |i| tok.tag == .number and Literal.intValue(tok.text(ctx.source)) == i,
+            .bool => |b| tok.tag == @as(@TypeOf(tok.tag), if (b) .kw_true else .kw_false),
+            else => false,
+        },
+        .pattern_or => for (Ast.rangeSlice(ctx.tree, pat.lhs.int())) |a| {
+            if (takes(ctx, a, ty, v)) break true;
+        } else false,
+        .pattern_variant => switch (v) {
+            .variant => |vi| blk: {
+                if (ty.kind != .@"enum") break :blk false;
+                const vs = ctx.enums[ty.enum_id].variants[vi];
+                break :blk std.mem.eql(u8, vs.name, tok.text(ctx.source)) and ControlFlow.variantPayloadIrrefutable(ctx, pat_idx, vs);
+            },
+            else => false,
+        },
+        else => false,
     };
-    bc.node_types[(node_idx).int()] = result;
-    return result;
+}
+
+/// T0048 at `span` when the unguarded arms of a `when` over a `ty` (enum, bool or int)
+/// in a constant's initializer leave a value out, as the body pass reports for a match.
+pub fn checkWhenCoverage(ctx: ControlFlow.Ctx, sink: *DiagnosticSink, gpa: std.mem.Allocator, span: Span, arms: []const Ast.Index, ty: Type) error{OutOfMemory}!bool {
+    var bool_cov: BoolCov = .{};
+    const variants: []const VariantSym = if (ty.kind == .@"enum") ctx.enums[ty.enum_id].variants else &.{};
+    const seen = try gpa.alloc(bool, variants.len);
+    defer gpa.free(seen);
+    @memset(seen, false);
+    var has_wildcard = false;
+    for (arms) |arm_idx| {
+        const arm = ctx.tree.nodes[arm_idx.int()];
+        if (Ast.armHeaderAt(ctx.tree, arm.rhs.int()).guard != Ast.none) continue;
+        if (ControlFlow.irrefutable(ctx, arm.lhs, ty)) has_wildcard = true;
+        for (seen, 0..) |*s, i| {
+            if (takes(ctx, arm.lhs, ty, .{ .variant = @intCast(i) })) s.* = true;
+        }
+        if (takes(ctx, arm.lhs, ty, .{ .bool = true })) bool_cov.t = true;
+        if (takes(ctx, arm.lhs, ty, .{ .bool = false })) bool_cov.f = true;
+    }
+    const cov: Cov = switch (ty.kind) {
+        .@"enum" => .{ .@"enum" = seen },
+        .bool => .{ .bool = &bool_cov },
+        else => .int,
+    };
+    if (has_wildcard or matchSaturated(cov, false)) return true;
+    try reportUncovered(sink, gpa, span, "when", cov, false, variants);
+    return false;
 }
 
 // Pattern irrefutability lives in `ControlFlow.zig` too (pure walks over the

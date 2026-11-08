@@ -2579,10 +2579,9 @@ pub const BodyChecker = struct {
         }
         if (!Ast.isWhen(bc.tree, bc.tokens, node_idx)) return bc.warnConstIfCond(n.lhs);
         switch (bc.model.whenCond(bc.graph_mod, node_idx)) {
-            .then => bc.setCalleeAt(node_idx, Callee.whenArm(true)),
-            .@"else" => bc.setCalleeAt(node_idx, Callee.whenArm(false)),
+            .bool => |taken| bc.setCalleeAt(node_idx, Callee.whenArm(if (taken) 0 else 1)),
             .not_const => try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when condition is not known at compile time", .{}),
-            .invalid => {},
+            else => {},
         }
     }
 
@@ -3061,7 +3060,7 @@ pub const BodyChecker = struct {
 
     /// Write `c` at `slot` itself: a value call's `callSlot`, or a fn or method named as a
     /// value.
-    fn setCalleeAt(bc: *BodyChecker, slot: Ast.Index, c: Callee) void {
+    pub fn setCalleeAt(bc: *BodyChecker, slot: Ast.Index, c: Callee) void {
         // A bounded template is never lowered, and its instances record their own refs.
         if (bc.abstract_template and (c.tag == .fn_ref or c.tag == .bound_method or c.isPending())) return;
         const cell = &bc.callees[slot.int()];

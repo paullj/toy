@@ -109,7 +109,7 @@ pub const Code = enum(u16) {
     T0045, // condition-not-bool (an `if`/`when`/`while` condition or a match guard is not bool)
     T0046, // no-such-field (a field access, construction, or pattern names a field the struct/variant does not have)
     T0047, // missing-field (a struct or variant construction omits a declared field)
-    T0048, // non-exhaustive-match (a match does not cover every value of its scrutinee)
+    T0048, // non-exhaustive-match (a match or match-form `when` does not cover every value of its scrutinee)
     T0049, // fn-not-a-value (a builtin, extern, generic or `mut`-param function, or a built-in, protocol or `mut`-param method, is named as a value)
     T0050, // lambda-param-type-unknown (an unannotated lambda param with no expected fn type)
     T0051, // jump-across-lambda (break/continue targeting a loop outside the lambda)
@@ -146,7 +146,7 @@ pub const Code = enum(u16) {
     T0082, // runtime-allocates (a `core/rt` fn can reach a GC allocation, directly or through calls)
     T0083, // const-not-folded (a constant's initializer has no value at compile time)
     T0084, // const-cycle (a constant whose value depends on itself through other constants)
-    T0085, // when-cond-not-const (a `when` condition is not known at compile time)
+    T0085, // when-cond-not-const (a `when` condition, scrutinee or guard is not known at compile time)
 
     // Warning band (W####).
     W0001, // unused-variable

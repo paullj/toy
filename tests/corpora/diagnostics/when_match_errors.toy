@@ -1,0 +1,61 @@
+# when, match form: the patterns must cover every value of the scrutinee, in a body or a
+# constant's initializer, every arm is checked whether taken or not, and the scrutinee
+# and each guard are known while compiling.
+enum Os { Mac, Linux, Windows }
+
+OS :=: Os.Mac
+LEVEL :=: 2
+
+fn ten() -> int { 10 }
+
+fn missing() -> int {
+    when OS {  #~ ERROR [T0048] non-exhaustive when: missing variant 'Windows'; add the missing arm(s) or a '_' arm
+        .Mac -> 1
+        .Linux -> 2
+    }
+}
+
+fn no_wildcard() -> int {
+    when LEVEL {  #~ ERROR [T0048] non-exhaustive when: int when requires '_'
+        2 -> 1
+        3 -> 2
+    }
+}
+
+fn untaken(n: int) -> int {
+    when OS {
+        .Mac -> n
+        _ -> n + "x"  #~ ERROR [T0044] operands of '+' must have the same type
+    }
+}
+
+fn mismatch() -> int {
+    when OS {  #~ ERROR [T0058] branches yield different types (int vs str)
+        .Mac -> 1
+        _ -> "one"
+    }
+}
+
+fn runtime(n: int) -> int {
+    when n {  #~ ERROR [T0085] when scrutinee is not known at compile time
+        _ -> 1
+    }
+}
+
+fn guard(n: int) -> int {
+    when LEVEL {
+        2 if n > 1 -> 1  #~ ERROR [T0085] when guard is not known at compile time
+        _ -> 2
+    }
+}
+
+A :=: when OS { .Mac -> 1, .Linux -> 2 }  #~ ERROR [T0048] non-exhaustive when: missing variant 'Windows'; add the missing arm(s) or a '_' arm
+B :=: when LEVEL { 2 -> 1 }  #~ ERROR [T0048] non-exhaustive when: int when requires '_'
+C :=: when OS { .Mac -> 1, _ -> "x" }  #~ ERROR [T0058] branches yield different types (int vs str)
+D :=: when ten() { _ -> 1 }  #~ ERROR [T0085] when scrutinee is not known at compile time
+E :=: when OS { .Mac -> 1, .Linux -> ten(), _ -> 3 }  #~ ERROR [T0083] the value of constant 'E' is not known at compile time
+F :=: when OS { .Mac -> 1, .Solaris -> 2, _ -> 3 }  #~ ERROR [T0061] enum 'Os' has no variant 'Solaris'
+
+fn main() -> int {
+    missing() + no_wildcard() + untaken(1) + mismatch() + runtime(1) + guard(1) + A + B + C + D + E + F
+}
