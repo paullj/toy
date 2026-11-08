@@ -313,9 +313,10 @@ const GraphResolve = struct {
     /// own id-order authority) so the two lists stay in one derivation, not two spellings.
     const seeded_builtins = blk: {
         const kinds = std.enums.values(Intrinsic.Kind);
-        var list: [1 + kinds.len]SeededBuiltin = undefined;
+        var list: [2 + kinds.len]SeededBuiltin = undefined;
         list[0] = .{ .name = "panic", .scope = .global };
         for (kinds, 0..) |k, i| list[1 + i] = .{ .name = Intrinsic.name(k), .scope = Intrinsic.scope(k) };
+        list[1 + kinds.len] = .{ .name = "compile_error", .scope = .global };
         break :blk list;
     };
 
@@ -340,11 +341,13 @@ const GraphResolve = struct {
         }
     }
 
-    test "seeded_builtins: panic leads as global prelude, then the intrinsics in their own scopes" {
+    test "seeded_builtins: panic leads as global prelude, then the intrinsics in their own scopes, then compile_error" {
         try std.testing.expectEqualStrings("panic", seeded_builtins[0].name);
         try std.testing.expect(seeded_builtins[0].scope == .global);
         const kinds = std.enums.values(Intrinsic.Kind);
-        try std.testing.expectEqual(1 + kinds.len, seeded_builtins.len);
+        try std.testing.expectEqual(2 + kinds.len, seeded_builtins.len);
+        try std.testing.expectEqualStrings("compile_error", seeded_builtins[1 + kinds.len].name);
+        try std.testing.expect(seeded_builtins[1 + kinds.len].scope == .global);
         for (kinds, 0..) |k, i| {
             try std.testing.expectEqualStrings(Intrinsic.name(k), seeded_builtins[1 + i].name);
             try std.testing.expect(seeded_builtins[1 + i].scope == Intrinsic.scope(k));

@@ -277,6 +277,22 @@ pub fn decodeChar(raw: []const u8) CharDecode {
 
 const testing = std.testing;
 
+/// The text a diagnostic shows for string literal `raw`, decoded as `decoded`: the
+/// decoded bytes, or the literal as written when they are not valid UTF-8 or hold a
+/// control byte, which would break a JSON or one-line rendering of the diagnostic.
+pub fn shownString(decoded: []const u8, raw: []const u8) []const u8 {
+    const plain = std.unicode.utf8ValidateSlice(decoded) and for (decoded) |c| {
+        if (c < 0x20 or c == 0x7f) break false;
+    } else true;
+    return if (plain) decoded else raw[1 .. raw.len - 1];
+}
+
+test shownString {
+    try std.testing.expectEqualStrings("no é", shownString("no é", "\"no \\u{e9}\""));
+    try std.testing.expectEqualStrings("\\xff", shownString("\xff", "\"\\xff\""));
+    try std.testing.expectEqualStrings("a\\nb", shownString("a\nb", "\"a\\nb\""));
+}
+
 test "value: base-aware decode round-trips the full uint64 range into the iconst bit pattern" {
     try testing.expectEqual(@as(?i64, 42), value("42"));
     try testing.expectEqual(@as(?i64, 0x2A), value("0x2A"));

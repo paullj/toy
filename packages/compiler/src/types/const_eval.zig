@@ -75,6 +75,9 @@ const Eval = struct {
     /// Folding a `when` condition, scrutinee or guard (this names which), whose missing
     /// value is T0085 rather than T0083.
     in_when: ?[]const u8 = null,
+    /// How many enclosing `when` arms are not taken: a `compile_error` is an error only
+    /// at zero.
+    untaken: u32 = 0,
 
     fn report(ev: *Eval, at: DiagnosticSink.Report, comptime fmt: []const u8, args: anytype) Error!void {
         if (ev.quiet) return;
@@ -327,7 +330,10 @@ const Eval = struct {
             if (i != taken and f.v == .str) t.gpa.free(f.v.str);
         };
         var ok = true;
-        for (bodies) |body| {
+        for (bodies, 0..) |body, i| {
+            const skip: u32 = @intFromBool(i != taken);
+            ev.untaken += skip;
+            defer ev.untaken -= skip;
             folded[n_folded] = (try ev.arm(body, expected)) orelse {
                 ok = false;
                 break;
@@ -345,12 +351,17 @@ const Eval = struct {
     fn unifyArms(ev: *Eval, folded: []Folded, bodies: []const Ast.Index, taken: usize, kw: u32, expected: ?Type) Error!bool {
         const t = ev.t;
         var typed: ?Type = null;
-        for (folded) |f| if (!f.lit) {
+        for (folded) |f| if (!f.lit and f.ty.kind != .never) {
             typed = f.ty;
             break;
         };
+        const first_i = for (folded, 0..) |f, i| {
+            if (f.ty.kind != .never) break i;
+        } else return true;
+        const first = folded[first_i].ty;
         for (folded, bodies, 0..) |*f, body, i| {
-            const want = typed orelse folded[0].ty;
+            if (f.ty.kind == .never) continue;
+            const want = typed orelse first;
             const numeric = f.ty.kind == .int or f.ty.kind == .float;
             if (f.lit and numeric and f.ty.kind == want.kind) {
                 // An all-literal when is adopted by its declaration; the arms not taken
@@ -362,7 +373,7 @@ const Eval = struct {
                 continue;
             }
             if (!f.ty.eql(want)) {
-                const a, const b = if (i == 0) .{ f.ty, want } else .{ folded[0].ty, f.ty };
+                const a, const b = if (i == first_i) .{ f.ty, want } else .{ first, f.ty };
                 try ev.report(.{ .span = t.tokSpan(kw), .code = .T0058 }, "branches yield different types ({s} vs {s})", .{ t.typeName(a), t.typeName(b) });
                 return false;
             }
@@ -444,8 +455,46 @@ const Eval = struct {
                 if (!Ast.isWhen(t.tree, t.tokens, node)) return ev.notFolded(node);
                 return if (n.tag == .if_stmt) ev.when(n, expected) else ev.whenMatch(node, n, expected);
             },
+            .call => return if (ev.isCompileError(n)) ev.compileError(node, n) else ev.notFolded(node),
             else => return ev.notFolded(node),
         }
+    }
+
+    fn isCompileError(ev: *Eval, n: Ast.Node) bool {
+        const t = ev.t;
+        const callee = t.tree.nodes[n.lhs.int()];
+        if (callee.tag != .identifier or !std.mem.eql(u8, t.tokens[callee.main_token].text(t.source), "compile_error")) return false;
+        return switch (t.resolutions[n.lhs.int()]) {
+            .func => |id| t.fns.items[id].kind == .builtin,
+            else => false,
+        };
+    }
+
+    /// `compile_error("msg")`: in an arm not taken a `never` value any arm type takes,
+    /// else T0086 with `msg`. Quietly folding a `when` part, it is left for the body
+    /// pass to report.
+    fn compileError(ev: *Eval, node: Ast.Index, n: Ast.Node) Error!?Folded {
+        const t = ev.t;
+        if (ev.untaken > 0) return .{ .ty = Type.never, .v = .{ .bool = false } };
+        const args = Ast.rangeSlice(t.tree, n.rhs.int());
+        if (args.len != 1) {
+            try ev.report(.{ .span = t.spanOf(node), .code = .T0039 }, "expected 1 argument(s), got {d}", .{args.len});
+            return null;
+        }
+        const arg = t.tree.nodes[args[0].int()];
+        if (arg.tag != .literal_string) {
+            try ev.report(.{ .span = t.spanOf(args[0]), .code = .T0040 }, "compile_error message must be a string literal", .{});
+            return null;
+        }
+        const raw = t.tokens[arg.main_token].text(t.source);
+        switch (try Literal.decodeString(t.gpa, raw)) {
+            .ok => |msg| {
+                defer t.gpa.free(msg);
+                try ev.report(.{ .span = t.spanOf(node), .code = .T0086 }, "{s}", .{Literal.shownString(msg, raw)});
+            },
+            else => try ev.report(.{ .span = t.spanOf(args[0]), .code = .T0036 }, "malformed string literal", .{}),
+        }
+        return null;
     }
 
     /// The value of constant `cid`, named at `node`.
@@ -713,6 +762,9 @@ test "each scalar kind folds over literals, operators and other consts" {
         .{ .src = "C :=: false\nN :=: when C { 1 } else when !C { 2 } else { 3 }\n", .ty = Type.int, .value = .{ .int = 2 } },
         .{ .src = "A: uint8 =: 7\nN :=: when A > 5 { A } else { 255 }\n", .ty = Type.uint8, .value = .{ .int = 7 } },
         .{ .src = "N: str =: when 1 < 2 { \"a\" } else { \"b\" }\n", .ty = Type.str, .value = .{ .str = "a" } },
+        .{ .src = "N :=: when true { 1 } else { compile_error(\"no\") }\n", .ty = Type.int, .value = .{ .int = 1 } },
+        .{ .src = "enum E { A, B }\nN: uint8 =: when E.B { .A -> compile_error(\"no\"), .B -> 9 }\n", .ty = Type.uint8, .value = .{ .int = 9 } },
+        .{ .src = "N :=: when true { 1 } else when false { compile_error(\"no\") } else { compile_error(\"no\") }\n", .ty = Type.int, .value = .{ .int = 1 } },
         .{ .src = "enum E { A, B, C }\nX :=: E.B\nN :=: when X { .A -> 1, .B | .C -> 2 }\n", .ty = Type.int, .value = .{ .int = 2 } },
         .{ .src = "K :=: 3\nN: uint8 =: when K { 0 -> 1, _ if K > 2 -> 200, _ -> 3 }\n", .ty = Type.uint8, .value = .{ .int = 200 } },
         .{ .src = "N: str =: when 1 > 2 { true -> \"t\", false -> \"f\" }\n", .ty = Type.str, .value = .{ .str = "f" } },
@@ -775,4 +827,28 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     try Typecheck.expectDiagCodes("N: uint8 =: when 3 { 3 -> 1, _ -> 256 }\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f(n: int) -> int {\n    when n { _ -> 1 }\n}\n", &.{C.T0085});
     try Typecheck.expectDiagCodes("enum E { A, B }\nX :=: E.A\nfn f() -> int {\n    when X { .A -> 1 }\n}\n", &.{C.T0048});
+}
+
+test "compile_error is an error only where it is compiled" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("N :=: when false { 1 } else { compile_error(\"no\") }\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("N :=: compile_error(\"no\")\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("N :=: compile_error()\n", &.{C.T0039});
+    try Typecheck.expectDiagCodes("N :=: when false { 1 } else { compile_error(2) }\n", &.{C.T0040});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K > 1 { 1 } else { compile_error(\"no\") }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K < 1 { 1 } else { compile_error(\"no\") }\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> str {\n    when K { 2 -> \"two\", _ -> compile_error(\"no\") }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("K :=: 3\nfn f() -> str {\n    when K { 2 -> \"two\", _ -> compile_error(\"no\") }\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() {\n    when K < 1 { when true { compile_error(\"no\") } }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    compile_error(\"no\")\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("fn f(s: str) -> int {\n    compile_error(s)\n}\n", &.{C.T0040});
+}
+
+test "a compile_error message that is not plain UTF-8 text shows as written" {
+    const src = "N :=: compile_error(\"bad \\xff\")\nfn f() -> int {\n    compile_error(\"a\\nb\")\n}\n";
+    var r = try Typecheck.checkSource(src);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), r.result.diags.len);
+    try testing.expectEqualStrings("bad \\xff", r.result.diags[0].message);
+    try testing.expectEqualStrings("a\\nb", r.result.diags[1].message);
 }

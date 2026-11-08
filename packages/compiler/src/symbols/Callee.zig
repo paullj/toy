@@ -50,7 +50,9 @@ pub const Callee = extern struct {
     /// `.when_arm`: on a `when` node, the arm its condition or scrutinee chose (`id`: the
     /// arm's index; for the if-form 0 is the then block, 1 the else). It views as
     /// `.none`; only `whenTaken` reads it.
-    pub const Tag = enum(u8) { none, method, protocol, builtin, pending_method, pending_bound, pending_call, value, fn_ref, bound_method, template, direct, instance, generic, pending_template, elem_write, elem_store, when_arm };
+    /// `.untaken`: on a lambda or local fn inside a `when` arm lowering skips, which so
+    /// gets no unit of its own. It views as `.none`.
+    pub const Tag = enum(u8) { none, method, protocol, builtin, pending_method, pending_bound, pending_call, value, fn_ref, bound_method, template, direct, instance, generic, pending_template, elem_write, elem_store, when_arm, untaken };
 
     /// The compiler-provided methods that have no `methods` row. The four `opt_*`
     /// ops mirror `Typecheck.OptResultMethod` (`opt_is_tag0` is `is_some`/`is_ok`);
@@ -114,6 +116,7 @@ pub const Callee = extern struct {
 
     pub const elem_write: Callee = .{ .tag = .elem_write };
     pub const elem_store: Callee = .{ .tag = .elem_store };
+    pub const untaken: Callee = .{ .tag = .untaken };
 
     pub fn whenArm(arm: u32) Callee {
         return .{ .tag = .when_arm, .id = arm };
@@ -169,7 +172,7 @@ pub const Callee = extern struct {
     /// The only way a consumer reads a slot.
     pub fn view(c: Callee) View {
         return switch (c.tag) {
-            .none, .pending_method, .pending_bound, .pending_call, .pending_template, .template, .elem_write, .elem_store, .when_arm => .none,
+            .none, .pending_method, .pending_bound, .pending_call, .pending_template, .template, .elem_write, .elem_store, .when_arm, .untaken => .none,
             .method => .{ .method = c.id },
             .protocol => .{ .protocol = .{ .protocol = c.id, .method = c.aux, .bound = c.sub } },
             .builtin => .{ .builtin = @enumFromInt(c.sub) },

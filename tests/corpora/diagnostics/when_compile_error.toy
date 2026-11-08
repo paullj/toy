@@ -1,0 +1,44 @@
+# compile_error is an error wherever it is compiled: in the arm a when takes, in a
+# constant's initializer, outside any when, and in a fn nothing calls. Its message must
+# be a string literal.
+enum Os { Mac, Linux }
+
+OS :=: Os.Linux
+DEBUG :=: false
+
+fn if_taken() -> int {
+    when DEBUG { 1 } else { compile_error("release is not supported") }  #~ ERROR [T0086] release is not supported
+}
+
+fn match_taken() -> int {
+    when OS {
+        .Mac -> 1
+        .Linux -> compile_error("linux is not supported")  #~ ERROR [T0086] linux is not supported
+    }
+}
+
+fn statement() {
+    when !DEBUG {
+        compile_error("in a statement")  #~ ERROR [T0086] in a statement
+    }
+}
+
+fn outside() -> int {
+    compile_error("not in a when")  #~ ERROR [T0086] not in a when
+}
+
+fn never_called() -> int {  #~ WARN [W0003] unused function 'never_called'; remove it, make it 'pub', or prefix with '_' to silence
+    compile_error("in a fn nothing calls")  #~ ERROR [T0086] in a fn nothing calls
+}
+
+fn message(s: str) -> int {
+    when DEBUG { 1 } else { compile_error(s) }  #~ ERROR [T0040] compile_error message must be a string literal
+}
+
+A :=: when OS { .Mac -> 1, .Linux -> compile_error("no linux constant") }  #~ ERROR [T0086] no linux constant
+B: int =: when DEBUG { 2 } else when !DEBUG { compile_error("no release B") } else { 3 }  #~ ERROR [T0086] no release B
+
+fn main() -> int {
+    statement()
+    if_taken() + match_taken() + outside() + message("x") + A + B
+}
