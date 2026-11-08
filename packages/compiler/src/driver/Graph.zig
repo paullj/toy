@@ -28,6 +28,7 @@ const Engine = @import("../query/Engine.zig");
 const DiagnosticMod = @import("../diagnostics/Diagnostic.zig");
 const codes = @import("../diagnostics/codes.zig");
 const Span = @import("../diagnostics/model.zig").Span;
+const Profile = @import("Profile.zig");
 const Diagnostic = DiagnosticMod.Diagnostic;
 const BundledStd = @import("bundled_std");
 
@@ -59,6 +60,29 @@ pub const BundledPaths = struct {
 fn bundledLookup(path: []const u8) ?[]const u8 {
     for (BundledStd.modules) |m| if (std.mem.eql(u8, m.path, path)) return m.source;
     return null;
+}
+
+/// The source of `core/target` for a build: the bundled file's enums, then the three
+/// consts the build fixes. A const's value folds into the fingerprint of every fn that
+/// names it, and the module's own lex and parse are keyed by its content, so the target
+/// and profile reach every cache key that reads them with no key of their own. Each
+/// variant is a static string, so a `BundledCache` keyed by its address tells them apart.
+fn targetSource(target: []const u8, profile: Profile.Name) []const u8 {
+    // Every `--target` spelling (`Driver.targets`) names aarch64-macos, the one back-end.
+    _ = target;
+    return switch (profile) {
+        inline else => |p| comptime targetVariant(.macos, .aarch64, p),
+    };
+}
+
+pub const Os = enum { macos, linux };
+pub const Arch = enum { aarch64, x86_64 };
+
+fn targetVariant(comptime os: Os, comptime arch: Arch, comptime profile: Profile.Name) []const u8 {
+    @setEvalBranchQuota(100_000);
+    return bundledLookup(StdNames.target_module).? ++ "pub os: Os =: ." ++ @tagName(os) ++
+        "\npub arch: Arch =: ." ++ @tagName(arch) ++
+        "\npub profile: Profile =: ." ++ @tagName(profile) ++ "\n";
 }
 
 /// One discovered module: its canonical import-path name, on-disk file path, and
@@ -345,6 +369,8 @@ pub const DiscoverOptions = struct {
     bundled_cache: ?*BundledCache = null,
     /// Sets `Graph.allow_core_imports`.
     allow_core_imports: bool = false,
+    /// The profile `core/target` reports.
+    profile: Profile.Name = .debug,
 };
 
 /// The bundled modules a long-lived caller (an editor session) keeps parsed between
@@ -443,6 +469,7 @@ pub fn discover(
         .overlay = opts.overlay,
         .bundled_cache = opts.bundled_cache,
         .allow_core_imports = opts.allow_core_imports,
+        .profile = opts.profile,
     };
     defer d.deinit();
 
@@ -620,6 +647,7 @@ const Discoverer = struct {
     overlay: ?Overlay = null,
     bundled_cache: ?*BundledCache = null,
     allow_core_imports: bool = false,
+    profile: Profile.Name = .debug,
     err: ?Error = null,
     /// The gray modules in DFS order. The gray set alone cannot name a cycle: a
     /// gray ancestor above the back-edge target is on the stack but not in the cycle.
@@ -1077,7 +1105,8 @@ const Discoverer = struct {
             // `bundled:<path>` can never collide with an absolute realpath, so it
             // dedups repeat bundled imports cleanly. Skip the disk resolve + case +
             // presence guards entirely.
-            if (bundledLookup(path)) |src| {
+            if (bundledLookup(path)) |base| {
+                const src = if (std.mem.eql(u8, path, StdNames.target_module)) targetSource(d.target, d.profile) else base;
                 const child = try d.internBundled(path, src);
                 var seen = false;
                 for (edges.items) |existing| {
@@ -1704,6 +1733,40 @@ test "discover: a bundled cache parses each std module once and later graphs mat
         var it = cache.map.valueIterator();
         while (it.next()) |p| try testing.expect(p.tokens.ptr != m.tokens.ptr);
     };
+}
+
+test "discover: core/target carries the build's target and profile, one variant per profile" {
+    const gpa = testing.allocator;
+    const entry_src: []const u8 = "import core/target_selftest\nfn main() -> int { return target_selftest.selftest() }\n";
+    const Lookup = struct {
+        fn get(ctx: *const anyopaque, path: []const u8) ?[]const u8 {
+            const src: *const []const u8 = @ptrCast(@alignCast(ctx));
+            return if (std.mem.eql(u8, path, "/ws/main.toy")) src.* else null;
+        }
+    };
+    const overlay: Overlay = .{ .ctx = @ptrCast(&entry_src), .getFn = Lookup.get, .disk = false };
+    var cache: BundledCache = .{};
+    defer cache.deinit(gpa);
+    var sources: [2][]const u8 = undefined;
+    for ([_]Profile.Name{ .debug, .release }, &sources) |profile, *out| {
+        var g = try discover(gpa, Io.failing, Cache.disabled, "native", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache, .allow_core_imports = true, .profile = profile });
+        defer g.deinit(gpa);
+        try testing.expect(g.err == null);
+        const m = for (g.modules) |m| {
+            if (std.mem.eql(u8, m.path, StdNames.target_module)) break m;
+        } else return error.TestUnexpectedResult;
+        try testing.expect(m.bundled);
+        try testing.expect(std.mem.startsWith(u8, m.source, bundledLookup(StdNames.target_module).?));
+        try testing.expect(std.mem.indexOf(u8, m.source, "pub os: Os =: .macos\n") != null);
+        try testing.expect(std.mem.indexOf(u8, m.source, "pub arch: Arch =: .aarch64\n") != null);
+        try testing.expect(std.mem.endsWith(u8, m.source, switch (profile) {
+            .debug => "pub profile: Profile =: .debug\n",
+            .release => "pub profile: Profile =: .release\n",
+        }));
+        out.* = targetSource("native", profile);
+    }
+    try testing.expect(sources[0].ptr != sources[1].ptr);
+    try testing.expectEqualStrings(sources[0], targetSource("aarch64-macos", .debug));
 }
 
 test "single: trivial one-module graph from a parsed source" {

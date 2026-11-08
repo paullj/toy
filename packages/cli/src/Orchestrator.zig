@@ -250,7 +250,7 @@ fn fnResolveDigest(gf: ResolveGraph.GlobalFn) u64 {
 const DiscoverCompute = struct {
     o: Orchestrator,
     pub fn run(c: DiscoverCompute) !void {
-        c.o.graph.* = try Graph.discover(c.o.gpa, c.o.io, c.o.cache, c.o.target, c.o.entry, .{ .probe = c.o.discover_probe, .allow_core_imports = c.o.allow_core_imports, .roots = c.o.roots });
+        c.o.graph.* = try Graph.discover(c.o.gpa, c.o.io, c.o.cache, c.o.target, c.o.entry, .{ .probe = c.o.discover_probe, .allow_core_imports = c.o.allow_core_imports, .roots = c.o.roots, .profile = c.o.profile.name });
         if (c.o.graph.*.?.err != null) {
             c.o.failed_stage.* = .discover;
             return error.StageDiagnostics;

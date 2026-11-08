@@ -1,0 +1,8 @@
+# What the program is built for. The driver appends the consts `os`, `arch` and
+# `profile` (typed by the enums below) from the target and the build profile, so this
+# module's source, and the fingerprint of every fn that reads one, differs per build.
+# Only core may import it: std and user code get no OS-specific API.
+
+pub enum Os { macos, linux }
+pub enum Arch { aarch64, x86_64 }
+pub enum Profile { debug, release }

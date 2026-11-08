@@ -888,5 +888,34 @@ run_profile_switch() {
 }
 run_profile_switch
 
+# 8) TARGET PROFILE (#380): `core/target`'s consts come from the build's profile, so a
+#    fn that reads `target.profile` must not serve one profile's code to the other. Each
+#    switch builds warm on one shared cache, must exit with its own profile's digit
+#    (debug 111, release 112), and must equal a --no-cache build of that profile.
+run_target_profile() {
+  local d="$work/target_profile"; mkdir -p "$d"
+  ( cd "$d" && rm -rf .toy )
+  cat > "$d/prog.toy" <<'TOY'
+import core/target_selftest
+fn main() -> int { return target_selftest.selftest() }
+TOY
+  local prof want n=0 ok=1 got
+  for step in "-O0:111" "--release:112" "-O1:111" "--profile=release:112" "-O0:111"; do
+    prof="${step%%:*}"; want="${step##*:}"; n=$((n + 1))
+    ( cd "$d" && "$toyc" --dev-core-imports $prof -o "w$n.bin" prog.toy >/dev/null 2>&1 ) || { fail_one "target_profile: $prof warm build failed"; return; }
+    ( cd "$d" && "$toyc" --dev-core-imports $prof -o "f$n.bin" --no-cache prog.toy >/dev/null 2>&1 ) || { fail_one "target_profile: $prof force build failed"; return; }
+    "$d/w$n.bin"; got=$?
+    if [ "$got" != "$want" ]; then fail_one "target_profile: $prof exit $got, want $want [STALE UNIT]"; ok=0; fi
+    if [ "$(texthash "$d/w$n.bin")" != "$(texthash "$d/f$n.bin")" ]; then
+      fail_one "target_profile: SOUNDNESS — $prof warm __text != force __text [STALE-CACHE MISCOMPILE]"; ok=0
+    fi
+  done
+  if [ "$ok" = 1 ]; then
+    echo "  OK   target_profile: every profile switch reads its own core/target, SOUND"
+    pass=$((pass + 1))
+  fi
+}
+run_target_profile
+
 echo "--- incremental battery: $pass scenario(s) sound+cutoff, $fail failed ---"
 [ "$fail" -eq 0 ]

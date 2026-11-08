@@ -1,0 +1,10 @@
+# Only core reads the target: user code and std get no OS-specific API, so a user
+# import of core/target is R0020 at the import path, and its uses still resolve.
+import core/target  #~ ERROR [R0020] module 'core/target' is private to core; only a core/ module may import it
+
+fn main() -> int {
+    return match target.os {
+        .macos -> 0,
+        .linux -> 1,
+    }
+}

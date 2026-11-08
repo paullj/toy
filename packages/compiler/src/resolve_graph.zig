@@ -603,7 +603,11 @@ const GraphResolve = struct {
                 // The namespace is still bound below, so the program's uses of it resolve
                 // and the one R0013 is the only diagnostic the import costs.
                 const tm = &g.graph.modules[target];
-                if (g.coreRejected(mod, target)) {
+                if (tm.isCore() and std.mem.eql(u8, tm.path, StdNames.target_module) and !m.isCore()) {
+                    // No std or user API may differ by target, and no flag lifts it: what
+                    // a program sees of the target goes through core.
+                    try g.sink.report(.{ .span = g.importPathSpan(mod, decl), .code = .R0020, .scope = mod }, "module '{s}' is private to core; only a core/ module may import it", .{tm.path});
+                } else if (g.coreRejected(mod, target)) {
                     const instead = StdNames.coreReplacement(tm.path) orelse "a std module";
                     try g.sink.report(.{ .span = g.importPathSpan(mod, decl), .code = .R0013, .scope = mod }, "module '{s}' is private to the standard library; import {s} instead", .{ tm.path, instead });
                 } else if (t.isPub(decl_idx) and tm.isCore() and !m.isCore()) {
@@ -3764,6 +3768,39 @@ test "a user entry importing core/* is R0013 at the import path, and its uses st
         }
     };
     try withResolvedGraph(".toy-test-res-core-gate-entry", files, "main.toy", Check.run);
+}
+
+test "core/target is R0020 outside core, with or without allow_core_imports, and core reads it" {
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
+            var errs: usize = 0;
+            for (r.diags) |d| {
+                if (d.severity != .err) continue;
+                errs += 1;
+                try testing.expectEqual(codes.Code.R0020, d.code);
+                try testing.expectEqual(modId(g, "main"), d.scope);
+                try testing.expectEqualStrings("module 'core/target' is private to core; only a core/ module may import it", d.message);
+                try testing.expectEqualStrings("core/target", g.modules[d.scope].source[d.byte_offset..d.end]);
+            }
+            try testing.expectEqual(@as(usize, 1), errs);
+        }
+    };
+    try withResolvedGraph(".toy-test-res-target-gate", &.{.{ .path = "main.toy", .source =
+        \\import core/target
+        \\fn main() -> int {
+        \\    return match target.os { .macos -> 0, .linux -> 1 }
+        \\}
+        \\
+    }}, "main.toy", Check.run);
+    // `core/target_selftest` imports it too, with no error: it is core.
+    try withResolvedGraphOpts(".toy-test-res-target-gate-dev", &.{.{ .path = "main.toy", .source =
+        \\import core/target
+        \\import core/target_selftest
+        \\fn main() -> int {
+        \\    return match target.os { .macos -> target_selftest.selftest(), .linux -> 0 }
+        \\}
+        \\
+    }}, "main.toy", .{ .allow_core_imports = true }, Check.run);
 }
 
 test "a user non-entry module importing core/* is R0013 in that module" {

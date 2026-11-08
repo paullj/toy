@@ -89,7 +89,7 @@ test "profiles: release runs every pass, debug none, and -O overrides the profil
     }
 }
 
-test "profiles: a bad or conflicting profile is a usage error, and check declines it (#154)" {
+test "profiles: a bad or conflicting profile is a usage error, for check too (#154)" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -111,8 +111,8 @@ test "profiles: a bad or conflicting profile is a usage error, and check decline
         .{ .argv = &.{ "build", "--profile", "relase", path }, .line = "did you mean 'release'?\n" },
         .{ .argv = &.{ "build", "--release", "--profile", "debug", path }, .line = "error: --release conflicts with --profile\n" },
         .{ .argv = &.{ "run", "--profile", "release", "--release", path }, .line = "error: --release conflicts with --profile\n" },
-        .{ .argv = &.{ "check", "--release", path }, .line = "error: '--release' is a build option; 'check' does not take it\n" },
-        .{ .argv = &.{ "check", "--profile", "release", path }, .line = "error: '--profile' is a build option; 'check' does not take it\n" },
+        .{ .argv = &.{ "check", "--profile", "fast", path }, .line = bad },
+        .{ .argv = &.{ "check", "--release", "--profile", "debug", path }, .line = "error: --release conflicts with --profile\n" },
     };
     for (runs) |r| {
         const res = try toyIn(gpa, io, null, r.argv);
@@ -126,6 +126,71 @@ test "profiles: a bad or conflicting profile is a usage error, and check decline
     defer freeOut(gpa, help);
     try testing.expect(std.mem.indexOf(u8, help.out, "--release") != null);
     try testing.expect(std.mem.indexOf(u8, help.out, "--profile") != null);
+}
+
+test "profiles: check takes --release and --profile, default debug (#380)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.requireToy(io);
+
+    const dir = ".toy-test-profiles-check";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir);
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const path = dir ++ "/main.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = prog });
+
+    for ([_][]const []const u8{
+        &.{ "check", path },
+        &.{ "check", "--release", path },
+        &.{ "check", "--profile", "release", path },
+        &.{ "check", "--profile=debug", path },
+    }) |argv| {
+        const res = try toyIn(gpa, io, null, argv);
+        defer freeOut(gpa, res);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    }
+    const help = try toyIn(gpa, io, null, &.{ "check", "--help" });
+    defer freeOut(gpa, help);
+    try testing.expect(std.mem.indexOf(u8, help.out, "--release") != null);
+    try testing.expect(std.mem.indexOf(u8, help.out, "--profile") != null);
+}
+
+test "profiles: core/target reads the target and the profile the build names (#380)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+
+    const dir = ".toy-test-profiles-target";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const src =
+        \\import core/target_selftest
+        \\fn main() -> int { return target_selftest.selftest() }
+        \\
+    ;
+    // os macos (1), arch aarch64 (1), then the profile: debug 1, release 2. One cache
+    // serves every build, so a stale entry would show as the other profile's digit.
+    const cases = [_]struct { flags: []const []const u8, want: u8 }{
+        .{ .flags = &.{}, .want = 111 },
+        .{ .flags = &.{"--release"}, .want = 112 },
+        .{ .flags = &.{ "--profile", "debug", "-O1" }, .want = 111 },
+        .{ .flags = &.{ "--profile", "release", "-O0" }, .want = 112 },
+        .{ .flags = &.{}, .want = 111 },
+    };
+    for (cases, 0..) |c, i| {
+        const sub = try std.fmt.allocPrint(gpa, "{s}/{d}", .{ dir, i });
+        defer gpa.free(sub);
+        const flags = try std.mem.concat(gpa, []const u8, &.{ &.{harness.dev_core_imports}, c.flags });
+        defer gpa.free(flags);
+        const bin = try harness.compile(gpa, io, sub, src, flags);
+        defer gpa.free(bin);
+        try testing.expectEqual(c.want, try harness.runExit(gpa, io, bin));
+    }
 }
 
 fn codegenStats(gpa: std.mem.Allocator, io: Io, cwd: []const u8, flags: []const []const u8) ![2]usize {
