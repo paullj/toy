@@ -13,6 +13,8 @@ const Typecheck = @import("../types.zig");
 const DiagnosticSink = @import("../diagnostics/Sink.zig");
 const ControlFlow = @import("../ControlFlow.zig");
 const PatternChecker = @import("../PatternChecker.zig");
+const Walk = @import("../ast/Walk.zig");
+const Span = @import("../diagnostics/model.zig").Span;
 
 const Value = const_fold.Value;
 const ConstSym = Typecheck.ConstSym;
@@ -45,8 +47,14 @@ pub fn foldAll(t: *Typecheck) !void {
 
 /// What folding a `when` condition, scrutinee or arm guard in a body gave. The body
 /// pass types it itself, so the fold reports nothing and this keeps only what the type
-/// check cannot tell: the value an arm is chosen by, or that it is no constant.
-pub const WhenCond = union(enum) { bool: bool, int: i128, variant: u32, not_const, invalid };
+/// check cannot tell: the value an arm is chosen by, that it is no constant, or the
+/// error that stopped a well-typed part folding (`fold_error`, an index into
+/// `Typecheck.when_errors`), such as an overflow. `invalid` follows an error reported
+/// elsewhere.
+pub const WhenCond = union(enum) { bool: bool, int: i128, variant: u32, not_const, fold_error: u32, invalid };
+
+/// A `when` part's fold error, for the body pass to report if it found none itself.
+pub const WhenError = struct { span: Span, code: @import("../diagnostics/codes.zig").Code, msg: []u8 };
 
 /// The key of the `when` at `node` of module `mod` in `Typecheck.when_conds`.
 pub fn whenKey(mod: u32, node: Ast.Index) u64 {
@@ -69,24 +77,33 @@ const Eval = struct {
     name: []const u8 = "",
     /// The constants being folded, outermost first: a use of one of them is a cycle.
     stack: std.ArrayList(u32) = .empty,
-    /// Report nothing, and note in `not_const` that a part had no value.
+    /// Report nothing, and note in `not_const` that a part had no value and in
+    /// `quiet_err` the first error that stopped it folding.
     quiet: bool = false,
     not_const: bool = false,
-    /// Folding a `when` condition, scrutinee or guard (this names which), whose missing
-    /// value is T0085 rather than T0083.
-    in_when: ?[]const u8 = null,
+    quiet_err: ?WhenError = null,
+    /// Folding a `when` condition, scrutinee or guard (`part` names which), whose missing
+    /// value is T0085 rather than T0083, over the whole part.
+    in_when: ?struct { part: []const u8, node: Ast.Index } = null,
+    /// The bindings of the `when` arms being folded, innermost first: each names its
+    /// `when`'s scrutinee value.
+    binds: ?*const Bind = null,
     /// How many enclosing `when` arms are not taken: a `compile_error` is an error only
     /// at zero.
     untaken: u32 = 0,
 
+    const Bind = struct { slot: u32, f: Folded, next: ?*const Bind };
+
     fn report(ev: *Eval, at: DiagnosticSink.Report, comptime fmt: []const u8, args: anytype) Error!void {
-        if (ev.quiet) return;
-        try ev.t.sink.report(at, fmt, args);
+        if (!ev.quiet) return ev.t.sink.report(at, fmt, args);
+        if (ev.quiet_err != null) return;
+        ev.quiet_err = .{ .span = at.span, .code = at.code, .msg = try std.fmt.allocPrint(ev.t.gpa, fmt, args) };
     }
 
     /// Fold the condition or scrutinee of every `when`, and each guard of a match-form
     /// one, quietly, for the body pass to read. A scrutinee is keyed by its `when`, a
-    /// guard by itself.
+    /// guard by itself. A walk from each module's root, so a part folds with the
+    /// bindings of the `when` arms around it.
     fn whenConds(ev: *Eval) Error!void {
         const t = ev.t;
         ev.quiet = true;
@@ -95,25 +112,117 @@ const Eval = struct {
         defer _ = t.gphSelect(prev);
         for (0..t.graph.mods.len) |m| {
             _ = t.gphSelect(@intCast(m));
+            if (t.tree.nodes.len == 0) continue;
+            const program = t.tree.nodes[Ast.root(t.tree.nodes).int()];
+            for (Ast.rangeSlice(t.tree, program.lhs.int())) |decl| {
+                try ev.whensIn(@intCast(m), decl);
+                for (Ast.implMethods(t.tree, t.tree.nodes[decl.int()])) |method| try ev.whensIn(@intCast(m), method);
+            }
+            // A `when` no walk above reaches, such as in a protocol's default method,
+            // folds with no bindings.
             for (t.tree.nodes, 0..) |n, i| {
                 const node = Ast.Index.from(@intCast(i));
-                if (!Ast.isWhen(t.tree, t.tokens, node)) continue;
+                if (!Ast.isWhen(t.tree, t.tokens, node) or t.when_conds.contains(whenKey(@intCast(m), node))) continue;
                 const is_if = n.tag == .if_stmt;
-                try ev.foldWhenPart(@intCast(m), node, n.lhs, if (is_if) Type.bool else null);
+                _ = try ev.foldWhenPart(@intCast(m), node, n.lhs, if (is_if) Type.bool else null);
                 if (is_if) continue;
                 for (Ast.rangeSlice(t.tree, n.rhs.int())) |arm_idx| {
                     const guard = Ast.armHeaderAt(t.tree, t.tree.nodes[arm_idx.int()].rhs.int()).guard;
-                    if (guard != Ast.none) try ev.foldWhenPart(@intCast(m), guard, guard, Type.bool);
+                    if (guard != Ast.none) _ = try ev.foldWhenPart(@intCast(m), guard, guard, Type.bool);
                 }
             }
         }
     }
 
-    fn foldWhenPart(ev: *Eval, mod: u32, key: Ast.Index, expr: Ast.Index, expected: ?Type) Error!void {
+    /// Fold the `when`s in the subtree at `root` that no other `when` or closure in it
+    /// holds, each with its own parts' bindings, and a closure's with none: its locals
+    /// share no slots with the arms around it.
+    fn whensIn(ev: *Eval, mod: u32, root: Ast.Index) Error!void {
+        const t = ev.t;
+        const Finder = struct {
+            tree: Ast.Tree,
+            tokens: []const @import("../ast/Token.zig").Token,
+            gpa: std.mem.Allocator,
+            found: std.ArrayList(Ast.Index) = .empty,
+            oom: bool = false,
+            pub fn descend(f: *@This(), idx: Ast.Index, tag: Ast.Node.Tag) bool {
+                const stop = tag == .lambda or tag == .local_fn or Ast.isWhen(f.tree, f.tokens, idx);
+                if (stop) f.found.append(f.gpa, idx) catch {
+                    f.oom = true;
+                };
+                return !stop;
+            }
+        };
+        var finder: Finder = .{ .tree = t.tree, .tokens = t.tokens, .gpa = t.gpa };
+        defer finder.found.deinit(t.gpa);
+        Walk.walk(.{ .tree = t.tree, .tokens = t.tokens, .source = t.source }, root, &finder) catch unreachable;
+        if (finder.oom) return error.OutOfMemory;
+        for (finder.found.items) |node| {
+            const n = t.tree.nodes[node.int()];
+            switch (n.tag) {
+                .lambda, .local_fn => {
+                    const outer = ev.binds;
+                    ev.binds = null;
+                    defer ev.binds = outer;
+                    try ev.whensIn(mod, n.rhs);
+                },
+                .if_stmt => {
+                    _ = try ev.foldWhenPart(mod, node, n.lhs, Type.bool);
+                    try ev.whensIn(mod, n.lhs);
+                    const h = Ast.ifHeaderAt(t.tree, n.rhs.int());
+                    try ev.whensIn(mod, h.then_block);
+                    if (h.else_node != Ast.none) try ev.whensIn(mod, h.else_node);
+                },
+                else => {
+                    const scrut = try ev.foldWhenPart(mod, node, n.lhs, null);
+                    try ev.whensIn(mod, n.lhs);
+                    const outer = ev.binds;
+                    defer ev.binds = outer;
+                    for (Ast.rangeSlice(t.tree, n.rhs.int())) |arm_idx| {
+                        const an = t.tree.nodes[arm_idx.int()];
+                        var slot: Bind = undefined;
+                        ev.binds = ev.bindArm(&slot, an.lhs, scrut, outer);
+                        const h = Ast.armHeaderAt(t.tree, an.rhs.int());
+                        if (h.guard != Ast.none) {
+                            _ = try ev.foldWhenPart(mod, h.guard, h.guard, Type.bool);
+                            try ev.whensIn(mod, h.guard);
+                        }
+                        try ev.whensIn(mod, h.body);
+                    }
+                },
+            }
+        }
+    }
+
+    /// `outer` with the binding the arm pattern `pat` names, if any, set in `bind` to the
+    /// scrutinee's value `scrut`.
+    fn bindArm(ev: *Eval, into: *Bind, pat: Ast.Index, scrut: ?Folded, outer: ?*const Bind) ?*const Bind {
+        const s = scrut orelse return outer;
+        const b = Ast.patternBinding(ev.t.tree, pat) orelse return outer;
+        const slot = switch (ev.t.resolutions[b.int()]) {
+            .local => |l| l,
+            else => return outer,
+        };
+        into.* = .{ .slot = slot, .f = s, .next = outer };
+        return into;
+    }
+
+    /// Fold `when` part `expr` quietly and record what it gave under `key`. Returns its
+    /// value when the arms can test it, to bind to the arms' bindings.
+    fn foldWhenPart(ev: *Eval, mod: u32, key: Ast.Index, expr: Ast.Index, expected: ?Type) Error!?Folded {
+        const t = ev.t;
         ev.not_const = false;
+        ev.quiet_err = null;
         const f = try ev.eval(expr, expected);
-        const cond: WhenCond = if (f) |v| whenValue(ev.t.gpa, v.v) else if (ev.not_const) .not_const else .invalid;
-        try ev.t.when_conds.put(ev.t.gpa, whenKey(mod, key), cond);
+        const err = ev.quiet_err;
+        ev.quiet_err = null;
+        const cond: WhenCond = if (f) |v| whenValue(t.gpa, v.v) else if (err) |e| blk: {
+            try t.when_errors.append(t.gpa, e);
+            break :blk .{ .fold_error = @intCast(t.when_errors.items.len - 1) };
+        } else if (ev.not_const) .not_const else .invalid;
+        if (err) |e| if (cond != .fold_error) t.gpa.free(e.msg);
+        try t.when_conds.put(t.gpa, whenKey(mod, key), cond);
+        return if (cond == .invalid or f == null) null else f;
     }
 
     /// The value a `when` chooses an arm by; one no arm can test is `invalid`. Frees a str.
@@ -144,9 +253,15 @@ const Eval = struct {
         const c = t.graph.consts[cid];
         const prev_mod = t.gphSelect(c.module);
         const prev_name = ev.name;
+        const prev_binds = ev.binds;
+        const prev_when = ev.in_when;
+        ev.binds = null;
+        ev.in_when = null;
         defer {
             _ = t.gphSelect(prev_mod);
             ev.name = prev_name;
+            ev.binds = prev_binds;
+            ev.in_when = prev_when;
         }
         const decl = t.tree.nodes[c.decl_node.int()];
         ev.name = t.tokens[decl.main_token].text(t.source);
@@ -216,8 +331,10 @@ const Eval = struct {
 
     fn notFolded(ev: *Eval, node: Ast.Index) Error!?Folded {
         ev.not_const = true;
-        if (ev.in_when) |part|
-            try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0085 }, "when {s} is not known at compile time", .{part})
+        // The body pass reports a missing value itself, as T0085.
+        if (ev.quiet) return null;
+        if (ev.in_when) |w|
+            try ev.report(.{ .span = ev.t.spanOf(w.node), .code = .T0085 }, "when {s} is not known at compile time", .{w.part})
         else
             try ev.report(.{ .span = ev.t.spanOf(node), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{ev.name});
         return null;
@@ -238,7 +355,7 @@ const Eval = struct {
             try ev.report(.{ .span = t.tokSpan(n.main_token), .code = .T0059 }, "value-when requires else", .{});
             return null;
         }
-        return ev.arms(&.{ h.then_block, h.else_node }, if (c.v.bool) 0 else 1, n.main_token, expected);
+        return ev.arms(&.{ h.then_block, h.else_node }, &.{}, null, if (c.v.bool) 0 else 1, n.main_token, expected);
     }
 
     /// `when x { pat -> e, .. }` in a constant's initializer: every arm folds and the
@@ -257,14 +374,22 @@ const Eval = struct {
         const arm_nodes = Ast.rangeSlice(t.tree, n.rhs.int());
         const bodies = try t.gpa.alloc(Ast.Index, arm_nodes.len);
         defer t.gpa.free(bodies);
+        const pats = try t.gpa.alloc(Ast.Index, arm_nodes.len);
+        defer t.gpa.free(pats);
         var taken: ?usize = null;
-        for (arm_nodes, bodies, 0..) |arm_idx, *body, i| {
+        const outer = ev.binds;
+        defer ev.binds = outer;
+        for (arm_nodes, bodies, pats, 0..) |arm_idx, *body, *pat, i| {
             const an = t.tree.nodes[arm_idx.int()];
             const h = Ast.armHeaderAt(t.tree, an.rhs.int());
             body.* = h.body;
+            pat.* = an.lhs;
             if (!try ev.patternFits(an.lhs, st)) return null;
             var holds = true;
             if (h.guard != Ast.none) {
+                var slot: Bind = undefined;
+                ev.binds = ev.bindArm(&slot, an.lhs, s, outer);
+                defer ev.binds = outer;
                 const g = (try ev.whenPart("guard", h.guard, Type.bool)) orelse return null;
                 if (g.v != .bool) {
                     if (g.v == .str) t.gpa.free(g.v.str);
@@ -279,13 +404,13 @@ const Eval = struct {
         if (ev.quiet) {
             if (taken == null) return ev.notFolded(node);
         } else if (!try PatternChecker.checkWhenCoverage(ctx, &t.sink, t.gpa, span, arm_nodes, st)) return null;
-        return ev.arms(bodies, taken orelse return ev.notFolded(node), n.main_token, expected);
+        return ev.arms(bodies, pats, s, taken orelse return ev.notFolded(node), n.main_token, expected);
     }
 
     /// A `when`'s `part` (condition, scrutinee or guard), whose missing value is T0085.
     fn whenPart(ev: *Eval, part: []const u8, node: Ast.Index, expected: ?Type) Error!?Folded {
         const prev = ev.in_when;
-        ev.in_when = part;
+        ev.in_when = .{ .part = part, .node = node };
         defer ev.in_when = prev;
         return ev.eval(node, expected);
     }
@@ -320,8 +445,9 @@ const Eval = struct {
 
     /// Fold the arm `bodies` of a `when` on `kw`: they agree on a type as a value `if`'s
     /// or `match`'s arms do, a literal arm taking a typed arm's type or the declaration's
-    /// and fitting it whether taken or not, and the value is arm `taken`'s.
-    fn arms(ev: *Eval, bodies: []const Ast.Index, taken: usize, kw: u32, expected: ?Type) Error!?Folded {
+    /// and fitting it whether taken or not, and the value is arm `taken`'s. A match form
+    /// passes its arms' patterns `pats`, whose bindings name its scrutinee's value `scrut`.
+    fn arms(ev: *Eval, bodies: []const Ast.Index, pats: []const Ast.Index, scrut: ?Folded, taken: usize, kw: u32, expected: ?Type) Error!?Folded {
         const t = ev.t;
         const folded = try t.gpa.alloc(Folded, bodies.len);
         defer t.gpa.free(folded);
@@ -334,6 +460,10 @@ const Eval = struct {
             const skip: u32 = @intFromBool(i != taken);
             ev.untaken += skip;
             defer ev.untaken -= skip;
+            const outer = ev.binds;
+            defer ev.binds = outer;
+            var slot: Bind = undefined;
+            if (i < pats.len) ev.binds = ev.bindArm(&slot, pats[i], scrut, outer);
             folded[n_folded] = (try ev.arm(body, expected)) orelse {
                 ok = false;
                 break;
@@ -436,6 +566,11 @@ const Eval = struct {
             },
             .identifier => switch (t.resolutions[node.int()]) {
                 .constant => |cid| return ev.use(node, cid),
+                .local => |slot| {
+                    var b = ev.binds;
+                    while (b) |x| : (b = x.next) if (x.slot == slot) return x.f;
+                    return ev.notFolded(node);
+                },
                 else => return ev.notFolded(node),
             },
             // `mod.N`: the resolver bound an imported constant to the access itself.
@@ -768,6 +903,9 @@ test "each scalar kind folds over literals, operators and other consts" {
         .{ .src = "enum E { A, B, C }\nX :=: E.B\nN :=: when X { .A -> 1, .B | .C -> 2 }\n", .ty = Type.int, .value = .{ .int = 2 } },
         .{ .src = "K :=: 3\nN: uint8 =: when K { 0 -> 1, _ if K > 2 -> 200, _ -> 3 }\n", .ty = Type.uint8, .value = .{ .int = 200 } },
         .{ .src = "N: str =: when 1 > 2 { true -> \"t\", false -> \"f\" }\n", .ty = Type.str, .value = .{ .str = "f" } },
+        .{ .src = "L :=: 4\nN :=: when L { 0 -> 1, n -> n * 10 }\n", .ty = Type.int, .value = .{ .int = 40 } },
+        .{ .src = "L :=: 4\nN :=: when L { n if n > 3 -> n, _ -> 1 }\n", .ty = Type.int, .value = .{ .int = 4 } },
+        .{ .src = "L :=: 4\nN :=: when L { 0 -> 0, n -> when n > 3 { n } else { 0 } }\n", .ty = Type.int, .value = .{ .int = 4 } },
     };
     for (cases) |c| {
         var got = try lastValue(c.src);
@@ -827,6 +965,34 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     try Typecheck.expectDiagCodes("N: uint8 =: when 3 { 3 -> 1, _ -> 256 }\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f(n: int) -> int {\n    when n { _ -> 1 }\n}\n", &.{C.T0085});
     try Typecheck.expectDiagCodes("enum E { A, B }\nX :=: E.A\nfn f() -> int {\n    when X { .A -> 1 }\n}\n", &.{C.T0048});
+}
+
+test "a when arm's binding names the scrutinee's value, in its guard, body and inner whens" {
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n if n > 3 -> n * 10, _ -> 1 }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n -> when n > 3 { 1 } else { 2 } }\n}\n", &.{});
+    // A lambda's own locals are no bindings of the arm around it.
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n -> { g := fn(x: int) -> int { when x > 3 { 1 } else { 2 } }\n g(n) } }\n}\n", &.{.T0085});
+}
+
+test "a when part that overflows while folding is its fold's error, not a crash" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    const big = "BIG :=: 9223372036854775807\n";
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { 1 } else { 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { return 3 }\n    0\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { true -> 1, false -> 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG { _ if BIG + 1 > 0 -> 1, _ -> 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 { _ -> 1 }\n}\n", &.{C.T0034});
+    // An error the body pass reports in the condition is the only one.
+    try Typecheck.expectDiagCodes("A: int8 =: 1\nB: int16 =: 1\nfn f() -> int {\n    when A + B > 0 { 1 } else { 2 }\n}\n", &.{C.T0044});
+}
+
+test "a non-const when part is T0085 over the whole part, in a body or an initializer" {
+    const src = "fn ten() -> int { 10 }\nX :=: when 3 { n if ten() > 3 -> n, _ -> 1 }\n";
+    var r = try Typecheck.checkSource(src);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), r.result.diags.len);
+    const d = r.result.diags[0];
+    try testing.expectEqualStrings("ten() > 3", src[d.byte_offset..d.end]);
 }
 
 test "compile_error is an error only where it is compiled" {

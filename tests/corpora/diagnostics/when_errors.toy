@@ -1,6 +1,7 @@
 # when: every arm is checked, even one no constant takes; the arms agree on one type; and
 # the condition is a bool known while compiling, in a body or a constant's initializer.
 DEBUG :=: false
+BIG :=: 9223372036854775807
 
 fn ten() -> int { 10 }
 
@@ -19,6 +20,10 @@ fn runtime(n: int) -> int {
     when n > 0 { 1 } else { 2 }  #~ ERROR [T0085] when condition is not known at compile time
 }
 
+fn overflow() -> int {
+    when BIG + 1 > 0 { 1 } else { 2 }  #~ ERROR [T0034] constant value 9223372036854775808 out of range for type 'int'
+}
+
 fn not_bool() -> int {
     when 1 { 1 } else { 2 }  #~ ERROR [T0045] when condition must be bool
 }
@@ -35,5 +40,5 @@ D: uint8 =: when DEBUG { 300 } else { 2 }  #~ ERROR [T0034] literal out of range
 E :=: when DEBUG { 1 }  #~ ERROR [T0059] value-when requires else
 
 fn main() -> int {
-    mismatch() + untaken(1) + runtime(1) + not_bool() + no_else() + A + B + C + E
+    mismatch() + untaken(1) + runtime(1) + overflow() + not_bool() + no_else() + A + B + C + E
 }
