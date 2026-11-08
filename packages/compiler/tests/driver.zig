@@ -1960,6 +1960,23 @@ test "`toy check` rejects a user `import core/mem` (R0013) unless --dev-core-imp
     }
 }
 
+test "`toy check` rejects a user `import core/target` (R0020), even with --dev-core-imports" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir_name = ".toy-test-driver-r0020";
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    const src = "import core/target\nfn main() -> int {\n  return match target.os { .macos -> 0, .linux -> 1 }\n}\n";
+    for ([_][]const []const u8{ &.{"check"}, &.{ "check", harness.dev_core_imports } }) |args| {
+        const res = try runToyOnFixture(gpa, io, dir_name, src, args);
+        defer gpa.free(res.out);
+        try testing.expect(std.mem.indexOf(u8, res.out, "error[R0020]") != null);
+        try testing.expect(std.mem.indexOf(u8, res.out, "R0013") == null);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, res.term);
+    }
+}
+
 // The unused-variable warning fixtures: a `:=` local and a `for` loop var that are
 // never referenced. Both must warn W0001 and NOT fail the build/check (exit 0), be
 // promoted to an error by `--deny-warnings`, and be silenced by `--allow`.

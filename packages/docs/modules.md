@@ -207,6 +207,7 @@ since the grammar cannot tell which item a name selects.
 | R0012 | imports, or re-exports, form a cycle |
 | R0013 | a user module imports a private `core/` module, or any module outside `core/` re-exports one |
 | R0014 | more than one file could be the imported module (two search roots hold it, or `util.toy` sits beside `util/mod.toy`), or one file is imported under two paths |
+| R0020 | a module outside `core/` imports `core/target` |
 | T0011 | a selected type is bound under a builtin type's name (`Shape as int`) |
 | W0004 | an import, or a selected name, is never used |
 

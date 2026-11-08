@@ -281,6 +281,10 @@ pub fn isCoreModule(bundled: bool, path: []const u8) bool {
     return bundled and std.mem.startsWith(u8, path, "core/");
 }
 
+/// The module whose consts name the target and the profile. The driver writes them, and
+/// only core may import it (R0020).
+pub const target_module = "core/target";
+
 /// A `core/rt` module: the runtime lowered code calls. None of its fns may reach a GC
 /// allocation (T0082). Keyed by path alone, so a dev build's `--dev-core-imports` test can
 /// put such a module on disk.
@@ -482,6 +486,8 @@ test "every bundled core module names a std replacement for R0013" {
     const BundledStd = @import("bundled_std");
     for (BundledStd.modules) |m| {
         if (!std.mem.startsWith(u8, m.path, "core/")) continue;
+        // Importing it is R0020, which names no replacement: no std API varies by target.
+        if (std.mem.eql(u8, m.path, target_module)) continue;
         const r = coreReplacement(m.path) orelse {
             std.debug.print("core module '{s}' has no std replacement in core_replacements\n", .{m.path});
             return error.TestUnexpectedResult;

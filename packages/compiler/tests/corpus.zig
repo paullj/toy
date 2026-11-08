@@ -676,7 +676,7 @@ fn compileAndRun(
         errdefer gpa.free(joined);
         try include.append(gpa, joined);
     }
-    var graph = try Graph.discover(gpa, io, cache, Driver.default_target, entry, .{ .roots = .{ .include = include.items }, .allow_core_imports = e.dev_core_imports });
+    var graph = try Graph.discover(gpa, io, cache, Driver.default_target, entry, .{ .roots = .{ .include = include.items }, .allow_core_imports = e.dev_core_imports, .profile = profile.name });
     defer graph.deinit(gpa);
     if (graph.err) |err| {
         try checkGraphSpans(gpa, &graph, err.parse_diags);

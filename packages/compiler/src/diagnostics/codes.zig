@@ -59,6 +59,7 @@ pub const Code = enum(u16) {
     R0017, // not-a-dylib (the library file is not an arm64 Mach-O dynamic library)
     R0018, // extern-library-conflict (one C symbol is bound to two different libraries)
     R0019, // extern-symbol-not-found (the extern's library does not export its C symbol)
+    R0020, // target-import-private (a module outside core/ imports core/target)
 
     // Type band (T####).
     T0001, // unknown-type
@@ -220,6 +221,7 @@ pub const table = [_]Entry{
     .{ .code = .R0017, .str = "R0017", .slug = "not-a-dylib" },
     .{ .code = .R0018, .str = "R0018", .slug = "extern-library-conflict" },
     .{ .code = .R0019, .str = "R0019", .slug = "extern-symbol-not-found" },
+    .{ .code = .R0020, .str = "R0020", .slug = "target-import-private" },
     .{ .code = .T0001, .str = "T0001", .slug = "unknown-type" },
     .{ .code = .T0002, .str = "T0002", .slug = "unknown-module" },
     .{ .code = .T0003, .str = "T0003", .slug = "module-has-no-type" },

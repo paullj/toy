@@ -49,6 +49,11 @@ const link_opts: []const Spec.Option = &.{
     .{ .short = 'L', .value = .string, .action = .append, .value_name = "DIR", .help = "Search DIR for -l and extern \"name\" libraries, before the default folders (repeatable)" },
 };
 
+/// The profile flags, shared by build and `check`, so `check` sees the `core/target`
+/// profile a build would.
+const release_opt: Spec.Option = .{ .long = "release", .action = .set_true, .conflicts = &.{"profile"}, .help = "Build with the release profile (same as --profile release)" };
+const profile_opt: Spec.Option = .{ .long = "profile", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Name) }, .value_name = "NAME", .help = "Build profile: debug runs no IR passes, release runs them all (default debug)" };
+
 /// `--target`, shared by every command that takes it, so `check` validates it too.
 const target_opt: Spec.Option = .{ .long = "target", .value = .{ .@"enum" = &toyc.Driver.targets }, .value_name = "TARGET", .help = "Compilation target (default: " ++ toyc.Driver.default_target ++ ")" };
 
@@ -64,8 +69,8 @@ const pre_emit: []const Spec.Option = &[_]Spec.Option{
 const jobs_opt: Spec.Option = .{ .short = 'j', .value = .{ .int = .{ .min = 1, .max = null } }, .value_name = "N", .help = "Worker threads (N>=1; -j1 = serial; default the cpu count)" };
 const post_emit: []const Spec.Option = &[_]Spec.Option{
     jobs_opt,
-    .{ .long = "release", .action = .set_true, .conflicts = &.{"profile"}, .help = "Build with the release profile (same as --profile release)" },
-    .{ .long = "profile", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Name) }, .value_name = "NAME", .help = "Build profile: debug runs no IR passes, release runs them all (default debug)" },
+    release_opt,
+    profile_opt,
     // -O is short-only => Parsed field `O`; -O0 / -O1 / -O 1 all parse, -O2 rejected.
     .{ .short = 'O', .value = .{ .int = .{ .min = 0, .max = 1 } }, .value_name = "LEVEL", .help = "IR optimization level, overriding the profile's (0 = none, 1 = all passes; any pass on also keeps non-escaping closure envs in frames)" },
     .{ .long = "opt", .value = .{ .@"enum" = pass_names }, .action = .append, .value_name = "PASS", .help = "Enable only the named passes (repeatable)" },
@@ -111,7 +116,7 @@ const files_pos: []const Spec.Positional = &.{
 /// severity overrides; `--deny-warnings` promotes any surviving warning to an error
 /// for the exit gate; `--exit-zero` forces a 0 exit even with errors (editors that read
 /// the stream, not the status); `--watch` is a forward-compatible no-op stub; `--color`,
-/// `--target`, `-j` and `--timings` mirror the shared spellings.
+/// `--target`, `--release`/`--profile`, `-j` and `--timings` mirror the shared spellings.
 const check_opts: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "format", .value = .{ .@"enum" = &.{ "human", "ndjson" } }, .value_name = "FORM", .help = "Diagnostic output form (human snippets or line-delimited JSON; default human)" },
 } ++ sev_opts ++ &[_]Spec.Option{
@@ -119,6 +124,8 @@ const check_opts: []const Spec.Option = &[_]Spec.Option{
     .{ .long = "watch", .action = .set_true, .help = "Re-check on file changes (not yet implemented; accepted as a no-op)" },
     .{ .long = "color", .value = .{ .@"enum" = &.{ "auto", "always", "never" } }, .value_name = "WHEN", .help = "Colorize output (default auto: on when stdout is a tty)" },
     target_opt,
+    release_opt,
+    profile_opt,
     jobs_opt,
     .{ .long = "timings", .action = .set_true, .help = "Print the per-stage wall-clock profile" },
 } ++ roots_opts ++ link_opts ++ dev_core_opt;
@@ -210,7 +217,7 @@ comptime {
     if (hasLong(check_opts, "emit"))
         @compileError("`check` must never register `--emit`");
     // check_opts must carry ONLY the restricted, non-codegen knobs.
-    for ([_][]const u8{ "output", "j", "O", "release", "profile", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "gc-stress", "emit" }) |banned| {
+    for ([_][]const u8{ "output", "j", "O", "opt", "no-opt", "dump", "codegen-stats", "verify", "no-cache", "opt-stats", "no-specialize", "gc-stress", "emit" }) |banned| {
         if (hasLong(check_opts, banned))
             @compileError("`check` option set must not contain build/codegen/opt flags");
     }

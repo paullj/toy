@@ -10,8 +10,10 @@ toy run main.toy --profile release    # the same as --release
 ```
 
 `--release` and `--profile debug|release` work on every command that builds: `toy build`,
-`toy run` and a bare `toy <file>`. `toy check` builds nothing, so it does not take them.
-`--release` together with `--profile` is an error, even when they agree.
+`toy run` and a bare `toy <file>`. `toy check` takes them too, so it checks the program
+the build would see: the profile is one of the values the standard library's private
+`core/target` module reports, next to the target's OS and architecture. `--release`
+together with `--profile` is an error, even when they agree.
 
 ## What each profile sets
 

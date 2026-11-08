@@ -1,0 +1,19 @@
+# Reads each `core/target` const for the integration harness, which sees only the exit
+# code: one digit per const, so a wrong value in any of them shows.
+import core/target
+
+pub fn selftest() -> int {
+    os := match target.os {
+        .macos -> 1,
+        .linux -> 2,
+    }
+    arch := match target.arch {
+        .aarch64 -> 1,
+        .x86_64 -> 2,
+    }
+    profile := match target.profile {
+        .debug -> 1,
+        .release -> 2,
+    }
+    return os * 100 + arch * 10 + profile
+}
