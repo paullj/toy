@@ -749,7 +749,7 @@ pub const BodyChecker = struct {
             .expr_stmt => _ = try bc.typeOf(stmt.lhs),
             .block => _ = try bc.checkBlock(stmt_idx, false),
             .if_stmt => {
-                try bc.checkIfCond(stmt_idx, stmt, try bc.typeOf(stmt.lhs));
+                try bc.checkIfCond(stmt_idx, stmt, .stmt);
                 const h = Ast.ifHeaderAt(bc.tree, (stmt.rhs).int());
                 {
                     const skip = bc.enterArm(stmt_idx, 0);
@@ -2579,9 +2579,14 @@ pub const BodyChecker = struct {
         return payload;
     }
 
-    /// The condition of an `if` or `when` at `node_idx`, typed `ct`. A `when`'s must also
-    /// fold, and the arm it picks is recorded for lowering.
-    fn checkIfCond(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, ct: Type) error{OutOfMemory}!void {
+    /// Type the condition of an `if` or `when` at `node_idx`, a statement or a value. A
+    /// `when`'s must also fold, and the arm it picks is recorded for lowering.
+    fn checkIfCond(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, form: enum { stmt, value }) error{OutOfMemory}!void {
+        const mark = bc.sink.count();
+        const ct = switch (form) {
+            .stmt => try bc.typeOf(n.lhs),
+            .value => try bc.typeOfExpected(n.lhs, null),
+        };
         const kw = bc.nameText(n.main_token);
         if (!condFits(ct)) {
             try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0045 }, "{s} condition must be bool", .{kw});
@@ -2591,8 +2596,15 @@ pub const BodyChecker = struct {
         switch (bc.model.whenCond(bc.graph_mod, node_idx)) {
             .bool => |taken| bc.setCalleeAt(node_idx, Callee.whenArm(if (taken) 0 else 1)),
             .not_const => try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when condition is not known at compile time", .{}),
+            .fold_error => |i| if (!bc.errorsSince(mark)) try bc.reportWhenError(i),
             else => {},
         }
+    }
+
+    /// The error that stopped a well-typed `when` part folding, such as an overflow.
+    pub fn reportWhenError(bc: *BodyChecker, i: u32) error{OutOfMemory}!void {
+        const e = bc.model.when_errors[i];
+        try bc.report(.{ .span = e.span, .code = e.code }, "{s}", .{e.msg});
     }
 
     /// Enter arm `arm` of the construct at `node_idx`: 1 when it is a `when` arm lowering
@@ -2608,7 +2620,7 @@ pub const BodyChecker = struct {
     fn typeOfIf(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!Type {
         // The expected type is the arms', not the condition's, which types as it does in a
         // statement `if`.
-        try bc.checkIfCond(node_idx, n, try bc.typeOfExpected(n.lhs, null));
+        try bc.checkIfCond(node_idx, n, .value);
         const h = Ast.ifHeaderAt(bc.tree, (n.rhs).int());
         if (h.else_node == Ast.none) {
             try bc.sink.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0059 }, "value-{s} requires else", .{bc.nameText(n.main_token)});

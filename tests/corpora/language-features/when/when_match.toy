@@ -1,7 +1,8 @@
 # Feature: the match form of when picks the arm whose pattern takes a constant's value
 # while compiling. Each arm is checked, and only the one taken runs: on an enum constant,
 # on an int constant with '_', with or-patterns, a guard and a binding, as a statement
-# and as a value, and in a constant's initializer.
+# and as a value, and in a constant's initializer, where a binding names the constant's
+# value in its guard, its arm and the whens inside it.
 # expect: stdout "mac\nsmall\nmac-os\nfast\n"
 # expect: exit 65
 import std/io
@@ -16,6 +17,7 @@ MODE :=: Mode.Fast
 
 MAP_ANON :=: when OS { .Mac -> 4096, .Linux -> 32, .Windows -> 0 }
 WIDTH: uint8 =: when LEVEL { 0 | 1 -> 8, 2 -> 16, _ -> 64 }
+TENS :=: when LEVEL { 0 -> 1, n if n > 3 -> n * 10, _ -> 2 }
 NAME: str =: when OS { .Linux -> "linux", _ -> "mac" }
 
 fn size() -> str {
@@ -29,7 +31,8 @@ fn level() -> int {
     when LEVEL {
         0 -> 100
         n if DEBUG -> n * 1000
-        n -> n
+        n if n > 3 -> when n > 9 { 0 } else { n }
+        n -> n * 100
     }
 }
 
@@ -52,5 +55,5 @@ fn main() -> int {
         .Small(_) -> io.println("small")
     }
     wide := when WIDTH == 64 { 64 } else { 0 }
-    MAP_ANON / 4096 + wide + mode() - 3 + level() - 2
+    MAP_ANON / 4096 + wide + mode() - 3 + level() - 2 + TENS - 40
 }

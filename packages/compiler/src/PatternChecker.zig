@@ -48,6 +48,7 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     // The scrutinee takes the arms' expected type only as a hint: `match n.try_into() {
     // .ok(c) -> c, .. }` needs it, but the scrutinee is no arm (`match 300 { .. }` in an
     // `int8` fn still matches an `int`).
+    const mark = bc.sink.count();
     const st = try bc.typeUnderHint(n.lhs, if (bc.body.expected) |e| e.ty else null);
     const arms = Ast.rangeSlice(bc.tree, (n.rhs).int());
     if (st.kind == .invalid) {
@@ -66,7 +67,7 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
             defer bc.untaken_arms -= skip;
             _ = try bc.typeOf(Ast.armHeaderAt(bc.tree, (bc.tree.nodes[(arm_idx).int()].rhs).int()).body);
         }
-        try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0067 }, "match scrutinee must be an enum, int, or bool, got {f}", .{bc.fmtType(st)});
+        try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0067 }, "{s} scrutinee must be an enum, int, or bool, got {f}", .{ bc.nameText(n.main_token), bc.fmtType(st) });
         bc.node_types[(node_idx).int()] = .invalid;
         return .invalid;
     }
@@ -87,7 +88,8 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     var warned = false;
     var result: Type = Type.never;
     // Chosen before the arms are checked, so each knows whether it is lowered.
-    if (Ast.isWhen(bc.tree, bc.tokens, node_idx)) try chooseWhenArm(bc, node_idx, n, st);
+    const is_when = Ast.isWhen(bc.tree, bc.tokens, node_idx);
+    if (is_when) try chooseWhenArm(bc, node_idx, n, st, bc.errorsSince(mark));
     for (arms, 0..) |arm_idx, arm_i| {
         const skip = bc.enterArm(node_idx, @intCast(arm_i));
         defer bc.untaken_arms -= skip;
@@ -106,9 +108,14 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
         if (guarded) {
             // A guard is a bool whatever the arms yield, so their expected type is no hint
             // for it (the scrutinee keeps it: `match n.try_into() { .ok(c) -> c, .. }`).
+            const guard_mark = bc.sink.count();
             const gt = try bc.typeOfExpected(h.guard, null);
             if (!BodyChecker.condFits(gt))
-                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0045 }, "match guard must be bool, got {f}", .{bc.fmtType(gt)});
+                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0045 }, "{s} guard must be bool, got {f}", .{ bc.nameText(n.main_token), bc.fmtType(gt) })
+            else if (is_when and !bc.errorsSince(guard_mark)) switch (bc.model.whenCond(bc.graph_mod, h.guard)) {
+                .fold_error => |i| try bc.reportWhenError(i),
+                else => {},
+            };
         }
         const body_ty0 = try bc.typeOfArm(h.body, bc.body.expected, result);
         const body_ty: Type = if (armDiverges(bc, h.body)) Type.never else body_ty0;
@@ -144,15 +151,19 @@ fn reportUncovered(sink: *DiagnosticSink, gpa: std.mem.Allocator, span: Span, kw
 }
 
 /// A `when`'s scrutinee and guards fold before the body pass; the first arm whose guard
-/// holds and whose pattern takes the scrutinee's value is the one lowering emits.
-fn chooseWhenArm(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, st: Type) error{OutOfMemory}!void {
+/// holds and whose pattern takes the scrutinee's value is the one lowering emits. A
+/// guard's fold error is reported once the guard is typed; the scrutinee's here, unless
+/// typing it reported an error (`scrut_errs`).
+fn chooseWhenArm(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, st: Type, scrut_errs: bool) error{OutOfMemory}!void {
     const v = bc.model.whenCond(bc.graph_mod, node_idx);
     var chosen: ?u32 = null;
     var folded = true;
-    if (v == .not_const) {
-        try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when scrutinee is not known at compile time", .{});
-        folded = false;
+    switch (v) {
+        .not_const => try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when scrutinee is not known at compile time", .{}),
+        .fold_error => |i| if (!scrut_errs) try bc.reportWhenError(i),
+        else => {},
     }
+    if (v == .not_const or v == .fold_error or v == .invalid) folded = false;
     for (Ast.rangeSlice(bc.tree, n.rhs.int()), 0..) |arm_idx, i| {
         const arm = bc.tree.nodes[arm_idx.int()];
         const h = Ast.armHeaderAt(bc.tree, arm.rhs.int());

@@ -49,6 +49,13 @@ fn guard(n: int) -> int {
     }
 }
 
+fn guard_overflow() -> int {
+    when LEVEL {
+        n if n * 9223372036854775807 > 0 -> 1  #~ ERROR [T0034] constant value 18446744073709551614 out of range for type 'int'
+        _ -> 2
+    }
+}
+
 A :=: when OS { .Mac -> 1, .Linux -> 2 }  #~ ERROR [T0048] non-exhaustive when: missing variant 'Windows'; add the missing arm(s) or a '_' arm
 B :=: when LEVEL { 2 -> 1 }  #~ ERROR [T0048] non-exhaustive when: int when requires '_'
 C :=: when OS { .Mac -> 1, _ -> "x" }  #~ ERROR [T0058] branches yield different types (int vs str)
@@ -57,5 +64,5 @@ E :=: when OS { .Mac -> 1, .Linux -> ten(), _ -> 3 }  #~ ERROR [T0083] the value
 F :=: when OS { .Mac -> 1, .Solaris -> 2, _ -> 3 }  #~ ERROR [T0061] enum 'Os' has no variant 'Solaris'
 
 fn main() -> int {
-    missing() + no_wildcard() + untaken(1) + mismatch() + runtime(1) + guard(1) + A + B + C + D + E + F
+    missing() + no_wildcard() + untaken(1) + mismatch() + runtime(1) + guard(1) + guard_overflow() + A + B + C + D + E + F
 }

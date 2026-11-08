@@ -555,6 +555,17 @@ pub fn isWhen(tree: Tree, tokens: []const Token, node: Index) bool {
     return (n.tag == .if_stmt or n.tag == .match_expr) and tokens[n.main_token].tag == .kw_when;
 }
 
+/// The binding a pattern over a scalar names the whole value with, if any: the value has
+/// no payload to destructure, and or-alternatives bind the same name.
+pub fn patternBinding(tree: Tree, pat_idx: Index) ?Index {
+    const pat = tree.nodes[pat_idx.int()];
+    return switch (pat.tag) {
+        .pattern_binding => pat_idx,
+        .pattern_or => patternBinding(tree, rangeSlice(tree, pat.lhs.int())[0]),
+        else => null,
+    };
+}
+
 /// Decode the `{start, len}` range header at `header`.
 pub fn rangeAt(tree: Tree, header: u32) Range {
     return .{ .start = tree.extra[header], .len = tree.extra[header + 1] };

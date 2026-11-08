@@ -3752,24 +3752,13 @@ fn lowerWhenArmInto(b: *Builder, n: Ast.Node, arm_idx: Ast.Index, dst_ptr: Ir.Va
     const arm = b.in.tree.nodes[arm_idx.int()];
     const prev_line = b.markLine(arm_idx);
     defer b.cur_line = prev_line;
-    if (bindingOf(b.in.tree, arm.lhs)) |bind| {
+    if (Ast.patternBinding(b.in.tree, arm.lhs)) |bind| {
         const scrut_ty = b.in.nodes.typeOf(n.lhs);
         const scrut_slot = try spillScrutinee(b, try lowerExpr(b, n.lhs), scrut_ty, b.in.tree.nodes[n.lhs.int()].main_token);
         if (scrut_slot == Ir.none_slot) return;
         try bindLeaf(b, bind, scrut_slot, 0, scrut_ty);
     }
     try lowerExprInto(b, Ast.armHeaderAt(b.in.tree, arm.rhs.int()).body, dst_ptr, ty);
-}
-
-/// The binding a pattern over a scalar names the whole value with, if any: the value has
-/// no payload to destructure, and or-alternatives bind the same name.
-fn bindingOf(tree: Ast.Tree, pat_idx: Ast.Index) ?Ast.Index {
-    const pat = tree.nodes[pat_idx.int()];
-    return switch (pat.tag) {
-        .pattern_binding => pat_idx,
-        .pattern_or => bindingOf(tree, Ast.rangeSlice(tree, pat.lhs.int())[0]),
-        else => null,
-    };
 }
 
 /// A postfix `?` in VALUE context. Mirrors `lowerMatchValue`: materialize the

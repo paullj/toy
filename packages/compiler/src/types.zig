@@ -1828,6 +1828,8 @@ fns: std.ArrayList(FnSym),
 consts: std.ArrayList(ConstSym) = .empty,
 /// Every `when`'s folded condition, by `const_eval.whenKey`.
 when_conds: std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = .empty,
+/// The errors `when_conds` entries name by `fold_error`. OWNS each `msg`.
+when_errors: std.ArrayList(const_eval.WhenError) = .empty,
 
 /// The struct table: one `StructSym` per struct id. The bare-name → global-id
 /// map lives per-module in the graph ctx (`activeStructMap`).
@@ -2126,6 +2128,7 @@ pub const Model = struct {
     /// The folded constants by global const id, frozen before the body pass.
     consts: []const ConstSym = &.{},
     when_conds: *const std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = &empty_when_conds,
+    when_errors: []const const_eval.WhenError = &.{},
     /// The program-wide inherent-method table, frozen from Pass A. Read-only
     /// during the parallel body pass; drives `BodyChecker` method dispatch.
     methods: []const Method,
@@ -2179,6 +2182,7 @@ fn buildModel(t: *Typecheck) Model {
         .gph_fn_names = t.gph_fn_names,
         .consts = t.consts.items,
         .when_conds = &t.when_conds,
+        .when_errors = t.when_errors.items,
         .methods = t.methods.items,
         .templates = t.templates.items,
         .rejected_methods = t.rejected_methods.items,
@@ -2435,6 +2439,8 @@ pub fn checkGraph(
         const_eval.freeValues(gpa, t.consts.items);
         t.consts.deinit(gpa);
         t.when_conds.deinit(gpa);
+        for (t.when_errors.items) |e| gpa.free(e.msg);
+        t.when_errors.deinit(gpa);
         // Any instances not transferred into the result (an error path) are freed
         // here; the success path empties `t.mono` via `toOwnedSlice` first.
         for (t.mono.items) |*inst| {
