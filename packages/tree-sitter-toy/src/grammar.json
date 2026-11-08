@@ -3420,6 +3420,47 @@
       }
     },
     "when_expression": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_when_if"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "when"
+            },
+            {
+              "type": "FIELD",
+              "name": "value",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_expression"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "{"
+            },
+            {
+              "type": "REPEAT1",
+              "content": {
+                "type": "SYMBOL",
+                "name": "match_arm"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "}"
+            }
+          ]
+        }
+      ]
+    },
+    "_when_if": {
       "type": "PREC_RIGHT",
       "value": 0,
       "content": {
@@ -3466,8 +3507,13 @@
                           "name": "block"
                         },
                         {
-                          "type": "SYMBOL",
-                          "name": "when_expression"
+                          "type": "ALIAS",
+                          "content": {
+                            "type": "SYMBOL",
+                            "name": "_when_if"
+                          },
+                          "named": true,
+                          "value": "when_expression"
                         }
                       ]
                     }
@@ -4112,6 +4158,22 @@
     [
       "parameter",
       "type_name"
+    ],
+    [
+      "_primary_expression",
+      "path_pattern"
+    ],
+    [
+      "variant_expression",
+      "variant_pattern"
+    ],
+    [
+      "_primary_expression",
+      "literal_pattern"
+    ],
+    [
+      "_primary_expression",
+      "_pattern"
     ]
   ],
   "precedences": [],

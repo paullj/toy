@@ -3702,6 +3702,10 @@ fn lowerMatchValue(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{O
 /// switch terminator (preserves overlapping-pattern order).
 fn lowerMatchInto(b: *Builder, node_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: Typecheck.Type) error{OutOfMemory}!void {
     const n = b.in.tree.nodes[(node_idx).int()];
+    if (Ast.isWhen(b.in.tree, b.in.tokens, node_idx)) {
+        const taken = b.in.nodes.callee(node_idx).whenTaken() orelse unreachable;
+        return lowerWhenArmInto(b, n, Ast.rangeSlice(b.in.tree, n.rhs.int())[taken], dst_ptr, ty);
+    }
     const scrut_ty = b.in.nodes.typeOf(n.lhs);
 
     // Spill the scrutinee into a slot (every match reads it by address).
@@ -3739,6 +3743,33 @@ fn lowerMatchInto(b: *Builder, node_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: Typ
     // unreachable so the caller's fall-through does not append a value-less `br` to the
     // fn exit (which carries a typed result param).
     if (ty.kind == .never) b.blocks.items[join].term_set = true;
+}
+
+/// The arm a match-form `when` took, and only it, in every profile. Its pattern tests
+/// nothing, as the arm was chosen while compiling, so the scrutinee is lowered only for
+/// a pattern that binds it.
+fn lowerWhenArmInto(b: *Builder, n: Ast.Node, arm_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: Typecheck.Type) error{OutOfMemory}!void {
+    const arm = b.in.tree.nodes[arm_idx.int()];
+    const prev_line = b.markLine(arm_idx);
+    defer b.cur_line = prev_line;
+    if (bindingOf(b.in.tree, arm.lhs)) |bind| {
+        const scrut_ty = b.in.nodes.typeOf(n.lhs);
+        const scrut_slot = try spillScrutinee(b, try lowerExpr(b, n.lhs), scrut_ty, b.in.tree.nodes[n.lhs.int()].main_token);
+        if (scrut_slot == Ir.none_slot) return;
+        try bindLeaf(b, bind, scrut_slot, 0, scrut_ty);
+    }
+    try lowerExprInto(b, Ast.armHeaderAt(b.in.tree, arm.rhs.int()).body, dst_ptr, ty);
+}
+
+/// The binding a pattern over a scalar names the whole value with, if any: the value has
+/// no payload to destructure, and or-alternatives bind the same name.
+fn bindingOf(tree: Ast.Tree, pat_idx: Ast.Index) ?Ast.Index {
+    const pat = tree.nodes[pat_idx.int()];
+    return switch (pat.tag) {
+        .pattern_binding => pat_idx,
+        .pattern_or => bindingOf(tree, Ast.rangeSlice(tree, pat.lhs.int())[0]),
+        else => null,
+    };
 }
 
 /// A postfix `?` in VALUE context. Mirrors `lowerMatchValue`: materialize the
@@ -4130,8 +4161,8 @@ fn lowerIfStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
 fn whenArm(b: *Builder, node_idx: Ast.Index) ?Ast.Index {
     if (!Ast.isWhen(b.in.tree, b.in.tokens, node_idx)) return null;
     const h = Ast.ifHeaderAt(b.in.tree, b.in.tree.nodes[node_idx.int()].rhs.int());
-    const then = b.in.nodes.callee(node_idx).whenTaken() orelse unreachable;
-    return if (then) h.then_block else h.else_node;
+    const arm = b.in.nodes.callee(node_idx).whenTaken() orelse unreachable;
+    return if (arm == 0) h.then_block else h.else_node;
 }
 
 /// `if cond { then } else { else }` as a VALUE: both arms produce the merge value
@@ -5404,6 +5435,31 @@ test "a when lowers only its taken arm, in every profile" {
         \\}
         \\
     , debug);
+}
+
+test "a match-form when lowers only its taken arm, binding the scrutinee only when it names it" {
+    const gpa = testing.allocator;
+    const src =
+        \\enum Os { Mac, Linux }
+        \\OS :=: Os.Linux
+        \\K :=: 7
+        \\fn f(n: int) -> int {
+        \\ a := when OS { .Mac -> n * 1111, .Linux -> n * 2222 }
+        \\ b := when K { 0 -> 3333, k if K > 5 -> k + 4444, _ -> 5555 }
+        \\ a + b
+        \\}
+        \\
+    ;
+    const profiles = [_]Profile{ .{ .name = .debug, .opt = .O0 }, .{ .name = .debug, .opt = .O1 }, .{ .name = .release, .opt = .O0 } };
+    for (profiles, 0..) |profile, i| {
+        const ir = try renderUnit(gpa, src, "f", .{ .profile = profile });
+        defer gpa.free(ir);
+        try testing.expect(std.mem.indexOf(u8, ir, "iconst 2222") != null);
+        // At -O1 the bound `k + 4444` folds to 4451.
+        try testing.expect(std.mem.indexOf(u8, ir, if (i == 1) "iconst 4451" else "iconst 4444") != null);
+        for ([_][]const u8{ "iconst 1111", "iconst 3333", "iconst 5555", "get_tag", "icmp" }) |absent|
+            try testing.expect(std.mem.indexOf(u8, ir, absent) == null);
+    }
 }
 
 test "a lambda prologue copies captures into locals" {

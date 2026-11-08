@@ -233,7 +233,8 @@ pub const Node = extern struct {
         enum_init_struct,
         /// `match scrut { arm, ... }`. `main_token` is the `match` keyword.
         /// `lhs` is the scrutinee expression. `rhs` is the `extra` header of a
-        /// `Range` over `match_arm` nodes.
+        /// `Range` over `match_arm` nodes. The match-form `when x { .. }` is this
+        /// node with `main_token` on `when` (`isWhen`).
         match_expr,
         /// One match arm `pat [if guard] -> body`. `main_token` is the `->`.
         /// `lhs` is the pattern node. `rhs` is the `extra` header of a 2-cell
@@ -547,10 +548,11 @@ pub const FnProto = struct {
     generic_params: []const Index,
 };
 
-/// True when `node` is an `if_stmt` spelled `when`, whose arm is chosen while compiling.
+/// True when `node` is an `if_stmt` or `match_expr` spelled `when`, whose arm is chosen
+/// while compiling.
 pub fn isWhen(tree: Tree, tokens: []const Token, node: Index) bool {
     const n = tree.nodes[node.int()];
-    return n.tag == .if_stmt and tokens[n.main_token].tag == .kw_when;
+    return (n.tag == .if_stmt or n.tag == .match_expr) and tokens[n.main_token].tag == .kw_when;
 }
 
 /// Decode the `{start, len}` range header at `header`.
@@ -1477,7 +1479,7 @@ fn renderNode(out: *std.Io.Writer, tree: Tree, tokens: []const Token, source: []
             try out.writeByte(')');
         },
         .match_expr => {
-            try out.writeAll("(match ");
+            try out.writeAll(if (tokens[n.main_token].tag == .kw_when) "(when-match " else "(match ");
             try renderNode(out, tree, tokens, source, n.lhs);
             for (rangeSlice(tree, n.rhs.int())) |arm| {
                 try out.writeByte(' ');

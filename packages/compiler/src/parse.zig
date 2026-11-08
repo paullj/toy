@@ -1197,6 +1197,12 @@ fn parseMatch(p: *Parser) Error!Ast.Index {
         defer scrut_nb.end();
         break :scrut try p.parseExpr(0);
     };
+    return p.parseArms(match_tok, scrut);
+}
+
+/// The `{ arm, ... }` list of a `match` or a match-form `when` on `kw_tok`, after its
+/// scrutinee.
+fn parseArms(p: *Parser, kw_tok: u32, scrut: Ast.Index) Error!Ast.Index {
     var arms_nb = NoBlockScope.enter(p, false);
     defer arms_nb.end();
     try p.expect(.l_brace, "expected '{' to open a match");
@@ -1232,7 +1238,7 @@ fn parseMatch(p: *Parser) Error!Ast.Index {
     try p.expect(.r_brace, "expected '}' to close match");
 
     const header = try p.addRange(arms.items);
-    return p.addNode(.{ .tag = .match_expr, .main_token = match_tok, .lhs = scrut, .rhs = header });
+    return p.addNode(.{ .tag = .match_expr, .main_token = kw_tok, .lhs = scrut, .rhs = header });
 }
 
 /// One `pat [if guard] -> body` match arm.
@@ -1920,7 +1926,13 @@ fn expectTerminator(p: *Parser) Error!void {
 fn parseStmt(p: *Parser) Error!Ast.Index {
     const tok = p.peek();
     switch (tok.tag) {
-        .kw_if, .kw_when => return p.parseIf(),
+        .kw_if => return p.parseIf(),
+        .kw_when => {
+            const node = try p.parseIf();
+            // The match form stands as a `match` does: an expression statement.
+            if (p.nodes.items[node.int()].tag != .match_expr) return node;
+            return p.addNode(.{ .tag = .expr_stmt, .main_token = p.nodes.items[node.int()].main_token, .lhs = node, .rhs = Ast.none });
+        },
         .kw_while => return p.parseWhile(),
         .kw_for => return p.parseFor(),
         .kw_break => {
@@ -2027,7 +2039,13 @@ fn parseWhile(p: *Parser) Error!Ast.Index {
 /// and others while running. Go-style, the `else` must sit on the same line as the
 /// closing `}` (the lexer inserts a `.newline` after `}` only when a real newline byte
 /// follows, so `} else` on one line keeps `.kw_else` as the immediate next token).
+/// A `when` whose braces open an arm list is the match form, `when x { pat -> e }`, a
+/// `match_expr` on the `when` keyword; it does not chain after an `else`.
 fn parseIf(p: *Parser) Error!Ast.Index {
+    return p.parseIfChain(true);
+}
+
+fn parseIfChain(p: *Parser, arms_ok: bool) Error!Ast.Index {
     const if_tok = p.index;
     const kw = p.peek().tag;
     p.advance();
@@ -2036,13 +2054,43 @@ fn parseIf(p: *Parser) Error!Ast.Index {
         defer nb.end();
         break :cond try p.parseExpr(0);
     };
+    if (arms_ok and kw == .kw_when and p.atArmList()) return p.parseArms(if_tok, cond);
     const then_block = try p.parseBlock();
     var else_node: Ast.Index = Ast.none;
     if (p.eat(.kw_else)) {
-        else_node = if (p.at(kw)) try p.parseIf() else try p.parseBlock();
+        if (p.at(if (kw == .kw_when) .kw_if else .kw_when)) return p.fail(p.peek(), .P0001, if (kw == .kw_when)
+            "an else after when continues with when or a block, not if; nest the if in a block"
+        else
+            "an else after if continues with if or a block, not when; nest the when in a block");
+        else_node = if (p.at(kw)) try p.parseIfChain(false) else try p.parseBlock();
     }
     const header = try p.addExtra(&.{ then_block.int(), else_node.int() });
     return p.addNode(.{ .tag = .if_stmt, .main_token = if_tok, .lhs = cond, .rhs = header });
+}
+
+/// Whether the `{` at the cursor opens match arms rather than a block: its first line
+/// reaches an arm's `->` (or the `=>` P0009 repairs) outside any bracket. No statement
+/// line can, but for a fn type's `->`, so a `fn` on the line rules arms out.
+fn atArmList(p: *const Parser) bool {
+    if (!p.at(.l_brace)) return false;
+    var i = p.index + 1;
+    while (i < p.tokens.len and p.tokens[i].tag == .newline) i += 1;
+    var depth: u32 = 0;
+    while (i < p.tokens.len) : (i += 1) {
+        switch (p.tokens[i].tag) {
+            .l_paren, .l_bracket, .l_brace => depth += 1,
+            .r_paren, .r_bracket, .r_brace => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            .newline, .comma => if (depth == 0) return false,
+            .kw_fn, .eof => return false,
+            .arrow => if (depth == 0) return true,
+            .eq => if (depth == 0 and i + 1 < p.tokens.len and p.tokens[i + 1].tag == .gt) return true,
+            else => {},
+        }
+    }
+    return false;
 }
 
 /// If the cursor is at `@name`, consume both and return the identifier TOKEN
@@ -4380,11 +4428,38 @@ test "when parses as an if_stmt on the when keyword, chaining else when" {
     try expectProgram("N :=: when A { 1 } else { 2 }\n", "(program (const N (when A (block 1) (block 2))))");
 }
 
+test "an if/when chain that mixes the keywords says how to nest them" {
+    const gpa = testing.allocator;
+    const cases = [_]struct { src: []const u8, want: []const u8 }{
+        .{ .src = "fn f() -> int {\n when A { 1 } else if B { 2 } else { 3 }\n}\n", .want = "an else after when continues with when or a block, not if; nest the if in a block" },
+        .{ .src = "fn f() -> int {\n if A { 1 } else when B { 2 } else { 3 }\n}\n", .want = "an else after if continues with if or a block, not when; nest the when in a block" },
+    };
+    for (cases) |c| {
+        const tokens = try Lexer.tokenize(gpa, c.src);
+        defer gpa.free(tokens);
+        const result = try parse(gpa, tokens, c.src);
+        defer gpa.free(@constCast(result.diags));
+        defer freeTree(gpa, result.tree);
+        try testing.expect(result.diags.len >= 1);
+        try testing.expectEqualStrings(c.want, result.diags[0].message);
+    }
+}
+
+test "a when whose braces open arms is the match form, on the when keyword" {
+    try expectProgram(
+        "fn f() -> int {\n when OS {\n  .mac -> 1\n  .linux | _ -> 2\n }\n}\n",
+        "(program (fn f () int (block (when-match OS (arm (pvar mac) 1) (arm (por (pvar linux) (_)) 2)))))",
+    );
+    try expectProgram("N :=: when K { 0 -> 1, _ -> 2 }\n", "(program (const N (when-match K (arm (lit 0) 1) (arm (_) 2))))");
+    try expectProgram("fn f() {\n when C {\n  g: fn(int) -> int = h\n }\n}\n", "(program (fn f () _ (block (when C (block (:= g h))))))");
+}
+
 test "a when chain does not continue with if, nor an if chain with when" {
     const gpa = testing.allocator;
     for ([_][]const u8{
         "fn f() {\n when A {} else if b {}\n}\n",
         "fn f() {\n if a {} else when B {}\n}\n",
+        "fn f() {\n when A {} else when B { .x -> 1 }\n}\n",
     }) |src| {
         const tokens = try Lexer.tokenize(gpa, src);
         defer gpa.free(tokens);

@@ -73,6 +73,11 @@ module.exports = grammar({
     // lambda's `{` body tells them apart.
     [$.parameter_list, $.function_type],
     [$.parameter, $.type_name],
+    // `when X {` opens a block or match arms; only an arm's `->` tells them apart.
+    [$._primary_expression, $.path_pattern],
+    [$.variant_expression, $.variant_pattern],
+    [$._primary_expression, $.literal_pattern],
+    [$._primary_expression, $._pattern],
   ],
 
   rules: {
@@ -490,14 +495,21 @@ module.exports = grammar({
         ),
       ),
 
-    // Checked as an `if`; the compiler picks the arm while compiling.
+    // Checked as an `if` or a `match`; the compiler picks the arm while compiling. An
+    // `else when` continues only the if form.
     when_expression: ($) =>
+      choice(
+        $._when_if,
+        seq("when", field("value", $._expression), "{", repeat1($.match_arm), "}"),
+      ),
+
+    _when_if: ($) =>
       prec.right(
         seq(
           "when",
           field("condition", $._expression),
           field("consequence", $.block),
-          optional(seq("else", field("alternative", choice($.block, $.when_expression)))),
+          optional(seq("else", field("alternative", choice($.block, alias($._when_if, $.when_expression))))),
         ),
       ),
 
