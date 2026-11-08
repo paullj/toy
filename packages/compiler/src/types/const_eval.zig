@@ -113,6 +113,11 @@ const Eval = struct {
         for (0..t.graph.mods.len) |m| {
             _ = t.gphSelect(@intCast(m));
             if (t.tree.nodes.len == 0) continue;
+            // Almost no module has a `when`, and the walks below visit every node of every
+            // module on each check; a token scan is far cheaper than proving none exists.
+            for (t.tokens) |tok| {
+                if (tok.tag == .kw_when) break;
+            } else continue;
             const program = t.tree.nodes[Ast.root(t.tree.nodes).int()];
             for (Ast.rangeSlice(t.tree, program.lhs.int())) |decl| {
                 try ev.whensIn(@intCast(m), decl);
