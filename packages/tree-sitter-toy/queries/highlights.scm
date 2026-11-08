@@ -33,6 +33,7 @@
 [
   "if"
   "else"
+  "when"
   "match"
 ] @keyword.conditional
 
@@ -76,7 +77,7 @@
 (call_expression
   function: [(identifier) (field_expression) (index_expression) (call_expression)
              (parenthesized_expression) (lambda_expression) (try_expression)
-             (if_expression) (match_expression) (loop_expression) (labeled_expression)
+             (if_expression) (when_expression) (match_expression) (loop_expression) (labeled_expression)
              (unsafe_expression) (block)]
   (arguments (identifier) @variable.builtin (#eq? @variable.builtin "_")))
 

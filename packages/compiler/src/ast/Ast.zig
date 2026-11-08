@@ -148,6 +148,8 @@ pub const Node = extern struct {
         /// the condition expression. `rhs` is the `extra` index of a 2-cell
         /// header `{then_block, else_node}`: `else_node` is a `block` node, a
         /// nested `if_stmt` node (for `else if`), or `Ast.none` (no else).
+        /// A `when` is this node with `main_token` on `when` (`isWhen`): it is
+        /// resolved and checked as an `if`, and only lowering tells them apart.
         if_stmt,
 
         /// The unit value `()` AND the unit type-ref `()`. A zero-sized leaf:
@@ -544,6 +546,12 @@ pub const FnProto = struct {
     /// for a non-generic fn.
     generic_params: []const Index,
 };
+
+/// True when `node` is an `if_stmt` spelled `when`, whose arm is chosen while compiling.
+pub fn isWhen(tree: Tree, tokens: []const Token, node: Index) bool {
+    const n = tree.nodes[node.int()];
+    return n.tag == .if_stmt and tokens[n.main_token].tag == .kw_when;
+}
 
 /// Decode the `{start, len}` range header at `header`.
 pub fn rangeAt(tree: Tree, header: u32) Range {
@@ -1303,7 +1311,7 @@ fn renderNode(out: *std.Io.Writer, tree: Tree, tokens: []const Token, source: []
         },
         .if_stmt => {
             const h = ifHeaderAt(tree, n.rhs.int());
-            try out.writeAll("(if ");
+            try out.writeAll(if (tokens[n.main_token].tag == .kw_when) "(when " else "(if ");
             try renderNode(out, tree, tokens, source, n.lhs);
             try out.writeByte(' ');
             try renderNode(out, tree, tokens, source, h.then_block);

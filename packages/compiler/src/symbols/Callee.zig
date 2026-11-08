@@ -47,7 +47,9 @@ pub const Callee = extern struct {
     /// written back by a compound store, a field store, a `mut` argument or a `mut self`
     /// receiver rooted at it (`ga_at`, then `ga_set_at`). Both view as `.none`; only
     /// `StdNames.ElemPrim.of` reads them.
-    pub const Tag = enum(u8) { none, method, protocol, builtin, pending_method, pending_bound, pending_call, value, fn_ref, bound_method, template, direct, instance, generic, pending_template, elem_write, elem_store };
+    /// `.when_arm`: on a `when` node, the arm its condition chose (`sub` 1 for the
+    /// then block, 0 for the else). It views as `.none`; only `whenTaken` reads it.
+    pub const Tag = enum(u8) { none, method, protocol, builtin, pending_method, pending_bound, pending_call, value, fn_ref, bound_method, template, direct, instance, generic, pending_template, elem_write, elem_store, when_arm };
 
     /// The compiler-provided methods that have no `methods` row. The four `opt_*`
     /// ops mirror `Typecheck.OptResultMethod` (`opt_is_tag0` is `is_some`/`is_ok`);
@@ -112,6 +114,15 @@ pub const Callee = extern struct {
     pub const elem_write: Callee = .{ .tag = .elem_write };
     pub const elem_store: Callee = .{ .tag = .elem_store };
 
+    pub fn whenArm(then: bool) Callee {
+        return .{ .tag = .when_arm, .sub = @intFromBool(then) };
+    }
+
+    /// Whether a `when` takes its then block, or null when its condition did not fold.
+    pub fn whenTaken(c: Callee) ?bool {
+        return if (c.tag == .when_arm) c.sub == 1 else null;
+    }
+
     pub fn fnRef(gid: u32) Callee {
         return .{ .tag = .fn_ref, .id = gid };
     }
@@ -157,7 +168,7 @@ pub const Callee = extern struct {
     /// The only way a consumer reads a slot.
     pub fn view(c: Callee) View {
         return switch (c.tag) {
-            .none, .pending_method, .pending_bound, .pending_call, .pending_template, .template, .elem_write, .elem_store => .none,
+            .none, .pending_method, .pending_bound, .pending_call, .pending_template, .template, .elem_write, .elem_store, .when_arm => .none,
             .method => .{ .method = c.id },
             .protocol => .{ .protocol = .{ .protocol = c.id, .method = c.aux, .bound = c.sub } },
             .builtin => .{ .builtin = @enumFromInt(c.sub) },

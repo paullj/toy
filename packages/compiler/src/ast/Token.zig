@@ -256,6 +256,9 @@ pub const Tag = enum(u8) {
     /// `=:` ends the typed const form (`N: int =: 5`), as `=` ends a typed var.
     eq_colon,
 
+    /// `when cond { .. } else { .. }` chooses an arm while compiling.
+    kw_when,
+
     /// The binary operator a compound assignment applies, or null for any other tag.
     pub fn compoundBase(tag: Tag) ?Tag {
         return switch (tag) {
@@ -308,6 +311,7 @@ pub const keywords = std.StaticStringMap(Tag).initComptime(.{
     .{ "type", .kw_type },
     .{ "extern", .kw_extern },
     .{ "unsafe", .kw_unsafe },
+    .{ "when", .kw_when },
 });
 
 comptime {

@@ -116,7 +116,7 @@ const decl_first = setOf(&.{ .kw_import, .kw_pub, .kw_fn, .kw_struct, .kw_enum, 
 /// The universal inherited ancestor anchor: `decl_first` ∪ {eof}.
 const decl_anchors = decl_first.unionWith(setOf(&.{.eof}));
 /// FIRST(expr): exactly `parsePrefix`'s accepted switch arms.
-const expr_first = setOf(&.{ .identifier, .number, .float, .string, .char_lit, .kw_true, .kw_false, .l_paren, .l_brace, .l_bracket, .kw_if, .kw_loop, .kw_match, .kw_unsafe, .at, .dot, .minus, .bang, .tilde, .amp, .star, .pipe_gt });
+const expr_first = setOf(&.{ .identifier, .number, .float, .string, .char_lit, .kw_true, .kw_false, .l_paren, .l_brace, .l_bracket, .kw_if, .kw_when, .kw_loop, .kw_match, .kw_unsafe, .at, .dot, .minus, .bang, .tilde, .amp, .star, .pipe_gt });
 /// FIRST(postfix): `parsePostfix`'s arms except `{`, which after a pipe RHS is a block
 /// body (`if x |> f { .. }`). After a pipe RHS each one is a P0014 rather than a silent
 /// `(x |> f).len()` reading, because the RHS is a fixed shape.
@@ -1920,7 +1920,7 @@ fn expectTerminator(p: *Parser) Error!void {
 fn parseStmt(p: *Parser) Error!Ast.Index {
     const tok = p.peek();
     switch (tok.tag) {
-        .kw_if => return p.parseIf(),
+        .kw_if, .kw_when => return p.parseIf(),
         .kw_while => return p.parseWhile(),
         .kw_for => return p.parseFor(),
         .kw_break => {
@@ -2021,14 +2021,16 @@ fn parseWhile(p: *Parser) Error!Ast.Index {
     return p.addNode(.{ .tag = .while_stmt, .main_token = while_tok, .lhs = cond, .rhs = body });
 }
 
-/// `if cond { then } [else (block | if)]`. Recurses for `else if` chains: an
-/// `else` may be followed by a block or another `if`. Go-style, the `else` must
-/// sit on the same line as the closing `}` (the lexer inserts a `.newline` after
-/// `}` only when a real newline byte follows, so `} else` on one line keeps
-/// `.kw_else` as the immediate next token).
+/// `if cond { then } [else (block | if)]`, or the same with `when`. Recurses for
+/// `else if` chains: an `else` may be followed by a block or another branch on the
+/// same keyword, since a chain that mixed them would choose some arms while compiling
+/// and others while running. Go-style, the `else` must sit on the same line as the
+/// closing `}` (the lexer inserts a `.newline` after `}` only when a real newline byte
+/// follows, so `} else` on one line keeps `.kw_else` as the immediate next token).
 fn parseIf(p: *Parser) Error!Ast.Index {
     const if_tok = p.index;
-    p.bump(.kw_if);
+    const kw = p.peek().tag;
+    p.advance();
     const cond = cond: {
         var nb = NoBlockScope.enter(p, true);
         defer nb.end();
@@ -2037,7 +2039,7 @@ fn parseIf(p: *Parser) Error!Ast.Index {
     const then_block = try p.parseBlock();
     var else_node: Ast.Index = Ast.none;
     if (p.eat(.kw_else)) {
-        else_node = if (p.at(.kw_if)) try p.parseIf() else try p.parseBlock();
+        else_node = if (p.at(kw)) try p.parseIf() else try p.parseBlock();
     }
     const header = try p.addExtra(&.{ then_block.int(), else_node.int() });
     return p.addNode(.{ .tag = .if_stmt, .main_token = if_tok, .lhs = cond, .rhs = header });
@@ -2292,9 +2294,9 @@ fn parsePrefix(p: *Parser) Error!Ast.Index {
             if (p.no_block) return p.fail(tok, .P0002, "expected an expression");
             return p.parseBlock(); // a bare block as a value expression
         },
-        .kw_if => {
+        .kw_if, .kw_when => {
             if (p.no_block) return p.fail(tok, .P0002, "expected an expression");
-            return p.parseIf(); // an if as a value expression
+            return p.parseIf(); // an if or a when as a value expression
         },
         .kw_loop => {
             if (p.no_block) return p.fail(tok, .P0002, "expected an expression");
@@ -4368,6 +4370,29 @@ test "else if chains as a nested if_stmt" {
         "fn f() {\n if a {} else if b {} else {}\n return\n}\n",
         "(program (fn f () _ (block (if a (block) (if b (block) (block))) (return))))",
     );
+}
+
+test "when parses as an if_stmt on the when keyword, chaining else when" {
+    try expectProgram(
+        "fn f() -> int {\n when A { 1 } else when B { 2 } else { 3 }\n}\n",
+        "(program (fn f () int (block (when A (block 1) (when B (block 2) (block 3))))))",
+    );
+    try expectProgram("N :=: when A { 1 } else { 2 }\n", "(program (const N (when A (block 1) (block 2))))");
+}
+
+test "a when chain does not continue with if, nor an if chain with when" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        "fn f() {\n when A {} else if b {}\n}\n",
+        "fn f() {\n if a {} else when B {}\n}\n",
+    }) |src| {
+        const tokens = try Lexer.tokenize(gpa, src);
+        defer gpa.free(tokens);
+        const res = try parse(gpa, tokens, src);
+        defer gpa.free(@constCast(res.diags));
+        defer freeTree(gpa, res.tree);
+        try testing.expect(res.diags.len > 0);
+    }
 }
 
 test "while statement parses to a while_stmt" {

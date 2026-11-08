@@ -106,7 +106,7 @@ pub const Code = enum(u16) {
     T0042, // return-type-mismatch (a `return` value's type differs from the fn's declared return type)
     T0043, // missing-return (a fn with a non-unit return type can reach the end of its body without returning)
     T0044, // operand-type-mismatch (a unary/binary operator's operand types do not fit the operator)
-    T0045, // condition-not-bool (an `if`/`while` condition or a match guard is not bool)
+    T0045, // condition-not-bool (an `if`/`when`/`while` condition or a match guard is not bool)
     T0046, // no-such-field (a field access, construction, or pattern names a field the struct/variant does not have)
     T0047, // missing-field (a struct or variant construction omits a declared field)
     T0048, // non-exhaustive-match (a match does not cover every value of its scrutinee)
@@ -119,8 +119,8 @@ pub const Code = enum(u16) {
     T0055, // not-callable (a call of a value that is not a function, or of a module or type)
     T0056, // not-a-value (a type or module name used where a value is wanted)
     T0057, // not-indexable (`x[i]` on a value that is not a `Vec`)
-    T0058, // branch-type-mismatch (the arms of a value `if` yield different types)
-    T0059, // if-without-else (a value `if` has no `else`)
+    T0058, // branch-type-mismatch (the arms of a value `if` or `when` yield different types)
+    T0059, // if-without-else (a value `if` or `when` has no `else`)
     T0060, // misplaced-jump (`break`/`continue` outside a loop, `continue` to a block, a value `break` out of `while`/`for`)
     T0061, // no-such-variant (an enum has no variant of that name)
     T0062, // not-an-enum (a variant is named on, or expected from, a type that is not an enum)
@@ -146,6 +146,7 @@ pub const Code = enum(u16) {
     T0082, // runtime-allocates (a `core/rt` fn can reach a GC allocation, directly or through calls)
     T0083, // const-not-folded (a constant's initializer has no value at compile time)
     T0084, // const-cycle (a constant whose value depends on itself through other constants)
+    T0085, // when-cond-not-const (a `when` condition is not known at compile time)
 
     // Warning band (W####).
     W0001, // unused-variable
@@ -306,6 +307,7 @@ pub const table = [_]Entry{
     .{ .code = .T0082, .str = "T0082", .slug = "runtime-allocates", .related = "the call path starts here" },
     .{ .code = .T0083, .str = "T0083", .slug = "const-not-folded" },
     .{ .code = .T0084, .str = "T0084", .slug = "const-cycle" },
+    .{ .code = .T0085, .str = "T0085", .slug = "when-cond-not-const" },
     .{ .code = .W0001, .str = "W0001", .slug = "unused-variable", .default_severity = .warning },
     .{ .code = .W0002, .str = "W0002", .slug = "unused-parameter", .default_severity = .warning },
     .{ .code = .W0003, .str = "W0003", .slug = "unused-function", .default_severity = .warning },

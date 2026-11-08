@@ -4094,6 +4094,11 @@ fn genCondOnLine(b: *Builder, cond: Ast.Index, t: Ir.BlockId, f: Ir.BlockId) err
 /// fall-through. An else-less if jumps straight to join on false. A divergent arm
 /// (already terminated) does not branch to join.
 fn lowerIfStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
+    if (whenArm(b, stmt_idx)) |arm| {
+        if (arm == Ast.none) return;
+        if (b.in.tree.nodes[arm.int()].tag == .if_stmt) return lowerIfStmt(b, arm);
+        return lowerBlockStmts(b, arm);
+    }
     const stmt = b.in.tree.nodes[(stmt_idx).int()];
     const h = Ast.ifHeaderAt(b.in.tree, (stmt.rhs).int());
     const then_bb = try b.addBlock();
@@ -4119,11 +4124,25 @@ fn lowerIfStmt(b: *Builder, stmt_idx: Ast.Index) error{OutOfMemory}!void {
     b.switchTo(join);
 }
 
+/// The arm a `when` at `node_idx` lowers, and only that one, in every profile: its then
+/// block, its else block or chained `when`, or `none` for an else-less one not taken.
+/// Null for an `if`.
+fn whenArm(b: *Builder, node_idx: Ast.Index) ?Ast.Index {
+    if (!Ast.isWhen(b.in.tree, b.in.tokens, node_idx)) return null;
+    const h = Ast.ifHeaderAt(b.in.tree, b.in.tree.nodes[node_idx.int()].rhs.int());
+    const then = b.in.nodes.callee(node_idx).whenTaken() orelse unreachable;
+    return if (then) h.then_block else h.else_node;
+}
+
 /// `if cond { then } else { else }` as a VALUE: both arms produce the merge value
 /// carried as a block param on `join`. Typecheck guarantees an else. An aggregate
 /// result is produced into a temp slot instead (see `paramOperand`).
 fn lowerIfValue(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (isAggregatePass(b, ty)) return try aggregateValue(b, node_idx, ty);
+    if (whenArm(b, node_idx)) |arm| {
+        if (b.in.tree.nodes[arm.int()].tag == .if_stmt) return lowerIfValue(b, arm, ty);
+        return lowerBlockValue(b, arm, ty);
+    }
     const stmt = b.in.tree.nodes[(node_idx).int()];
     const h = Ast.ifHeaderAt(b.in.tree, (stmt.rhs).int());
     std.debug.assert(h.else_node != Ast.none);
@@ -4567,6 +4586,10 @@ fn lowerLabeledBlock(b: *Builder, block_idx: Ast.Index, ty: Typecheck.Type, labe
 // and does NOT branch to join.
 
 fn lowerIfValueInto(b: *Builder, node_idx: Ast.Index, dst_ptr: Ir.ValueId, ty: Typecheck.Type) error{OutOfMemory}!void {
+    if (whenArm(b, node_idx)) |arm| {
+        if (b.in.tree.nodes[arm.int()].tag == .if_stmt) return lowerIfValueInto(b, arm, dst_ptr, ty);
+        return lowerBlockValueInto(b, arm, dst_ptr, ty);
+    }
     const stmt = b.in.tree.nodes[(node_idx).int()];
     const h = Ast.ifHeaderAt(b.in.tree, (stmt.rhs).int());
     std.debug.assert(h.else_node != Ast.none);
@@ -5331,6 +5354,56 @@ test "a debug build tests +, -, * and unary - for overflow before each; +% and r
     defer gpa.free(release);
     try testing.expect(std.mem.indexOf(u8, release, "overflow") == null);
     try testing.expect(std.mem.indexOf(u8, release, "panic") == null);
+}
+
+test "a when lowers only its taken arm, in every profile" {
+    const gpa = testing.allocator;
+    const src =
+        \\ON :=: 3 > 2
+        \\fn say(s: str) -> int { s.len() }
+        \\fn f(n: int) -> int {
+        \\ when !ON { say("off") } else when ON { say("on") }
+        \\ when ON { n * 1111 } else { n * 2222 }
+        \\}
+        \\
+    ;
+    const profiles = [_]Profile{ .{ .name = .debug, .opt = .O0 }, .{ .name = .debug, .opt = .O1 }, .{ .name = .release, .opt = .O0 } };
+    for (profiles) |profile| {
+        const ir = try renderUnit(gpa, src, "f", .{ .profile = profile });
+        defer gpa.free(ir);
+        try testing.expect(std.mem.indexOf(u8, ir, "iconst 1111") != null);
+        try testing.expect(std.mem.indexOf(u8, ir, "iconst 2222") == null);
+        // The untaken arm's "off" would store its length, 3.
+        try testing.expect(std.mem.indexOf(u8, ir, "iconst 3\n") == null);
+    }
+    const debug = try renderUnit(gpa, src, "f", .{ .profile = .{ .name = .debug, .opt = .O0 } });
+    defer gpa.free(debug);
+    try testing.expectEqualStrings(
+        \\fn main.f(s0) -> int {
+        \\  slots: s0:int s1:str
+        \\b0:
+        \\  %1 = slot_addr s1
+        \\  %2 = cstr_ptr #f80a70dc7d254e32
+        \\  store %1, %2 : int
+        \\  %3 = field_addr %1, 8 : int
+        \\  %4 = iconst 2
+        \\  store %3, %4 : int
+        \\  %5 = call @main.say(s1)
+        \\  %6 = slot_addr s0
+        \\  %7 = load %6 : int
+        \\  %8 = iconst 1111
+        \\  %9 = overflow mul %7, %8 : int
+        \\  cond_br %9, b3, b2
+        \\b1(%0:int):
+        \\  ret %0
+        \\b2:
+        \\  %10 = mul %7, %8
+        \\  br b1(%10)
+        \\b3:
+        \\  panic mul_overflow
+        \\}
+        \\
+    , debug);
 }
 
 test "a lambda prologue copies captures into locals" {

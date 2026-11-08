@@ -1,0 +1,53 @@
+# Feature: the if-form of when picks an arm by a constant while compiling. Each arm is
+# checked, and only the one taken runs, for a true and a false constant, down an
+# else-when chain, as a statement and as a value, and in a constant's initializer.
+# expect: stdout "on\nmid\ntwo\nsmall\nwide\n"
+# expect: exit 87
+import std/io
+
+ON :=: true
+OFF :=: !ON
+LEVEL :=: 2
+WIDTH :=: when LEVEL > 1 { 64 } else { 32 }
+NAME: str =: when OFF { "off" } else when LEVEL == 2 { "two" } else { "many" }
+SMALL: uint8 =: when OFF { 1 } else { 200 }
+
+enum Mode { Fast, Small }
+
+MODE :=: Mode.Small
+
+fn pick() -> int {
+    when ON { 10 } else { 20 }
+}
+
+fn pick_off() -> int {
+    when OFF { return 1 }
+    2
+}
+
+fn label() -> str {
+    when MODE == Mode.Fast { "fast" } else when MODE == Mode.Small { "small" } else { "other" }
+}
+
+struct Pair { a: int, b: int }
+
+fn pair() -> Pair {
+    when OFF { Pair { a: 1, b: 2 } } else { Pair { a: 3, b: 4 } }
+}
+
+fn main() -> int {
+    when ON {
+        io.println("on")
+    } else {
+        io.println("off")
+    }
+    K :=: 3
+    s := when K > 5 { "big" } else when K > 1 { "mid" } else { "small" }
+    io.println(s)
+    io.println(NAME)
+    io.println(label())
+    when WIDTH == 64 { io.println("wide") }
+    p := pair()
+    big := when SMALL == 200 { 4 } else { 0 }
+    pick() + pick_off() + WIDTH + p.a + p.b + big
+}
