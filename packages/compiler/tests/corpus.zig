@@ -217,10 +217,15 @@ fn collectDiags(
             var tc = try TypecheckGraph.checkGraph(gpa, &graph, &res, io, 0);
             defer tc.deinit(gpa);
             try push.go(tc.diags);
+            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{});
+            defer libs.deinit();
+            try push.go(libs.diags);
+            if (countErr(tc.diags) == 0) try push.go(try libs.unexportedCalls(io, &graph, &tc));
+        } else {
+            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{});
+            defer libs.deinit();
+            try push.go(libs.diags);
         }
-        var libs = try toyc.Libraries.collect(gpa, io, &graph, .{});
-        defer libs.deinit();
-        try push.go(libs.diags);
     }
     if (push.bad_spans > 0) return error.SpanInvariant;
     if (push.foreign > 0) return error.ImportedModuleDiagnostic;
@@ -711,6 +716,8 @@ fn compileAndRun(
     var libs = try toyc.Libraries.collect(gpa, io, &graph, .{ .dirs = libdirs.items });
     defer libs.deinit();
     if (libs.diags.len > 0) return .{ .compile_error = try renderDiags(gpa, libs.diags) };
+    const unexported = try libs.unexportedCalls(io, &graph, &tc);
+    if (unexported.len > 0) return .{ .compile_error = try renderDiags(gpa, unexported) };
 
     if (!can_exec) return .skipped_exec;
 

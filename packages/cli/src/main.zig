@@ -948,7 +948,9 @@ fn emitExecutable(
 
     var libs = try toyc.Libraries.collect(gpa, io, &graph.?, link);
     defer libs.deinit();
-    if (try reportLibraries(gpa, out, level, usage, &graph.?, &libs, sev)) |code| return code;
+    if (try reportLibraryUsage(usage, &libs)) |code| return code;
+    if (try reportLinkDiags(gpa, out, level, &graph.?, libs.diags, sev)) |code| return code;
+    if (try reportLinkDiags(gpa, out, level, &graph.?, try libs.unexportedCalls(io, &graph.?, &tc.?), sev)) |code| return code;
 
     // Render any surviving warnings + a summary, then build the binary. No warning
     // survives to here under `deny_warnings` (it would have promoted to an error and
@@ -1228,13 +1230,13 @@ fn argErr(usage: Usage, message: []const u8) noreturn {
     std.process.exit(usage_exit);
 }
 
-/// Report what stops the program's libraries from linking: a bad `-l` is a usage
-/// error, a bad `extern "name"` block a diagnostic at the block. Null when they link.
-fn reportLibraries(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, usage: Usage, g: *const Graph.Graph, libs: *const toyc.Libraries.Result, sev: SevCfg.SeverityConfig) !?u8 {
-    if (try reportLibraryUsage(usage, libs)) |code| return code;
-    if (libs.diags.len == 0) return null;
-    try DiagRender.renderScopedDiags(gpa, out, level, g, libs.diags, sev);
-    const counts = Check.tallyGraph(libs.diags, sev);
+/// Report what stops the program's libraries from linking: a bad `extern "name"` block
+/// is a diagnostic at the block, an import its library does not export one at the
+/// extern. Null when there are none.
+fn reportLinkDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, g: *const Graph.Graph, diags: []const toyc.DiagnosticSink.Diagnostic, sev: SevCfg.SeverityConfig) !?u8 {
+    if (diags.len == 0) return null;
+    try DiagRender.renderScopedDiags(gpa, out, level, g, diags, sev);
+    const counts = Check.tallyGraph(diags, sev);
     try DiagRender.renderDiagSummary(out, level, counts.errors, counts.warnings);
     try out.flush();
     return 1;
@@ -1387,14 +1389,20 @@ fn runCheck(
     };
     defer libs.deinit();
     if (try reportLibraryUsage(usage, &libs)) |code| return code;
+    // Which externs the program calls is known only once its `when`s have folded clean.
+    const unexported: []const toyc.DiagnosticSink.Diagnostic = if (tc) |*t|
+        (if (Check.tallyGraph(t.diags, sev).errors == 0) try libs.unexportedCalls(cio, graph, t) else &.{})
+    else
+        &.{};
     ns_typecheck = lapNs(cio, timings, &last_ns);
     // A library error sits beside the type errors: like them, it is a fault in the
     // program that `check` reports with the rest.
     const checked: []const toyc.DiagnosticSink.Diagnostic = if (tc) |t| t.diags else &.{};
-    const type_diags = try gpa.alloc(toyc.DiagnosticSink.Diagnostic, checked.len + libs.diags.len);
+    const type_diags = try gpa.alloc(toyc.DiagnosticSink.Diagnostic, checked.len + libs.diags.len + unexported.len);
     defer gpa.free(type_diags);
     @memcpy(type_diags[0..checked.len], checked);
-    @memcpy(type_diags[checked.len..], libs.diags);
+    @memcpy(type_diags[checked.len..][0..libs.diags.len], libs.diags);
+    @memcpy(type_diags[checked.len + libs.diags.len ..], unexported);
 
     // SINGLE-MODULE (no imports discovered): render against the entry's ON-DISK `file`,
     // not its module `path` (a bare stem like `fix_bad` vs `/tmp/fix_bad.toy`), so the

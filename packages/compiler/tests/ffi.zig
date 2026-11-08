@@ -381,6 +381,74 @@ test "library errors: a bad -l is a coded usage error, a bad extern library a di
     try expectToy(gpa, io, w, &.{ "run", "main.toy", "-L", test_lib_dir, "-o", "p0" }, 42, .out, &.{"p0 exited with code 42"});
 }
 
+test "only the externs lowered code calls are imported, and only those are checked, at every opt level" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const root = ".toy-test-ffi-reachable";
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    const src =
+        \\extern fn labs(x: int) -> int
+        \\extern fn toy_no_such_symbol(x: int) -> int
+        \\extern fn toy_never_called() -> int
+        \\extern "toyffi" {
+        \\    fn toyffi_add(a: int, b: int) -> int
+        \\    fn toyffi_nope() -> int
+        \\}
+        \\
+        \\SYS :=: false
+        \\
+        \\fn main() -> int {
+        \\    a := when SYS { unsafe { toy_no_such_symbol(1) } } else { unsafe { labs(-7) } }
+        \\    b := when SYS { unsafe { toyffi_nope() } } else { unsafe { toyffi_add(1, 2) } }
+        \\    a + b
+        \\}
+        \\
+    ;
+    const taken = try std.mem.replaceOwned(u8, gpa, src, "SYS :=: false", "SYS :=: true");
+    defer gpa.free(taken);
+    // A plain `if` is not a `when`: its arm is lowered, and only -O1 folds it away.
+    const plain =
+        \\extern fn toy_no_such_symbol(x: int) -> int
+        \\
+        \\SYS :=: false
+        \\
+        \\fn f(on: bool) -> int {
+        \\    if on { return unsafe { toy_no_such_symbol(1) } }
+        \\    3
+        \\}
+        \\
+        \\fn main() -> int { f(SYS) }
+        \\
+    ;
+    const w = try project(gpa, io, root, &.{ .{ "untaken.toy", src }, .{ "taken.toy", taken }, .{ "plain.toy", plain } });
+    defer gpa.free(w);
+
+    try expectToy(gpa, io, w, &.{ "check", "untaken.toy", "-L", test_lib_dir }, 0, .out, &.{});
+    try expectToy(gpa, io, w, &.{ "check", "taken.toy", "-L", test_lib_dir }, 1, .out, &.{
+        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem",
+        "error[R0019]: C symbol 'toyffi_nope' is not exported by library 'toyffi'",
+    });
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        try expectToy(gpa, io, w, &.{ "build", "plain.toy", opt, "-o", "p" }, 1, .out, &.{"error[R0019]: C symbol 'toy_no_such_symbol'"});
+    }
+    try expectToy(gpa, io, w, &.{ "check", "plain.toy" }, 1, .out, &.{"error[R0019]: C symbol 'toy_no_such_symbol'"});
+    try harness.buildIn(gpa, io, w, &.{ "build", "untaken.toy", "-L", test_lib_dir, "-o", "u" });
+    try std.testing.expectEqual(@as(u8, 10), try harness.runExitIn(gpa, io, w, "u"));
+    const image = try readIn(gpa, io, w, "u");
+    defer gpa.free(image);
+    for ([_][]const u8{ "_labs\x00", "_toyffi_add\x00" }) |sym| try std.testing.expect(std.mem.indexOf(u8, image, sym) != null);
+    for ([_][]const u8{ "_toy_no_such_symbol", "_toy_never_called", "_toyffi_nope" }) |sym| try std.testing.expect(std.mem.indexOf(u8, image, sym) == null);
+
+    try expectToy(gpa, io, w, &.{ "build", "taken.toy", "-L", test_lib_dir, "-o", "t" }, 1, .out, &.{
+        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem",
+        "error[R0019]: C symbol 'toyffi_nope' is not exported by library 'toyffi'",
+        "taken.toy:2:11",
+    });
+}
+
 test "warm rebuild: a changed library set relinks, and equals a cold build" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});

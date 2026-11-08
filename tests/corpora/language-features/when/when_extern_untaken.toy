@@ -1,0 +1,13 @@
+# Feature: an extern that only an untaken when arm calls is not imported, so its library
+# need not export it: the program builds and runs. A declared extern no code calls is not
+# imported either.
+# expect: exit 7
+extern fn labs(x: int) -> int
+extern fn toy_no_such_symbol(x: int) -> int
+extern fn toy_never_called() -> int
+
+OFF :=: false
+
+fn main() -> int {
+    when OFF { unsafe { toy_no_such_symbol(1) } } else { unsafe { labs(-7) } }
+}

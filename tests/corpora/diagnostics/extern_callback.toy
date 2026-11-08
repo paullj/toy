@@ -1,5 +1,4 @@
-# Each bare extern names a real libSystem function (R0019 checks that it exists); the
-# signatures are the fixture's own.
+# Each bare extern names a real libSystem function; the signatures are the fixture's own.
 struct Acc { n: int }
 
 impl Acc {
