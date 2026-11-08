@@ -261,10 +261,12 @@ pub DEFAULT: Mode =: .Fast
   is `=:` in place of `=`, so the pair mirrors `x := e` / `x: T = e`.
 * The value must fold at compile time: literals (int, float, bool, char, str), other
   constants, an enum's unit variant, and the integer, float, comparison and boolean
-  operators over them. `<`, `<=`, `>` and `>=` fold over int, char, bool and str; over
+  operators over them, and a `when` over them (see [When](#when)). `<`, `<=`, `>` and
+  `>=` fold over int, char, bool and str; over
   any other type, whose order is a user `Ord` impl, they are **T0083**. Each literal
   intermediate is range-checked at the declared width, as in a body, so
-  `N: uint8 =: 200 + 100 - 100` is **T0034**. A call, a struct literal, a `Vec`, a
+  `N: uint8 =: 200 + 100 - 100` is **T0034**. A call (other than `compile_error`), a
+  struct literal, a `Vec`, a
   payload variant (or a variant of a generic enum, such as `Option[int].None`), a local
   variable, a division by zero or a shift past the width is **T0083**, as is a local
   constant typed by its function's type parameter (`N: T =: 5`). A constant
@@ -284,6 +286,43 @@ pub DEFAULT: Mode =: .Fast
   temporary for a str, char or enum variant, as the literal would. A function's
   incremental fingerprint folds the values of the constants it names, so changing a
   constant's value rebuilds the functions that name it and nothing else.
+
+## When
+
+`when` chooses between arms while compiling, by the value of constants. It is the only
+conditional compilation: it is an expression, like `if` and `match`, and never wraps a
+declaration or an import.
+
+```
+enum Os { Mac, Linux }
+
+OS :=: Os.Mac
+DEBUG :=: false
+LEVEL :=: 2
+WIDTH :=: when LEVEL { 1 -> 32, n if n > 1 -> n * 32, _ -> compile_error("LEVEL < 1") }
+
+fn page() -> int {
+    when DEBUG { 8192 } else when OS == Os.Mac { 16384 } else { 4096 }
+}
+```
+
+* Two forms. `when c { } else when c2 { } else { }` chooses by a `bool`; an else-chain
+  stays on `when` (an `if` after `else` is an error: nest it in a block).
+  `when x { pat -> e, .. }` chooses by an enum, int or bool, as a `match` does, and its
+  patterns must cover every value of `x` (**T0048**). An arm's binding names `x`'s value,
+  so its guard and the `when`s inside it fold too.
+* The condition, the scrutinee and each guard must fold as a constant's value does;
+  one that does not is **T0085**, and one whose fold fails, such as an overflow, is that
+  fold's error.
+* Every arm is resolved and type-checked, whichever is taken, and the arms' types join
+  as an `if`'s or a `match`'s do (**T0058**). A value `when` needs an `else`
+  (**T0059**).
+* Only the taken arm is lowered, in every profile: an untaken arm's code, calls and
+  lambdas are not in the binary.
+* A `when` works in a function body and in a constant's initializer.
+* `compile_error("msg")` is a `never`-typed builtin that stops the build with `msg`
+  (**T0086**) wherever it is compiled: anywhere but an arm a `when` did not take. Its
+  message is a string literal.
 
 ## Function signatures
 
