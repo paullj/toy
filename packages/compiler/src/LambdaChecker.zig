@@ -1,6 +1,7 @@
 const std = @import("std");
 const Ast = @import("ast/Ast.zig");
 const Closure = @import("symbols/Closure.zig");
+const Callee = @import("symbols/Callee.zig").Callee;
 const Modes = @import("symbols/Modes.zig");
 const symbols_res = @import("symbols/Resolution.zig");
 const Composite = @import("symbols/Composite.zig");
@@ -73,6 +74,8 @@ pub fn classifyCaptures(bc: *BodyChecker, place_params: u64) error{OutOfMemory}!
         defer bc.gpa.free(by_rank);
         for (fc.boundaries, 0..) |b, i| by_rank[b.rank] = @intCast(i);
         for (by_rank) |bi| for (fc.boundaries[bi].captures) |c| {
+            // A closure in an untaken `when` arm is never made, so it holds nothing.
+            if (bc.callees[fc.boundaries[bi].node.int()].tag == .untaken) break;
             if (Modes.isMut(place_params, c.slot)) continue;
             if ((try seen.getOrPut(bc.gpa, c.slot)).found_existing) continue;
             if (Closure.contains(assigned, c.slot) or Closure.contains(bc.mutated_roots.items, c.slot)) {
@@ -123,6 +126,7 @@ pub fn noteMutatedRoot(bc: *BodyChecker, place: Ast.Index) error{OutOfMemory}!vo
 /// capture's param with no expected type stays open until its hole's call position
 /// types it (`adoptHole`), and is T0050 only when the body reported no error.
 pub fn typeOfLambda(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!Type {
+    if (bc.untaken_arms > 0) bc.setCalleeAt(node_idx, Callee.untaken);
     bc.lambda_depth += 1;
     defer {
         bc.lambda_depth -= 1;
@@ -318,6 +322,7 @@ fn recallFix(bc: *BodyChecker, node_idx: Ast.Index, exp_fn: ?Type) ??Type {
 /// itself. The body checks like an annotated lambda's: `return` exits the local fn and
 /// no jump leaves it.
 pub fn checkLocalFn(bc: *BodyChecker, idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!void {
+    if (bc.untaken_arms > 0) bc.setCalleeAt(idx, Callee.untaken);
     const ret = try declareLocalFn(bc, idx, n);
     const frame = enterBody(bc, true);
     defer leaveBody(bc, frame);

@@ -5437,6 +5437,30 @@ test "a when lowers only its taken arm, in every profile" {
     , debug);
 }
 
+test "a lambda or local fn in an untaken when arm gets no unit, and boxes nothing it captures" {
+    const gpa = testing.allocator;
+    const src =
+        \\ON :=: true
+        \\fn f() -> int {
+        \\ count := 0
+        \\ a := when !ON {
+        \\  fn inner(n: int) -> int { n * 7777 }
+        \\  g := fn(x: int) -> int { count = count + x
+        \\   x * 8888 }
+        \\  inner(2) + g(1)
+        \\ } else { 2 }
+        \\ count = count + a
+        \\ count
+        \\}
+        \\
+    ;
+    try testing.expectError(error.TestUnexpectedResult, renderUnit(gpa, src, "f$l0", .{}));
+    try testing.expectError(error.TestUnexpectedResult, renderUnit(gpa, src, "f$l1", .{}));
+    const ir = try renderUnit(gpa, src, "f", .{});
+    defer gpa.free(ir);
+    try testing.expect(std.mem.indexOf(u8, ir, "gc.alloc") == null);
+}
+
 test "a match-form when lowers only its taken arm, binding the scrutinee only when it names it" {
     const gpa = testing.allocator;
     const src =

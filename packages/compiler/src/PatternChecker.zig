@@ -61,7 +61,11 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     // tail); its coverage runs over the template enum's variants.
     const enum_id = bc.scrutEnumId(st);
     if (enum_id == null and st.kind != .int and st.kind != .bool) {
-        for (arms) |arm_idx| _ = try bc.typeOf(Ast.armHeaderAt(bc.tree, (bc.tree.nodes[(arm_idx).int()].rhs).int()).body);
+        for (arms, 0..) |arm_idx, arm_i| {
+            const skip = bc.enterArm(node_idx, @intCast(arm_i));
+            defer bc.untaken_arms -= skip;
+            _ = try bc.typeOf(Ast.armHeaderAt(bc.tree, (bc.tree.nodes[(arm_idx).int()].rhs).int()).body);
+        }
         try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0067 }, "match scrutinee must be an enum, int, or bool, got {f}", .{bc.fmtType(st)});
         bc.node_types[(node_idx).int()] = .invalid;
         return .invalid;
@@ -82,7 +86,11 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     var has_wildcard = false;
     var warned = false;
     var result: Type = Type.never;
-    for (arms) |arm_idx| {
+    // Chosen before the arms are checked, so each knows whether it is lowered.
+    if (Ast.isWhen(bc.tree, bc.tokens, node_idx)) try chooseWhenArm(bc, node_idx, n, st);
+    for (arms, 0..) |arm_idx, arm_i| {
+        const skip = bc.enterArm(node_idx, @intCast(arm_i));
+        defer bc.untaken_arms -= skip;
         const arm = bc.tree.nodes[(arm_idx).int()];
         const h = Ast.armHeaderAt(bc.tree, (arm.rhs).int());
         const guarded = h.guard != Ast.none;
@@ -107,7 +115,6 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
         result = try bc.merge(n.main_token, result, body_ty);
     }
     try reportUncovered(&bc.sink, bc.gpa, scrutineeSpan(bc, n), bc.nameText(n.main_token), cov, has_wildcard, if (enum_id) |eid| bc.model.enums[eid].variants else &.{});
-    if (Ast.isWhen(bc.tree, bc.tokens, node_idx)) try chooseWhenArm(bc, node_idx, n, st);
     bc.node_types[(node_idx).int()] = result;
     return result;
 }

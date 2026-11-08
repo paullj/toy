@@ -2895,7 +2895,8 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
     // index this table directly. The synthetic bodyless `panic` is one of them.
     for (fns) |gf| {
         if (gf.kind == .builtin) {
-            try t.appendBuiltinSig(if (std.mem.eql(u8, gf.name, "panic")) Type.never else Type.unit);
+            const diverges = std.mem.eql(u8, gf.name, "panic") or std.mem.eql(u8, gf.name, "compile_error");
+            try t.appendBuiltinSig(if (diverges) Type.never else Type.unit);
         } else if (gf.kind == .import) {
             _ = t.gphSelect(gf.module);
             try t.decodeExternSig(gf.decl_node, gf.module);

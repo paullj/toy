@@ -1,0 +1,38 @@
+# Feature: compile_error in an arm a when does not take does nothing: it builds and runs,
+# in the if form and the match form, as a statement and as a value of any type, in a
+# nested when, and in a constant's initializer.
+# expect: stdout "mac\ndebug\n"
+# expect: exit 42
+import std/io
+
+enum Os { Mac, Linux }
+
+OS :=: Os.Mac
+DEBUG :=: true
+WIDTH :=: when OS { .Mac -> 32, .Linux -> compile_error("no linux width") }
+NAME: str =: when DEBUG { "debug" } else { compile_error("no release name") }
+DEPTH :=: when DEBUG { 2 } else when OS == Os.Linux { compile_error("no linux depth") } else { 3 }
+
+fn name() -> str {
+    when OS {
+        .Mac -> "mac"
+        .Linux -> compile_error("linux is not supported")
+    }
+}
+
+fn level() -> int {
+    when !DEBUG {
+        compile_error("release is not supported")
+    }
+    when DEBUG {
+        when OS == Os.Linux { compile_error("nested") } else { 8 }
+    } else {
+        compile_error("outer")
+    }
+}
+
+fn main() -> int {
+    io.println(name())
+    io.println(NAME)
+    WIDTH + level() + DEPTH
+}

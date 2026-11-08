@@ -414,6 +414,10 @@ pub const BodyChecker = struct {
     lambda_choices: std.AutoHashMapUnmanaged(Ast.Index, LambdaChoice) = .empty,
     lambda_depth: u32 = 0,
 
+    /// How many enclosing `when` arms lowering skips: a `compile_error` is an error
+    /// only at zero.
+    untaken_arms: u32 = 0,
+
     /// The ordered generic-param names + the concrete args they bind to, in
     /// generic-param order (`names[i]` binds `types[i]`).
     pub const Subst = struct { names: []const []const u8, types: []const Type };
@@ -747,8 +751,14 @@ pub const BodyChecker = struct {
             .if_stmt => {
                 try bc.checkIfCond(stmt_idx, stmt, try bc.typeOf(stmt.lhs));
                 const h = Ast.ifHeaderAt(bc.tree, (stmt.rhs).int());
-                _ = try bc.checkBlock(h.then_block, false);
+                {
+                    const skip = bc.enterArm(stmt_idx, 0);
+                    defer bc.untaken_arms -= skip;
+                    _ = try bc.checkBlock(h.then_block, false);
+                }
                 if (h.else_node != Ast.none) {
+                    const skip = bc.enterArm(stmt_idx, 1);
+                    defer bc.untaken_arms -= skip;
                     if (bc.tree.nodes[(h.else_node).int()].tag == .if_stmt)
                         try bc.checkStmt(h.else_node)
                     else
@@ -2585,6 +2595,16 @@ pub const BodyChecker = struct {
         }
     }
 
+    /// Enter arm `arm` of the construct at `node_idx`: 1 when it is a `when` arm lowering
+    /// skips, which the caller takes off `untaken_arms` on leaving. With no arm chosen
+    /// (a condition already in error) every arm counts as skipped.
+    pub fn enterArm(bc: *BodyChecker, node_idx: Ast.Index, arm: u32) u32 {
+        if (!Ast.isWhen(bc.tree, bc.tokens, node_idx)) return 0;
+        const skip: u32 = @intFromBool(bc.callees[node_idx.int()].whenTaken() != arm);
+        bc.untaken_arms += skip;
+        return skip;
+    }
+
     fn typeOfIf(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!Type {
         // The expected type is the arms', not the condition's, which types as it does in a
         // statement `if`.
@@ -2592,13 +2612,23 @@ pub const BodyChecker = struct {
         const h = Ast.ifHeaderAt(bc.tree, (n.rhs).int());
         if (h.else_node == Ast.none) {
             try bc.sink.report(.{ .span = bc.tokSpan(n.main_token), .code = .T0059 }, "value-{s} requires else", .{bc.nameText(n.main_token)});
+            const skip = bc.enterArm(node_idx, 0);
+            defer bc.untaken_arms -= skip;
             _ = try bc.checkBlock(h.then_block, false); // validate the arm anyway
             return .invalid;
         }
-        const then_ty0 = try bc.checkBlock(h.then_block, true);
+        const then_ty0 = blk: {
+            const skip = bc.enterArm(node_idx, 0);
+            defer bc.untaken_arms -= skip;
+            break :blk try bc.checkBlock(h.then_block, true);
+        };
         const then_ty: Type = if (bc.blockDiverges(h.then_block)) Type.never else then_ty0;
         const else_ladder = bc.tree.nodes[(h.else_node).int()].tag == .if_stmt;
-        const e0 = try bc.typeOfArm(h.else_node, bc.body.expected, then_ty);
+        const e0 = blk: {
+            const skip = bc.enterArm(node_idx, 1);
+            defer bc.untaken_arms -= skip;
+            break :blk try bc.typeOfArm(h.else_node, bc.body.expected, then_ty);
+        };
         const else_diverges = if (else_ladder) bc.stmtDiverges(h.else_node) else bc.blockDiverges(h.else_node);
         const else_ty: Type = if (else_diverges) Type.never else e0;
         return bc.merge(n.main_token, then_ty, else_ty);
@@ -4461,6 +4491,27 @@ pub const BodyChecker = struct {
                 }
                 std.debug.assert(f.ret.kind == .never);
                 bc.node_types[(node_idx).int()] = f.ret;
+                return f.ret;
+            }
+            if (callee.tag == .identifier and std.mem.eql(u8, bc.nameText(callee.main_token), "compile_error")) {
+                std.debug.assert(f.ret.kind == .never);
+                bc.node_types[(node_idx).int()] = f.ret;
+                if (!try bc.checkArity(node_idx, args, 1)) return f.ret;
+                const arg = bc.tree.nodes[args[0].int()];
+                if (arg.tag != .literal_string) {
+                    _ = try bc.typeOf(args[0]);
+                    try bc.report(.{ .span = bc.spanOf(args[0]), .code = .T0040 }, "compile_error message must be a string literal", .{});
+                    return f.ret;
+                }
+                _ = try bc.typeOf(args[0]);
+                const raw = bc.nameText(arg.main_token);
+                if (bc.untaken_arms == 0) switch (try Literal.decodeString(bc.gpa, raw)) {
+                    .ok => |msg| {
+                        defer bc.gpa.free(msg);
+                        try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0086 }, "{s}", .{Literal.shownString(msg, raw)});
+                    },
+                    else => {},
+                };
                 return f.ret;
             }
             // No other 1-arg builtin exists post the intrinsic switch above; a `.func` here

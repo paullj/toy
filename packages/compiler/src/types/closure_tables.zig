@@ -539,6 +539,7 @@ fn appendLambdaUnits(
     enum_layouts: []const EnumLayout,
 ) !void {
     for (fc.boundaries) |bd| {
+        if (b.nodes.callee(bd.node).tag == .untaken) continue;
         const t = b.nodes.typeOf(bd.node);
         // Only a program with type errors leaves a lambda untyped, and it is never lowered.
         if (!LayoutEngine.isFnStruct(t, layouts)) continue;
