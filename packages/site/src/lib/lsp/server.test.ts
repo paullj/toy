@@ -41,6 +41,20 @@ describe('toy-lsp.wasm', () => {
 		expect(published(server.send([change(uri, good, 2)]), uri)).toEqual([]);
 	});
 
+	it('tags an untaken when arm Unnecessary, so the editor fades it', async () => {
+		const server = await boot();
+		const uri = 'file:///blocks/when.toy';
+		const text = 'fn main() -> int {\n    return when true { 1 } else { 2 }\n}\n';
+		const diags = published(server.send([open(uri, text)]), uri);
+		expect(diags).toEqual([
+			expect.objectContaining({
+				severity: 4,
+				tags: [1],
+				range: { start: { line: 1, character: 26 }, end: { line: 1, character: 37 } }
+			})
+		]);
+	});
+
 	it('answers hover and completion in the same batch', async () => {
 		const server = await boot();
 		const add = 'pub fn add(a: int, b: int) -> int { return a + b }\n';

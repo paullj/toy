@@ -80,5 +80,8 @@ export const lspTheme = EditorView.theme({
 		backgroundImage: 'none',
 		textDecoration: 'underline wavy #c89a2c',
 		textUnderlineOffset: '3px'
-	}
+	},
+	// Code the build skips, such as an untaken `when` arm: faded, as editors show it, not
+	// underlined like a hint.
+	'.cm-lintRange.toy-unnecessary': { backgroundImage: 'none', opacity: '0.5' }
 });

@@ -29,6 +29,11 @@ pub const severity = struct {
     pub const hint: u8 = 4;
 };
 
+pub const diagnostic_tag = struct {
+    /// Editors fade the range instead of underlining it.
+    pub const unnecessary: u32 = 1;
+};
+
 /// A 0-based position. `character` is a UTF-8 byte offset within the line (we advertise
 /// `positionEncoding: "utf-8"`, so for a client that honors it this is exact; for ASCII
 /// source — the overwhelming majority of toy code — it equals the UTF-16 column too).
@@ -101,6 +106,8 @@ pub const LspDiagnostic = struct {
     source: []const u8 = "toy",
     message: []const u8,
     relatedInformation: ?[]const Related = null,
+    /// `u32`, not `u8`: std.json writes a `u8` slice as a string.
+    tags: ?[]const u32 = null,
 };
 
 /// The subset of `ServerCapabilities` we actually implement — advertised as-is. Only

@@ -8,6 +8,8 @@ type Severity = Diagnostic['severity'];
 
 const SEVERITY: Record<lsp.DiagnosticSeverity, Severity> = { 1: 'error', 2: 'warning', 3: 'info', 4: 'hint' };
 
+const UNNECESSARY: lsp.DiagnosticTag = 1;
+
 // The server republishes after every sync. Re-dispatching an identical set would close an
 // open diagnostic tooltip under the reader's cursor, so an unchanged set is dropped.
 const shown = new WeakMap<EditorView, string>();
@@ -63,6 +65,7 @@ function publishDiagnostics(client: LSPClient, params: lsp.PublishDiagnosticsPar
 			to: toPos(d.range.end),
 			severity,
 			message,
+			markClass: d.tags?.includes(UNNECESSARY) ? 'toy-unnecessary' : undefined,
 			renderMessage: (v) => render(v, severity, d.code, message, related)
 		};
 	});
