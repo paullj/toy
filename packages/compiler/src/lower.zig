@@ -3667,13 +3667,13 @@ fn loadBoxSlot(b: *Builder, slot: Ir.SlotId) error{OutOfMemory}!Ir.Operand {
 /// the result via `lowerMatchInto` into a fresh slot, then yield: a scalar loads
 /// from the slot to a value; an aggregate yields Operand.slot.
 fn lowerMatchValue(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
-    if (passKind(b, ty) == .box) {
-        const slot = try b.addSlot(ty);
-        try lowerMatchInto(b, node_idx, try b.emit(.{ .slot_addr = slot }, Typecheck.Type.int), ty);
-        return try loadBoxSlot(b, slot);
-    }
-    switch (ty.kind) {
-        .int, .bool, .float => {
+    switch (passKind(b, ty)) {
+        .box => {
+            const slot = try b.addSlot(ty);
+            try lowerMatchInto(b, node_idx, try b.emit(.{ .slot_addr = slot }, Typecheck.Type.int), ty);
+            return try loadBoxSlot(b, slot);
+        },
+        .int, .bool, .float, .rawptr => {
             const slot = try b.addSlot(ty);
             const dst = try b.emit(.{ .slot_addr = slot }, Typecheck.Type.int);
             try lowerMatchInto(b, node_idx, dst, ty);
@@ -3688,7 +3688,7 @@ fn lowerMatchValue(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{O
             try lowerMatchInto(b, node_idx, dst, ty);
             return .none;
         },
-        else => {
+        .invalid => {
             try b.note(b.in.tree.nodes[(node_idx).int()].main_token, "match result type unsupported in lower");
             return .none;
         },

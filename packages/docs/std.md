@@ -56,7 +56,7 @@ declares its own externs as `ffi.md` describes.
 |--------|-------|
 | `core/sys` | the libSystem `write` and `read` externs: `print(s)` to fd 1, `write_fd`, `read_fd_all` and `read_line_fd` |
 | `core/ffi` | the libm and `labs` externs and their safe wrappers |
-| `core/os` | the `_NSGetArgc`, `_NSGetArgv`, `getenv`, `strlen`, `exit`, `__error`, `clock_gettime_nsec_np`, `nanosleep` and `getentropy` externs: `argc`, `argv(i)`, `env`, `exit_process`, `errno`, `monotonic_ns`, `realtime_ns`, `sleep_ns`, `entropy_u64`, and `from_cstr` (copies) / `to_cstr` |
+| `core/os` | the `_NSGetArgc`, `_NSGetArgv`, `getenv`, `strlen`, `exit`, `__error`, `__errno_location`, `clock_gettime_nsec_np`, `nanosleep` and `getentropy` externs: `argc`, `argv(i)`, `env`, `exit_process`, `errno`, `errno_loc` (picks the errno extern with `when target.os`), `monotonic_ns`, `realtime_ns`, `sleep_ns`, `entropy_u64`, and `from_cstr` (copies) / `to_cstr` |
 | `core/fs` | the `open` (two arguments, never `O_CREAT`), `creat`, `close`, `unlink` and `access` externs: `open_read`, `open_append`, `create`, `close_fd`, `remove`, `exists`, `write_all`, `read_some` and `read_all`, each failure as a negated errno |
 | `core/mem` | the growable `gc_array` and the hash table behind Vec, Map and Set |
 | `core/fmt` | the Darwin-private `__dtoa`/`__freedtoa` and the `strtod` externs: `shortest(f)` (the shortest round-trip digits, their decimal point and sign) and `parse(s)` |

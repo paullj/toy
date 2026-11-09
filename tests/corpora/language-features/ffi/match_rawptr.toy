@@ -1,0 +1,20 @@
+# Feature: a match or when that yields a rawptr, as core's errno_loc does.
+# expect: exit 42
+extern fn malloc(n: int) -> rawptr
+extern fn free(p: rawptr)
+extern fn labs(x: int) -> int
+
+ON :=: true
+
+fn pick(k: int) -> rawptr {
+    return match k { 0 -> unsafe { malloc(8) }, _ -> unsafe { malloc(16) } }
+}
+
+fn main() -> int {
+    p := pick(1)
+    q := when ON { unsafe { malloc(8) } } else { p }
+    r := when ON { true -> p, false -> q }
+    unsafe { free(r) }
+    unsafe { free(q) }
+    return unsafe { labs(-42) }
+}
