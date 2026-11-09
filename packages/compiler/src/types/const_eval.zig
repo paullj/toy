@@ -229,13 +229,14 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
 test "an expression of literals and constants in a body folds, and out of range is T0034" {
     const C = @import("../diagnostics/codes.zig").Code;
     try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    n := A + 10\n    n\n}\n", &.{C.T0034});
-    try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    -A\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    -A\n}\n", &.{C.T0087});
     try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    K :=: A - 50\n    K + 5\n}\n", &.{});
     try Typecheck.expectDiagCodes("fn f() -> int8 {\n    100 + 100 - 100\n}\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    1 << 3\n}\n", &.{});
     try Typecheck.expectDiagCodes("fn f() -> int8 {\n    1 << 10\n}\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f() -> int {\n    x := 1 << 127\n    x\n}\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f() -> int {\n    -1 << 200\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    -(-1)\n}\n", &.{C.T0034});
     var r = try Typecheck.checkSource("A: uint8 =: 250\nfn f() -> uint8 {\n    A + 10\n}\n");
     defer r.deinit(testing.allocator);
     try testing.expectEqualStrings("constant value 260 out of range for type 'uint8'", r.result.diags[0].message);

@@ -148,6 +148,7 @@ pub const Code = enum(u16) {
     T0084, // const-cycle (a constant whose value depends on itself through other constants)
     T0085, // when-cond-not-const (a `when` condition, scrutinee or guard is not known at compile time)
     T0086, // compile-error (a `compile_error("msg")` the program compiles: one not in an untaken `when` arm)
+    T0087, // unsigned-negation (unary `-` on an unsigned value or constant)
 
     // Warning band (W####).
     W0001, // unused-variable
@@ -310,6 +311,7 @@ pub const table = [_]Entry{
     .{ .code = .T0084, .str = "T0084", .slug = "const-cycle" },
     .{ .code = .T0085, .str = "T0085", .slug = "when-cond-not-const" },
     .{ .code = .T0086, .str = "T0086", .slug = "compile-error" },
+    .{ .code = .T0087, .str = "T0087", .slug = "unsigned-negation" },
     .{ .code = .W0001, .str = "W0001", .slug = "unused-variable", .default_severity = .warning },
     .{ .code = .W0002, .str = "W0002", .slug = "unused-parameter", .default_severity = .warning },
     .{ .code = .W0003, .str = "W0003", .slug = "unused-function", .default_severity = .warning },

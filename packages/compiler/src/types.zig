@@ -13880,6 +13880,13 @@ test "a negative literal into an unsigned width is one T0034 at the whole litera
     try expectChecksClean("fn main() -> int {\n _a: uint8 = -0\n _b: int8 = -128\n _c: uint = -0x0\n return 0\n}\n");
 }
 
+test "unary minus on an unsigned value or constant is one T0087 at the negation" {
+    try expectSoleDiagAt("fn f(x: uint8) -> uint8 {\n -x\n}\n", .T0087, "cannot negate unsigned type 'uint8'; use '0 -% x' to wrap", "-x");
+    try expectSoleDiagAt("A: uint16 =: 5\nfn f() -> uint16 {\n -A\n}\n", .T0087, "cannot negate unsigned type 'uint16'; use '0 -% x' to wrap", "-A");
+    try expectSoleDiagAt("fn f() -> uint {\n B: uint =: 3\n -B\n}\n", .T0087, "cannot negate unsigned type 'uint'; use '0 -% x' to wrap", "-B");
+    try expectChecksClean("fn f(x: uint8) -> uint8 {\n 0 -% x\n}\nfn main() -> int {\n _a: uint8 = -0\n _b := f(1)\n -(1)\n}\n");
+}
+
 test "a constant integer operand takes a narrow sibling's width and is range-checked there once" {
     try expectChecksClean(
         \\fn main() -> int {

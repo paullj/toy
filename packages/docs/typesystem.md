@@ -72,8 +72,9 @@ computed while compiling, and each step must fit its type: `c: int8 = 100 + 100`
 `x := 9223372036854775807 + 1` and, with `A: uint8 =: 250`, `n := A + 10` are T0034,
 not a panic when the program runs. On values, `+`, `-`, `*`, `/` and unary `-` panic on overflow in a
 debug build and wrap at the operand width in a release build (see `profiles.md`), so
-two `int8` 100s add to -56 in release. Unary `-` on an unsigned value is `0 - u`
-(`u: uint8 = 1` then `-u` is 255 in release). The wrapping operators `+%`, `-%` and `*%`
+two `int8` 100s add to -56 in release. Unary `-` on an unsigned value or constant is
+an error (**T0087**); `0 -% u` is the negation that wraps (`u: uint8 = 1` then
+`0 -% u` is 255). The wrapping operators `+%`, `-%` and `*%`
 (and `+%=`, `-%=`, `*%=`) wrap in every profile; they take two integers of one type
 (**T0044** otherwise), and a constant built with them folds wrapping, so
 `c: int8 = 100 +% 100` is -56.

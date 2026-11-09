@@ -11,7 +11,7 @@ fn sum() -> uint8 {
 }
 
 fn negate() -> uint8 {
-    -A  #~ ERROR [T0034] constant value -250 out of range for type 'uint8'
+    -A  #~ ERROR [T0087] cannot negate unsigned type 'uint8'
 }
 
 fn literals() -> int8 {

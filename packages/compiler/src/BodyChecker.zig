@@ -1411,6 +1411,12 @@ pub const BodyChecker = struct {
                 if (operand.kind == .never) break :blk Type.never;
                 switch (op) {
                     .minus => {
+                        if (operand.isInteger() and !operand.isSigned()) {
+                            // `-(-1)` at `uint8`: the inner literal's T0034 is the mistake.
+                            if (!bc.errorsSince(mark))
+                                try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0087 }, "cannot negate unsigned type '{f}'; use '0 -% x' to wrap", .{bc.fmtType(operand)});
+                            break :blk bc.poison();
+                        }
                         if (operand.isInteger()) break :blk operand;
                         try bc.sink.report(.{ .span = bc.spanOf(node_idx), .code = .T0044 }, "operand of '-' must be int", .{});
                     },

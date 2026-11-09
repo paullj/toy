@@ -3687,9 +3687,9 @@ test "integration: emitted binary runs with the right exit code" {
         // must re-wrap to -128 (sxtb on the neg result) for `d < 0` to hold. Without the
         // neg-leg normalize, d stays +128 → 0. Feeds the icmp directly (no memory hop).
         .{ .src = "fn main() -> int {\n a: int8 = 64\n c: int8 = a +% a\n d: int8 = -c\n return if d < 0 { 42 } else { 0 }\n}\n", .name = "neg_int8_rewrap", .expect = 42, .wraps = true },
-        // NARROW NEG re-wrap (unsigned/and-mask leg): -(5) = -5 masks to 251 in uint8.
-        // The `and #0xff` on the neg result is the only thing that makes b == 251. → 42.
-        .{ .src = "fn main() -> int {\n a: uint8 = 5\n b: uint8 = -a\n return if b == 251 { 42 } else { 0 }\n}\n", .name = "neg_uint8_mask", .expect = 42, .wraps = true },
+        // NARROW wrapping sub (unsigned/and-mask leg): 0 -% 5 = -5 masks to 251 in uint8.
+        // The `and #0xff` on the sub result is the only thing that makes b == 251. → 42.
+        .{ .src = "fn main() -> int {\n a: uint8 = 5\n b: uint8 = 0 -% a\n return if b == 251 { 42 } else { 0 }\n}\n", .name = "wrap_sub_uint8_mask", .expect = 42, .wraps = true },
         // UNSIGNED `<` (ult→lo): 1 < 2^63 is true unsigned, false signed (bit63<0). → 42.
         .{ .src = "fn main() -> int {\n x: uint64 = 0x8000000000000000\n return if 1 < x { 42 } else { 0 }\n}\n", .name = "uint64_lt_unsigned", .expect = 42 },
         // UNSIGNED `<=` (ule→ls): 1 <= 2^63 unsigned true, signed false. → 42.
