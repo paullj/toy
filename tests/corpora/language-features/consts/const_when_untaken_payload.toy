@@ -1,0 +1,15 @@
+# Feature: an arm a when does not take is checked but not folded, so in a constant's
+# initializer an untaken arm may bind a variant's payload and use it, in its guard and
+# its value, though the binding has a type and no value while compiling.
+# expect: exit 42
+
+enum Mode { Fast, Small(int) }
+
+MODE: Mode =: .Fast
+SPEED :=: when MODE { .Fast -> 30, .Small(n) -> n }
+LIMIT :=: when MODE { .Small(n) if n > 1 -> n * 2, _ -> 10 }
+
+fn main() -> int {
+    LOCAL :=: when MODE { .Small(k) -> k, .Fast -> 2 }
+    SPEED + LIMIT + LOCAL
+}

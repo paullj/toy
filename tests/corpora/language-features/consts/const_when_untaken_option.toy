@@ -1,0 +1,11 @@
+# Feature: an Option constant chooses a when arm while compiling; the untaken '.some(x)'
+# arm binds a payload that has no value, and is checked but not folded.
+# expect: exit 12
+
+LIMIT: Option[int] =: .none
+MAX :=: when LIMIT { .some(x) -> x, .none -> 7 }
+STEP :=: when LIMIT { .some(x) if x > 3 -> x - 3, _ -> 5 }
+
+fn main() -> int {
+    MAX + STEP
+}

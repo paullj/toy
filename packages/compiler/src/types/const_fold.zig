@@ -119,16 +119,20 @@ pub fn freeValue(gpa: std.mem.Allocator, v: Value) void {
     if (v == .str) gpa.free(v.str);
 }
 
-/// A `when` arm binding in scope: local `slot` names its `when`'s scrutinee value `v`.
-pub const Bind = struct { slot: u32, v: Value, next: ?*const Bind };
+/// The bindings arm pattern `pat` of a `when` puts in scope. One that names the whole
+/// scrutinee holds its value `v`, when the scrutinee has one; a payload binding has a
+/// type but no value, as no constant holds a payload.
+pub const Bind = struct { pat: Ast.Index, v: ?Value, next: ?*const Bind };
 
-/// What folding a typed expression gave. `never` is a `compile_error` (an error already
-/// reported where it is compiled, or nothing in an arm not taken); `poison` follows a
-/// reported error. A str `value` is owned by the caller.
+/// What folding a typed expression gave. `never` is a `compile_error`, an error already
+/// reported where it is compiled; `poison` follows a reported error. A str `value` is owned by the caller.
 pub const Folded = union(enum) {
     value: Value,
     /// The node with no value at compile time.
     not_const: Ast.Index,
+    /// A `when` arm binding with no value at `node`, which only an arm the `when` does
+    /// not take may use. An expression over one has no value either.
+    unknown: Ast.Index,
     /// An integer `v` computed at `node` that does not fit its type `ty`; null when no
     /// i128 holds it either.
     overflow: struct { node: Ast.Index, v: ?i128, ty: Type },
@@ -175,7 +179,10 @@ pub fn fold(c: *const Ctx, node: Ast.Index) Error!Folded {
             .constant => |cid| return constant(c, cid, ty),
             .local => |slot| {
                 var b = c.binds;
-                while (b) |x| : (b = x.next) if (x.slot == slot) return .{ .value = try dupe(c.gpa, x.v) };
+                while (b) |x| : (b = x.next) {
+                    if (wholeSlot(f, x.pat) == slot) if (x.v) |v| return .{ .value = try dupe(c.gpa, v) };
+                    if (declares(f, x.pat, slot)) return .{ .unknown = node };
+                }
                 return .{ .not_const = node };
             },
             else => return .{ .not_const = node },
@@ -251,6 +258,15 @@ fn unary(c: *const Ctx, node: Ast.Index, n: Ast.Node, ty: Type) Error!Folded {
 fn binary(c: *const Ctx, node: Ast.Index, n: Ast.Node, ty: Type) Error!Folded {
     const op = c.flow.tokens[n.main_token].tag;
     const l = try fold(c, n.lhs);
+    // An operand with no value leaves the other to check: a call there is still no constant.
+    if (l == .unknown) return switch (try fold(c, n.rhs)) {
+        .value => |v| blk: {
+            freeValue(c.gpa, v);
+            break :blk l;
+        },
+        .unknown, .never => l,
+        else => |r| r,
+    };
     if (l != .value) return l;
     defer freeValue(c.gpa, l.value);
     const r = try fold(c, n.rhs);
@@ -318,99 +334,147 @@ fn round32(v: f64) f64 {
     return @as(f32, @floatCast(v));
 }
 
-/// `when c { a } else { b }`: every arm must have a value, or be a `compile_error`, and
-/// the value is the taken arm's.
+/// `when c { a } else { b }`: the taken arm's value. Both arms must fold, as a
+/// constant's initializer does, but an untaken one may be a `compile_error` or use a
+/// payload binding, which has no value.
 fn whenIf(c: *const Ctx, n: Ast.Node) Error!Folded {
     const f = c.flow;
     const cond = try fold(c, n.lhs);
-    if (cond != .value) return cond;
-    if (cond.value != .bool) {
-        freeValue(c.gpa, cond.value);
-        return .poison;
-    }
+    const taken: ?usize = switch (cond) {
+        .value => |v| if (v == .bool) @intFromBool(!v.bool) else {
+            freeValue(c.gpa, v);
+            return .poison;
+        },
+        .unknown => null,
+        else => return cond,
+    };
     const h = Ast.ifHeaderAt(f.tree, n.rhs.int());
     if (h.else_node == Ast.none) return .poison;
-    return arms(c, &.{ h.then_block, h.else_node }, &.{}, null, if (cond.value.bool) 0 else 1);
+    var pick: Pick = .{ .result = if (taken == null) cond else .poison };
+    errdefer pick.deinit(c.gpa);
+    for ([_]Ast.Index{ h.then_block, h.else_node }, 0..) |body, i| {
+        if (try pick.add(c.gpa, try arm(c, body), taken == i)) |bad| return bad;
+    }
+    return pick.result;
 }
 
-/// `when x { pat -> e, .. }`: the value is the first arm's whose guard holds and whose
-/// pattern takes `x`'s.
+/// `when x { pat -> e, .. }`: the value of the first arm whose pattern takes `x`'s and
+/// whose guard holds. Every guard and arm must fold, as in `whenIf`.
 fn whenMatch(c: *const Ctx, n: Ast.Node) Error!Folded {
     const f = c.flow;
     const s = try fold(c, n.lhs);
-    if (s != .value) return s;
-    defer freeValue(c.gpa, s.value);
+    const sv: ?Value = switch (s) {
+        .value => |v| v,
+        .unknown => null,
+        else => return s,
+    };
+    defer if (sv) |v| freeValue(c.gpa, v);
     const st = f.node_types[n.lhs.int()];
-    const arm_nodes = Ast.rangeSlice(f.tree, n.rhs.int());
-    const bodies = try c.gpa.alloc(Ast.Index, arm_nodes.len);
-    defer c.gpa.free(bodies);
-    const pats = try c.gpa.alloc(Ast.Index, arm_nodes.len);
-    defer c.gpa.free(pats);
-    var taken: ?usize = null;
-    for (arm_nodes, bodies, pats, 0..) |arm_idx, *body, *pat, i| {
+    var pick: Pick = .{ .result = if (sv == null) s else .poison };
+    errdefer pick.deinit(c.gpa);
+    var choosing = sv != null;
+    for (Ast.rangeSlice(f.tree, n.rhs.int())) |arm_idx| {
         const an = f.tree.nodes[arm_idx.int()];
         const h = Ast.armHeaderAt(f.tree, an.rhs.int());
-        body.* = h.body;
-        pat.* = an.lhs;
-        if (taken != null) continue;
-        var holds = true;
-        if (h.guard != Ast.none) {
-            var slot: Bind = undefined;
-            const inner = withArm(c, &slot, an.lhs, s.value);
-            const g = try fold(&inner, h.guard);
-            if (g != .value) return g;
-            if (g.value != .bool) {
-                freeValue(c.gpa, g.value);
-                return .poison;
-            }
-            holds = g.value.bool;
-        }
-        if (holds and PatternChecker.takes(f, an.lhs, st, s.value)) taken = i;
-    }
-    return arms(c, bodies, pats, s.value, taken orelse return .poison);
-}
-
-/// `c` with the binding arm pattern `pat` names, if any, set in `into` to `scrut`.
-pub fn withArm(c: *const Ctx, into: *Bind, pat: Ast.Index, scrut: Value) Ctx {
-    var inner = c.*;
-    inner.binds = armBind(c.flow, into, pat, scrut, c.binds);
-    return inner;
-}
-
-/// `outer` with the binding arm pattern `pat` names, if any, set in `into` to `scrut`.
-pub fn armBind(f: ControlFlow.Ctx, into: *Bind, pat: Ast.Index, scrut: Value, outer: ?*const Bind) ?*const Bind {
-    const b = Ast.patternBinding(f.tree, pat) orelse return outer;
-    const slot = switch (f.resolutions[b.int()]) {
-        .local => |l| l,
-        else => return outer,
-    };
-    into.* = .{ .slot = slot, .v = scrut, .next = outer };
-    return into;
-}
-
-/// Fold every arm of a `when`, each bound to `scrut` through its pattern in `pats` (a
-/// match form), and keep arm `taken`'s value. An arm not taken may be a `compile_error`.
-fn arms(c: *const Ctx, bodies: []const Ast.Index, pats: []const Ast.Index, scrut: ?Value, taken: usize) Error!Folded {
-    var result: Folded = .poison;
-    errdefer if (result == .value) freeValue(c.gpa, result.value);
-    for (bodies, 0..) |body, i| {
         var slot: Bind = undefined;
-        const inner = if (i < pats.len and scrut != null) withArm(c, &slot, pats[i], scrut.?) else c.*;
-        const v = try arm(&inner, body);
+        const inner = withArm(c, &slot, an.lhs, sv);
+        var take = choosing and PatternChecker.takes(f, an.lhs, st, sv.?);
+        if (h.guard != Ast.none) {
+            switch (try fold(&inner, h.guard)) {
+                .value => |g| {
+                    if (g != .bool) {
+                        freeValue(c.gpa, g);
+                        pick.deinit(c.gpa);
+                        return .poison;
+                    }
+                    take = take and g.bool;
+                },
+                .unknown => |at| if (take) {
+                    pick.deinit(c.gpa);
+                    pick.result = .{ .unknown = at };
+                    choosing = false;
+                    take = false;
+                },
+                else => |g| {
+                    pick.deinit(c.gpa);
+                    return g;
+                },
+            }
+        }
+        if (take) choosing = false;
+        if (try pick.add(c.gpa, try arm(&inner, h.body), take)) |bad| return bad;
+    }
+    return pick.result;
+}
+
+/// The value of a `when`'s taken arm, kept while the other arms are folded to check them.
+const Pick = struct {
+    result: Folded,
+
+    /// Take arm fold `v`, the taken arm's when `taken`. Returns the error that stops the
+    /// `when`, having freed what was kept.
+    fn add(p: *Pick, gpa: std.mem.Allocator, v: Folded, taken: bool) Error!?Folded {
         switch (v) {
-            .value => |x| if (i == taken) {
-                result = v;
-            } else freeValue(c.gpa, x),
-            .never => if (i == taken) {
-                result = .never;
+            .value => |x| if (taken) {
+                p.result = v;
+            } else freeValue(gpa, x),
+            .never, .unknown => if (taken) {
+                p.result = v;
             },
             else => {
-                if (result == .value) freeValue(c.gpa, result.value);
+                p.deinit(gpa);
                 return v;
             },
         }
+        return null;
     }
-    return result;
+
+    fn deinit(p: *Pick, gpa: std.mem.Allocator) void {
+        if (p.result == .value) freeValue(gpa, p.result.value);
+        p.result = .poison;
+    }
+};
+
+/// `c` with the bindings arm pattern `pat` declares in scope, set in `into`.
+pub fn withArm(c: *const Ctx, into: *Bind, pat: Ast.Index, scrut: ?Value) Ctx {
+    var inner = c.*;
+    inner.binds = armBind(into, pat, scrut, c.binds);
+    return inner;
+}
+
+/// `outer` with the bindings arm pattern `pat` declares, set in `into`; `scrut` is the
+/// scrutinee's value, if it has one.
+pub fn armBind(into: *Bind, pat: Ast.Index, scrut: ?Value, outer: ?*const Bind) *const Bind {
+    into.* = .{ .pat = pat, .v = scrut, .next = outer };
+    return into;
+}
+
+/// The local slot of a binding that names the whole value arm pattern `pat` takes.
+pub fn wholeSlot(f: ControlFlow.Ctx, pat: Ast.Index) ?u32 {
+    const b = Ast.patternBinding(f.tree, pat) orelse return null;
+    return switch (f.resolutions[b.int()]) {
+        .local => |l| l,
+        else => null,
+    };
+}
+
+/// Whether pattern `pat` declares local `slot`.
+fn declares(f: ControlFlow.Ctx, pat: Ast.Index, slot: u32) bool {
+    if (pat == Ast.none) return false;
+    const p = f.tree.nodes[pat.int()];
+    return switch (p.tag) {
+        .pattern_binding => switch (f.resolutions[pat.int()]) {
+            .local => |l| l == slot,
+            else => false,
+        } or declares(f, p.rhs, slot),
+        .pattern_variant => p.rhs != Ast.none and for (Ast.rangeSlice(f.tree, p.rhs.int())) |sub| {
+            if (declares(f, sub, slot)) break true;
+        } else false,
+        .pattern_or => for (Ast.rangeSlice(f.tree, p.lhs.int())) |alt| {
+            if (declares(f, alt, slot)) break true;
+        } else false,
+        else => false,
+    };
 }
 
 /// An arm of a `when`: a block holding one value, or the `when` an `else when` chains on.
@@ -517,6 +581,10 @@ test "each scalar kind folds over literals, operators and other consts" {
         .{ .src = "L :=: 4\nN :=: when L { 0 -> 1, n -> n * 10 }\n", .ty = Type.int, .value = .{ .int = 40 } },
         .{ .src = "L :=: 4\nN :=: when L { n if n > 3 -> n, _ -> 1 }\n", .ty = Type.int, .value = .{ .int = 4 } },
         .{ .src = "L :=: 4\nN :=: when L { 0 -> 0, n -> when n > 3 { n } else { 0 } }\n", .ty = Type.int, .value = .{ .int = 4 } },
+        .{ .src = "enum E { A, B(int) }\nX: E =: .A\nN :=: when X { .A -> 1, .B(x) -> x }\n", .ty = Type.int, .value = .{ .int = 1 } },
+        .{ .src = "enum E { A, B(int) }\nX: E =: .A\nN :=: when X { .B(x) if x > 1 -> x, _ -> 3 }\n", .ty = Type.int, .value = .{ .int = 3 } },
+        .{ .src = "X: Option[int] =: .none\nN :=: when X { .some(x) -> x, .none -> 7 }\n", .ty = Type.int, .value = .{ .int = 7 } },
+        .{ .src = "enum E { A, B(int) }\nX: E =: .A\nN :=: when X { .A -> 1, .B(x) -> when x > 2 { x } else { 4 } }\n", .ty = Type.int, .value = .{ .int = 1 } },
     };
     for (cases) |c| {
         var got = try lastValue(c.src);

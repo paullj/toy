@@ -88,8 +88,8 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     var warned = false;
     var result: Type = Type.never;
     // A `when`'s arm is chosen as the arms are checked, each before its body, so the
-    // body knows whether it is lowered: the first whose guard holds and whose pattern
-    // takes the scrutinee's value. A part with no value leaves every arm untaken.
+    // body knows whether it is lowered: the first whose pattern takes the scrutinee's
+    // value and whose guard holds. A part with no value leaves every arm untaken.
     const is_when = Ast.isWhen(bc.tree, bc.tokens, node_idx);
     const scrut: ?Value = if (is_when) try bc.foldWhenPart("scrutinee", n.lhs, mark) else null;
     defer if (scrut) |v| const_fold.freeValue(bc.gpa, v);
@@ -101,10 +101,10 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
         const h = Ast.armHeaderAt(bc.tree, (arm.rhs).int());
         const guarded = h.guard != Ast.none;
         var bind: const_fold.Bind = undefined;
-        bc.body.when_binds = if (scrut) |v| const_fold.armBind(bc.cflow(), &bind, arm.lhs, v, outer_binds) else outer_binds;
+        bc.body.when_binds = if (is_when) const_fold.armBind(&bind, arm.lhs, scrut, outer_binds) else outer_binds;
         const bound = bc.when_bound.items.len;
         defer bc.when_bound.items.len = bound;
-        if (bc.body.when_binds == &bind) try bc.when_bound.append(bc.gpa, bind.slot);
+        if (scrut != null) if (const_fold.wholeSlot(bc.cflow(), arm.lhs)) |slot| try bc.when_bound.append(bc.gpa, slot);
         // Tested BEFORE this arm contributes, so the arm that COMPLETES coverage
         // (and the required int `_`) is reachable; only an arm reached while already
         // saturated by prior unguarded arms warns. Argument-free so per-generic-instance
@@ -114,6 +114,7 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
             warned = true;
         }
         try checkPattern(bc, arm.lhs, st, &cov, &has_wildcard, !guarded);
+        const reached = choosing and takes(bc.cflow(), arm.lhs, st, scrut.?);
         var holds = true;
         if (guarded) {
             // A guard is a bool whatever the arms yield, so their expected type is no hint
@@ -126,10 +127,10 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
             } else if (is_when) {
                 if (try bc.foldWhenPart("guard", h.guard, guard_mark)) |g| {
                     holds = g == .bool and g.bool;
-                } else choosing = false;
+                } else if (reached) choosing = false;
             }
         }
-        if (choosing and holds and takes(bc.cflow(), arm.lhs, st, scrut.?)) {
+        if (choosing and reached and holds) {
             bc.setCalleeAt(node_idx, Callee.whenArm(@intCast(arm_i)));
             choosing = false;
         }

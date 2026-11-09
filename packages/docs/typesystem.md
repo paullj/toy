@@ -331,14 +331,19 @@ fn page() -> int {
   patterns must cover every value of `x` (**T0048**). An arm's binding names `x`'s value,
   so its guard and the `when`s inside it fold too.
 * The condition, the scrutinee and each guard must fold as a constant's value does;
-  one that does not is **T0085**, and one whose fold fails, such as an overflow, is that
-  fold's error.
+  one that does not is **T0085**, and one whose fold fails, such as an overflow, is
+  that fold's error. A payload binding (`n` in `.some(n)`) has a type but no value: no
+  constant holds a payload, so its arm is never taken, and a guard or `when` over it is
+  checked but needs no value.
 * Every arm is resolved and type-checked, whichever is taken, and the arms' types join
   as an `if`'s or a `match`'s do (**T0058**). A value `when` needs an `else`
   (**T0059**).
 * Only the taken arm is lowered, in every profile: an untaken arm's code, calls and
   lambdas are not in the binary.
-* A `when` works in a function body and in a constant's initializer.
+* A `when` works in a function body and in a constant's initializer. There every arm
+  must fold, whichever is taken (**T0083** when one does not), so a build does not
+  depend on the target. An untaken arm may use a payload binding
+  (`N :=: when X { .A -> 1, .B(n) -> n }` with `X` `.A`).
 * `compile_error("msg")` is a `never`-typed builtin that stops the build with `msg`
   (**T0086**) wherever it is compiled: anywhere but an arm a `when` did not take. Its
   message is a string literal.
