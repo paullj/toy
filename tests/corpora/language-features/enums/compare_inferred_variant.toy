@@ -1,0 +1,27 @@
+# Feature: a variant with no enum named takes its enum from the other operand of a
+# comparison, on either side, in a fn body, in a const initializer and in a when
+# condition: `m == .Fast` is `m == Mode.Fast`.
+# expect: stdout "small\nnot fast\nsmall const\nwhen small\n"
+# expect: exit 7
+import std/io
+
+enum Mode { Fast, Small }
+enum Shape { Dot, Line(int) }
+
+MODE :=: Mode.Small
+IS_SMALL :=: MODE == .Small
+NOT_FAST :=: .Fast != MODE
+
+fn main() -> int {
+    m := Mode.Small
+    if m == .Small { io.println("small") }
+    if .Fast != m { io.println("not fast") }
+    if m == .Fast { io.println("fast") }
+    if IS_SMALL && NOT_FAST { io.println("small const") }
+    when MODE == .Small { io.println("when small") } else { io.println("when fast") }
+    n := when .Fast == MODE { 0 } else { 4 }
+    s := Shape.Line(3)
+    k := if s == .Line(3) { 2 } else { 0 }
+    d := if Shape.Dot == .Dot { 1 } else { 0 }
+    n + k + d
+}

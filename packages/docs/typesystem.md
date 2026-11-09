@@ -106,7 +106,8 @@ Checking is two cooperating modes over a known, concrete world:
   type.
 * **check(e, T)** — top-down. Push a known *expected* type `T` into `e`. This is
   how an inferred placeholder (a bare enum variant `.V`, a struct literal) resolves
-  against the slot it flows into (a parameter, a field, a return).
+  against the slot it flows into (a parameter, a field, a return). As a binary
+  operand it is checked last, against its sibling's type: `m == .Fast`.
 
 In the code these are `typeOf` (synth) and `typeOfExpected` / `typeOfBlockExpected`
 (check). This formalizes the previously ad-hoc one-shot `expected`
