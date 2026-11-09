@@ -6347,3 +6347,61 @@ test "a variant through an alias of a non-enum is a type used as a value" {
         \\
     , &.{ .T0056, .T0056 });
 }
+
+test "an expression of literals and constants in a body folds, and out of range is T0034" {
+    const C = @import("diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    n := A + 10\n    n\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    -A\n}\n", &.{C.T0087});
+    try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    K :=: A - 50\n    K + 5\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int8 {\n    100 + 100 - 100\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    1 << 3\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int8 {\n    1 << 10\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    x := 1 << 127\n    x\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    -1 << 200\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    -(-1)\n}\n", &.{C.T0034});
+    var r = try Typecheck.checkSource("A: uint8 =: 250\nfn f() -> uint8 {\n    A + 10\n}\n");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("constant value 260 out of range for type 'uint8'", r.result.diags[0].message);
+}
+
+test "an untyped const takes the width its use expects, as a literal does" {
+    const C = @import("diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("N :=: 5\nfn f() -> int8 {\n    x: int8 = N\n    y: uint16 = N\n    x + N\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 5\nM :=: N * 2 - 1\nfn f(b: uint8) -> uint8 {\n    b + M\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 128\nfn f() -> int8 {\n    -N\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 5\nT: int8 =: N\nfn f() -> int8 {\n    T\n}\n", &.{});
+    try Typecheck.expectDiagCodes("F :=: 0.1\nfn f() -> float32 {\n    x: float32 = F\n    x +. F\n}\n", &.{});
+    try Typecheck.expectDiagCodes("BIG :=: 300\nfn f() -> int8 {\n    z: int8 = BIG\n    z\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("N :=: 5\nfn f() -> uint8 {\n    -N\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("A :=: -B\nB :=: A\nX: int8 =: -A\n", &.{C.T0084});
+    try Typecheck.expectDiagCodes("T: int =: 5\nfn f() -> int8 {\n    T\n}\n", &.{C.T0042});
+    try Typecheck.expectDiagCodes("A: int16 =: 5\nN :=: A + 1\nfn f() -> int8 {\n    N\n}\n", &.{C.T0042});
+    try Typecheck.expectDiagCodes("N :=: when true { 1 } else { 2 }\nfn f() -> int8 {\n    N\n}\n", &.{C.T0042});
+    var r = try Typecheck.checkSource("BIG :=: 300\nfn f() -> int8 {\n    BIG\n}\n");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), r.result.diags.len);
+    try testing.expectEqualStrings("constant value 300 out of range for type 'int8'", r.result.diags[0].message);
+}
+
+test "a local const in a when arm not taken is checked as the rest of that arm is" {
+    const C = @import("diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K < 1 {\n        N :=: compile_error(\"no\")\n        return N\n    }\n    0\n}\n", &.{});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K > 1 {\n        N :=: compile_error(\"no\")\n        return N\n    }\n    0\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K < 1 {\n        N: uint8 =: 300\n        return 1\n    }\n    0\n}\n", &.{C.T0034});
+}
+
+test "a when arm's binding names the scrutinee's value, in its guard, body and inner whens" {
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n if n > 3 -> n * 10, _ -> 1 }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n -> when n > 3 { 1 } else { 2 } }\n}\n", &.{});
+    // A lambda's own locals are no bindings of the arm around it.
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n -> { g := fn(x: int) -> int { when x > 3 { 1 } else { 2 } }\n g(n) } }\n}\n", &.{.T0085});
+}
+
+test "a non-const when part is T0085 over the whole part, in a body or an initializer" {
+    const src = "fn ten() -> int { 10 }\nX :=: when 3 { n if ten() > 3 -> n, _ -> 1 }\n";
+    var r = try Typecheck.checkSource(src);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), r.result.diags.len);
+    const d = r.result.diags[0];
+    try testing.expectEqualStrings("ten() > 3", src[d.byte_offset..d.end]);
+}
