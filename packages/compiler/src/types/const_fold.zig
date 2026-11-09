@@ -77,8 +77,7 @@ pub fn isConstFloat(v: View, node: Ast.Index) bool {
 }
 
 /// `l op r` for integer operator `op` at integer type `t`, or null when it does not fold:
-/// a zero divisor, an i128 overflow, a shift by a negative amount or by `t`'s width or
-/// more, or an operator that is no integer operator.
+/// a zero divisor, an i128 overflow, or an operator that is no integer operator.
 pub fn intBinary(op: token.Tag, l: i128, r: i128, t: Type) ?i128 {
     return switch (op) {
         .plus => std.math.add(i128, l, r) catch null,
@@ -93,10 +92,11 @@ pub fn intBinary(op: token.Tag, l: i128, r: i128, t: Type) ?i128 {
         .plus_percent => Literal.wrap(l +% r, t),
         .minus_percent => Literal.wrap(l -% r, t),
         .star_percent => Literal.wrap(l *% r, t),
-        // A shift past the width is no value the program could compute: the machine
-        // masks the amount, so it would not mean what it says.
-        .lt_lt => if (r < 0 or r >= t.intBits()) null else std.math.shlExact(i128, l, @intCast(r)) catch null,
-        .gt_gt => if (r < 0 or r >= t.intBits()) null else l >> @intCast(r),
+        // Run-time shifts never trap: they drop the bits shifted out, and an amount out
+        // of range gives 0 (or -1 for a negative value shifted right). A fold must give
+        // the same value, since a compile-time error is only for code that would panic.
+        .lt_lt => if (r < 0 or r >= t.intBits()) 0 else Literal.wrap(l << @as(u7, @intCast(r)), t),
+        .gt_gt => if (r < 0 or r >= t.intBits()) (if (l < 0) -1 else 0) else l >> @as(u7, @intCast(r)),
         else => null,
     };
 }
@@ -303,20 +303,11 @@ fn binary(c: *const Ctx, node: Ast.Index, n: Ast.Node, ty: Type) Error!Folded {
         },
         .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent, .lt_lt, .gt_gt => {
             if (a != .int or b != .int or !ty.isInteger()) return .{ .not_const = node };
-            const v = intBinary(op, a.int, b.int, ty) orelse return shiftPast(node, op, a.int, b.int, ty);
+            const v = intBinary(op, a.int, b.int, ty) orelse return .{ .not_const = node };
             return checked(node, v, ty);
         },
         else => return .{ .not_const = node },
     }
-}
-
-/// A left shift of a nonzero value that `intBinary` gave none (by `ty`'s width or more,
-/// or past i128) denotes a value of `ty`'s width in bits or more, so it is out of range
-/// whatever the amount, as `1 << 10` at `int8` is. Zero shifted has no such value.
-fn shiftPast(node: Ast.Index, op: token.Tag, l: i128, r: i128, ty: Type) Folded {
-    if (op != .lt_lt or r < 0 or l == 0) return .{ .not_const = node };
-    const v: ?i128 = if (r < 127) std.math.shlExact(i128, l, @intCast(r)) catch null else null;
-    return .{ .overflow = .{ .node = node, .v = v, .ty = ty } };
 }
 
 fn boolean(b: bool) Folded {

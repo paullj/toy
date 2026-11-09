@@ -280,8 +280,9 @@ pub DEFAULT: Mode =: .Fast
   `>=` fold over int, char, bool and str; over
   any other type, whose order is a user `Ord` impl, they are **T0083**. Each literal
   intermediate is range-checked at the declared width, as in a body, so
-  `N: uint8 =: 200 + 100 - 100` is **T0034**, as is a left shift of a nonzero value by
-  the width or more, whatever the amount (`1 << 200`). A call (other than
+  `N: uint8 =: 200 + 100 - 100` is **T0034**. A shift folds to its run-time value and
+  is never an error: the bits shifted out are dropped, and an amount out of range
+  gives 0 (or -1 for a negative value shifted right). A call (other than
   `compile_error`), a struct literal, a `Vec`, a payload variant, a local variable or a
   division by zero is **T0083**, as is a local
   constant typed by its function's type parameter (`N: T =: 5`). A constant

@@ -169,9 +169,6 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     const C = @import("../diagnostics/codes.zig").Code;
     try Typecheck.expectDiagCodes("fn f() -> int { 1 }\nN :=: f()\nM :=: N + 1\n", &.{C.T0083});
     try Typecheck.expectDiagCodes("struct P { x: int }\nN :=: P { x: 1 }\n", &.{C.T0083});
-    try Typecheck.expectDiagCodes("N :=: 1 << 200\n", &.{C.T0034});
-    try Typecheck.expectDiagCodes("N :=: 0 << 200\n", &.{C.T0083});
-    try Typecheck.expectDiagCodes("N :=: 1 << 64\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("N :=: N\n", &.{C.T0084});
     try Typecheck.expectDiagCodes("A :=: B + 1\nB :=: C\nC :=: A * 2\nD :=: A\n", &.{C.T0084});
     try Typecheck.expectDiagCodes("N: uint8 =: 256\n", &.{C.T0034});
