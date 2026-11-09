@@ -74,6 +74,10 @@ depth: u16 = 0,
 /// `findNextStmt` lands on the TAIL of the same broken statement (e.g. the `x` in
 /// a broken `let x =`) matches real tokens without having crossed a boundary.
 in_error: bool = false,
+/// The token a declaration with no value stopped at (see `parseDeclValue`), so
+/// `expectTerminator` takes its line break as the statement's end. The index only
+/// grows, so a cut no terminator consumed never matches again.
+value_cut: ?u32 = null,
 /// The `fn` tokens of the local functions parsed so far in the current top-level decl
 /// (cleared per decl). A block that runs into EOF with one of these may have swallowed
 /// a top-level fn whose enclosing `}` is missing, so its diagnostic points there.
@@ -1086,7 +1090,7 @@ fn parseConstDecl(p: *Parser) Error!Ast.Index {
 
 /// The initializer of a const named `name_tok`, after its `:=:` or `=:`.
 fn parseConstInit(p: *Parser, name_tok: u32, type_ref: Ast.Index) Error!Ast.Index {
-    const init_expr = try p.parseExpr(0);
+    const init_expr = try p.parseDeclValue();
     return p.addNode(.{ .tag = .const_decl, .main_token = name_tok, .lhs = type_ref, .rhs = init_expr });
 }
 
@@ -1882,6 +1886,34 @@ fn failMissingBraceBeforeFn(p: *Parser, fn_tok: u32) Error {
     return error.ParseError;
 }
 
+/// A declaration's value, after its `:=`, `:=:`, `=` or `=:`. The lexer inserts no
+/// terminator after those operators, so the value may start on the next line. When
+/// that line cannot be a value, as it starts a declaration or a token no expression
+/// starts with, the value is missing: the error is at the operator, and the next line
+/// stays a statement of its own.
+fn parseDeclValue(p: *Parser) Error!Ast.Index {
+    const cut = p.at(.eof) or (p.lineBreakBefore(p.index) and (!p.startsExpr() or p.atBindingDecl()));
+    if (!cut) return p.parseExpr(0);
+    const op = p.index - 1;
+    try p.warn(p.tokens[op], .P0002, "expected a value on the same line as the declaration");
+    p.value_cut = p.index;
+    return p.addNode(.{ .tag = .error_node, .main_token = op, .lhs = Ast.none, .rhs = Ast.none });
+}
+
+/// Whether the cursor starts a declaration `x :=`, `N :=:` or `x: T`.
+fn atBindingDecl(p: *const Parser) bool {
+    return p.at(.identifier) and switch (p.peek2().tag) {
+        .colon_eq, .colon_eq_colon, .colon => true,
+        else => false,
+    };
+}
+
+/// Whether a line break separates token `tok` from the token before it.
+fn lineBreakBefore(p: *const Parser, tok: u32) bool {
+    if (tok == 0) return false;
+    return std.mem.indexOfScalar(u8, p.src[p.tokens[tok - 1].end..p.tokens[tok].start], '\n') != null;
+}
+
 /// A statement ends at a `.newline`, or implicitly before `}`/EOF (Go ASI).
 fn expectTerminator(p: *Parser) Error!void {
     switch (p.peek().tag) {
@@ -1898,6 +1930,16 @@ fn expectTerminator(p: *Parser) Error!void {
         // onto it because `}` / `continue` end a statement.
         .pipe_gt => return p.fail(p.peek(), .P0014, err_pipe_stmt_lhs),
         else => {
+            // Only a cut declaration, not any statement before a line break: a
+            // statement that stops at a closer it never consumed (`a +` then `)`)
+            // would otherwise be reparsed from that closer forever.
+            if (p.value_cut == p.index) {
+                p.value_cut = null;
+                // The line break resyncs as a newline terminator does, so the next
+                // line's own errors report.
+                p.in_error = false;
+                return;
+            }
             const tok = p.peek();
             // A run of stray bytes coalesces into ONE `.invalid` token, so a doubled
             // `;;` (or `;`-then-garbage) carries text like ";;" — a `;`-led `.invalid`
@@ -1975,7 +2017,7 @@ fn parseStmt(p: *Parser) Error!Ast.Index {
                 const name_tok = p.index;
                 p.bump(.identifier);
                 p.bump(.colon_eq);
-                const init_expr = try p.parseExpr(0);
+                const init_expr = try p.parseDeclValue();
                 return p.addNode(.{ .tag = .var_decl, .main_token = name_tok, .lhs = init_expr, .rhs = Ast.none });
             },
             // `x: T = e` — explicitly-typed local. The type ref lands in the
@@ -1994,7 +2036,7 @@ fn parseStmt(p: *Parser) Error!Ast.Index {
                 const type_ref = try p.parseType();
                 if (p.eat(.eq_colon)) return p.parseConstInit(name_tok, type_ref);
                 try p.expect(.eq, "expected '=' after type in typed declaration");
-                const init_expr = try p.parseExpr(0);
+                const init_expr = try p.parseDeclValue();
                 return p.addNode(.{ .tag = .var_decl, .main_token = name_tok, .lhs = init_expr, .rhs = type_ref });
             },
             else => return p.parseExprStmt(),
@@ -5226,11 +5268,9 @@ test "a missing call operand before ')' yields exactly one diagnostic (no closer
 }
 
 test "a trailing ':=' before '}' yields exactly one diagnostic (no closer-delete cascade)" {
-    // `x := \n}` — the trailing `:=` suppresses the newline, so the initializer's
-    // parsePrefix lands on the block's `}`. Deleting it would swallow the block
-    // closer and add a spurious "expected '}'"; instead the error_node is returned
-    // without consuming, `expectTerminator` accepts the implicit `}`, and the block
-    // loop closes normally — ONE diagnostic.
+    // `x := \n}` — the trailing `:=` suppresses the newline. Deleting the `}` would
+    // swallow the block closer and add a spurious "expected '}'"; the missing value
+    // is the one diagnostic, and the block loop closes normally.
     const gpa = testing.allocator;
     const source = "fn a() -> int {\n  x := \n}\n";
     const res = try parseResult(gpa, source);
@@ -5238,7 +5278,7 @@ test "a trailing ':=' before '}' yields exactly one diagnostic (no closer-delete
     defer freeTree(gpa, res.tree);
 
     try testing.expectEqual(@as(usize, 1), res.diags.len);
-    try testing.expectEqualStrings("expected an expression", res.diags[0].message);
+    try testing.expectEqualStrings("expected a value on the same line as the declaration", res.diags[0].message);
 }
 
 test "a broken call argument list reports and resyncs without hanging" {
@@ -6407,6 +6447,50 @@ test "a typed const parses its type before '=:'" {
 
 test "a const statement in a block parses in both forms" {
     try expectProgram("fn main() -> int {\n    N :=: 5\n    M: uint8 =: 2\n    x: int = N\n    x\n}\n", "(program (fn main () int (block (const N 5) (const M uint8 2) (:= x N) x)))");
+}
+
+test "a declaration with no value errors on its own line and the next line parses" {
+    const gpa = testing.allocator;
+    const cases = [_]struct { src: []const u8, op: []const u8, after: []const u8 }{
+        .{ .src = "N :=:\nM :=: 3\n", .op = ":=:", .after = "(const M 3)" },
+        .{ .src = "N: int =:\nM :=: 3\n", .op = "=:", .after = "(const M 3)" },
+        .{ .src = "fn f() {\n    x :=\n    y := 1\n}\n", .op = ":=", .after = "(:= y 1)" },
+        .{ .src = "fn f() {\n    x: int =\n    y := 1\n}\n", .op = "=", .after = "(:= y 1)" },
+        .{ .src = "fn f() {\n    N :=:\n    y := 1\n}\n", .op = ":=:", .after = "(:= y 1)" },
+        .{ .src = "fn f() {\n    N: int =:  # no value\n    y := 1\n}\n", .op = "=:", .after = "(:= y 1)" },
+        .{ .src = "fn f() {\n    x: int =\n    return\n}\n", .op = "=", .after = "(return)" },
+        .{ .src = "N :=:", .op = ":=:", .after = "" },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("case: {s}\n", .{c.src});
+        const tokens = try Lexer.tokenize(gpa, c.src);
+        defer gpa.free(tokens);
+        const res = try parse(gpa, tokens, c.src);
+        defer gpa.free(@constCast(res.diags));
+        defer freeTree(gpa, res.tree);
+        try testing.expectEqual(@as(usize, 1), res.diags.len);
+        try testing.expectEqual(codes.Code.P0002, res.diags[0].code);
+        try testing.expectEqualStrings(c.op, c.src[res.diags[0].byte_offset..res.diags[0].end]);
+        var buf: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try Ast.render(&w, res.tree, tokens, c.src);
+        try testing.expect(std.mem.indexOf(u8, w.buffered(), c.after) != null);
+    }
+}
+
+test "a declaration's value may start on the next line" {
+    try expectProgram("fn f() -> int {\n    x :=\n        5\n    y: int =\n        -x\n    N :=:\n        2\n    x + y + N\n}\n", "(program (fn f () int (block (:= x 5) (:= y (- x)) (const N 2) (+ (+ x y) N))))");
+    try expectProgram("N: int =:\n    3\n", "(program (const N int 3))");
+}
+
+test "a statement that stops at an unconsumed closer on the next line still makes progress" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{ "fn f() {\n    a +\n)\n}\n", "fn f() {\n    x :=\n)\n}\n" }) |src| {
+        const res = try parseResult(gpa, src);
+        defer gpa.free(@constCast(res.diags));
+        defer freeTree(gpa, res.tree);
+        try testing.expect(res.diags.len >= 1);
+    }
 }
 
 test "a malformed const is a parse error and the decls after it still parse" {
