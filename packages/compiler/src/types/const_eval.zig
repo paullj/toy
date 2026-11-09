@@ -217,6 +217,28 @@ test "each scalar kind folds over literals, operators and other consts" {
     }
 }
 
+test "a generic enum's unit variant is a const, its type args from the declared type or the variant" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    const srcs = [_][]const u8{
+        "enum P[T] { E, V(T) }\nN: P[int] =: .E\n",
+        "enum P[T] { E, V(T) }\nN :=: P[int].E\n",
+        "N: Option[int] =: Option[int].none\n",
+        "enum P[T] { V(T), E }\nfn f() -> P[str] {\n    K: P[str] =: .E\n    K\n}\nN :=: P[bool].E\n",
+    };
+    for (srcs) |src| {
+        var got = try lastValue(src);
+        defer got.owned.deinit(testing.allocator);
+        try testing.expect(got.ty.isApp());
+        try testing.expect(got.value == .variant);
+    }
+    var w = try lastValue("enum P[T] { V(T), E }\nX :=: P[int].E\nN :=: when X { .V(_) -> 1, .E -> 2 }\n");
+    defer w.owned.deinit(testing.allocator);
+    try testing.expect(valueEql(w.value, .{ .int = 2 }));
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN :=: P.E\n", &.{C.T0016});
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN: P[int] =: .V(1)\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN: P[int] =: P[bool].E\n", &.{C.T0041});
+}
+
 test "a computed value out of range is named as one, not as a literal" {
     var r = try Typecheck.checkSource("A: uint8 =: 200\nN :=: A + 56\nM: uint8 =: 255 + 1\n");
     defer r.deinit(testing.allocator);

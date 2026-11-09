@@ -929,8 +929,9 @@ fn lowerConst(b: *Builder, c: Typecheck.ConstSym, ty: Typecheck.Type) error{OutO
         .bool => |v| return .{ .value = try b.emit(.{ .bconst = v }, Typecheck.Type.bool) },
         .str => |bytes| return try strValue(b, try b.gpa.dupe(u8, bytes)),
         // A char stores its codepoint and an enum its tag at offset 0, as their literals do.
+        // The slot takes the use's type: a generic enum's instance is reified only there.
         .char, .variant => {
-            const slot = try b.addSlot(c.ty);
+            const slot = try b.addSlot(ty);
             const dst = try b.emit(.{ .slot_addr = slot }, int_ty);
             const word: Typecheck.Type = if (c.value == .char) Typecheck.Type.uint32 else int_ty;
             const v: i64 = if (c.value == .char) c.value.char else c.value.variant;

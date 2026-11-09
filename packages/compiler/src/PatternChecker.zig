@@ -187,8 +187,8 @@ pub fn takes(ctx: ControlFlow.Ctx, pat_idx: Ast.Index, ty: Type, v: Value) bool 
         } else false,
         .pattern_variant => switch (v) {
             .variant => |vi| blk: {
-                if (ty.kind != .@"enum") break :blk false;
-                const vs = ctx.enums[ty.enum_id].variants[vi];
+                const eid = ctx.enumId(ty) orelse break :blk false;
+                const vs = ctx.enums[eid].variants[vi];
                 break :blk std.mem.eql(u8, vs.name, tok.text(ctx.source)) and ControlFlow.variantPayloadIrrefutable(ctx, pat_idx, vs);
             },
             else => false,
