@@ -1,6 +1,7 @@
 # Feature: a `pub` const named through its module (`limits.N`) and selected bare
 # (`import cfg/limits.{N as NN}`), in a body and in another const's initializer. A pub
-# const may fold a private one of its own module.
+# const may fold a private one of its own module. An untyped one takes the importer's
+# width (`narrow: uint8 = limits.N`).
 # expect: exit 40
 import cfg/limits
 import cfg/limits.{N as NN, DOUBLE}
@@ -8,6 +9,8 @@ import cfg/limits.{N as NN, DOUBLE}
 X :=: limits.N + 1
 
 fn main() -> int {
+    narrow: uint8 = limits.N
+    if narrow != 5 { return 1 }
     m := match limits.M {
         .Fast -> 1
         .Slow -> 2

@@ -623,6 +623,8 @@ pub const GraphConstInput = struct {
 pub const ConstSym = struct {
     ty: Type,
     value: const_fold.Value,
+    /// Set before any constant is checked, so a use may read it before its constant is.
+    untyped: const_fold.Untyped = .none,
 };
 
 /// The whole-graph typecheck output. Caller owns it; free with `GraphResult.deinit`.
@@ -2921,6 +2923,7 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
     try t.consts.ensureTotalCapacity(t.gpa, n_consts);
     t.consts.items.len = n_consts;
     @memset(t.consts.items, const_eval.poison);
+    try const_eval.markUntyped(t);
 
     // Phase A2: pub-signature coherence. A `pub` fn that names a NON-pub type in a
     // param/return position is an error (an importer could not name that type).

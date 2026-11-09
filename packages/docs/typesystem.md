@@ -257,10 +257,19 @@ GREETING :=: "hi"
 pub DEFAULT: Mode =: .Fast
 ```
 
-* `N :=: e` infers the type from `e`, as `x := e` does: an integer literal is `int`
-  and a float literal is `float`. `N: T =: e` checks `e` against `T`; a literal that
-  does not fit `T` is **T0034**, and a value of another type is **T0041**. The token
-  is `=:` in place of `=`, so the pair mirrors `x := e` / `x: T = e`.
+* `N :=: e` infers the type from `e`, as `x := e` does. `N: T =: e` checks `e` against
+  `T`; a literal that does not fit `T` is **T0034**, and a value of another type is
+  **T0041**. The token is `=:` in place of `=`, so the pair mirrors `x := e` /
+  `x: T = e`.
+* An untyped constant whose initializer is made only of literals and other untyped
+  constants (`N :=: 5`, `M :=: N * 2`, `HALF :=: 0.5`) has no width of its own, as
+  the literal has none: each use takes the width its place expects, so `x: int8 = N`
+  and `y: uint16 = N` both bind, and a float one is `float32` where a `float32` is
+  expected. Where nothing expects a width it is `int` or `float`. Its value must fit
+  the use's type, else **T0034** at that use (`z: int8 = BIG` with `BIG :=: 300`);
+  `-N` is checked as the negative value, as `-128` is. A typed constant
+  (`N: int8 =: 5`) and one inferred from a typed operand (`M :=: A + 1` with
+  `A: int16 =: 1`) keep their type everywhere.
 * The initializer is typed as any expression is, with the same rules and errors as in
   a function body, and then its value must be known at compile time: literals (int,
   float, bool, char, str), other

@@ -1406,6 +1406,9 @@ pub const BodyChecker = struct {
                         break :blk e;
                     };
                 }
+                if (op == .minus and bc.isConstInt(n.lhs) and bc.tree.nodes[n.lhs.int()].tag != .literal_number) {
+                    if (bc.expectedTy()) |e| if (e.isInteger()) if (try bc.negatedConst(node_idx, n.lhs, e)) |t| break :blk t;
+                }
                 const operand = try bc.typeOf(n.lhs);
                 if (operand.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
                 if (operand.kind == .never) break :blk Type.never;
@@ -5510,23 +5513,12 @@ pub const BodyChecker = struct {
         return bc.typeOfExpected(operand, sibling);
     }
 
-    /// Whether `node` is a float constant built from literals and the dotted operators,
-    /// which takes `float32` beside a `float32` sibling as an integer constant takes a width.
     fn isConstFloat(bc: *const BodyChecker, node: Ast.Index) bool {
-        if (node == Ast.none) return false;
-        const n = bc.tree.nodes[node.int()];
-        return switch (n.tag) {
-            .literal_float => true,
-            .binary => switch (bc.tokens[n.main_token].tag) {
-                .plus_dot, .minus_dot, .star_dot, .slash_dot => bc.isConstFloat(n.lhs) and bc.isConstFloat(n.rhs),
-                else => false,
-            },
-            else => false,
-        };
+        return const_fold.isConstFloat(bc.foldView(), node);
     }
 
     fn foldView(bc: *const BodyChecker) const_fold.View {
-        return .{ .tree = bc.tree, .tokens = bc.tokens, .source = bc.source };
+        return .{ .tree = bc.tree, .tokens = bc.tokens, .source = bc.source, .resolutions = bc.resolutions, .consts = bc.model.consts };
     }
 
     fn isConstInt(bc: *const BodyChecker, node: Ast.Index) bool {
@@ -5575,10 +5567,42 @@ pub const BodyChecker = struct {
         return null;
     }
 
-    /// The type of constant `cid`, named at `node`.
+    /// The type of constant `cid`, named at `node`. An untyped one takes the integer
+    /// width or float precision expected there, as a literal does, and its value must
+    /// fit that width.
     fn constType(bc: *BodyChecker, node: Ast.Index, cid: u32) error{OutOfMemory}!Type {
         if (bc.const_pass) |p| try p.use(bc, node, cid);
-        return bc.model.consts[cid].ty;
+        const k = bc.model.consts[cid];
+        const e = bc.body.expected orelse return k.ty;
+        switch (k.untyped) {
+            .none => return k.ty,
+            .float => return if (k.ty.kind != .invalid and e.ty.isFloat32()) Type.float32 else k.ty,
+            .int => {
+                if (k.value != .int or !k.ty.isInteger() or !e.ty.isInteger()) return k.ty;
+                if (Literal.fitsValue(k.value.int, e.ty)) return e.ty;
+                if (e.soft) return k.ty;
+                try bc.report(.{ .span = bc.spanOf(node), .code = .T0034 }, "constant value {d} out of range for type '{f}'", .{ k.value.int, bc.fmtType(e.ty) });
+                return e.ty;
+            },
+        }
+    }
+
+    /// `-N` for an untyped integer constant `N` where integer type `e` is expected: like a
+    /// negated literal, it is checked as the negative value it denotes, so `-N` with
+    /// `N :=: 128` fits an `int8`. Null when `operand` is no bare constant.
+    fn negatedConst(bc: *BodyChecker, node_idx: Ast.Index, operand: Ast.Index, e: Type) error{OutOfMemory}!?Type {
+        const cid = switch (bc.resolutions[operand.int()]) {
+            .constant => |c| c,
+            else => return null,
+        };
+        if (bc.const_pass) |p| try p.use(bc, operand, cid);
+        const k = bc.model.consts[cid];
+        if (k.ty.kind == .invalid) return Type.invalid; // poison propagation: no emit (exempt)
+        if (k.value != .int or !k.ty.isInteger()) return null;
+        if (!Literal.fitsValue(-k.value.int, e))
+            try bc.report(.{ .span = bc.spanOf(node_idx), .code = .T0034 }, "constant value {d} out of range for type '{f}'", .{ -k.value.int, bc.fmtType(e) });
+        bc.node_types[operand.int()] = e;
+        return e;
     }
 
     /// `N :=: e` or `N: T =: e`: `e` is typed as any expression is, against `T` when
@@ -5625,7 +5649,7 @@ pub const BodyChecker = struct {
         const c = cid orelse return const_fold.freeValue(bc.gpa, sym.value);
         const slot = &bc.model.consts[c];
         const_fold.freeValue(bc.gpa, slot.value);
-        slot.* = sym;
+        slot.* = .{ .ty = sym.ty, .value = sym.value, .untyped = slot.untyped };
     }
 
     /// The type `place op= v` stores, `place op v`, given the place type `lt`. `v` is typed
