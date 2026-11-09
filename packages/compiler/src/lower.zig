@@ -919,12 +919,13 @@ fn strValue(b: *Builder, bytes: []u8) error{OutOfMemory}!Ir.Operand {
 
 /// A constant has no storage: each use materializes its folded value, a scalar as an
 /// immediate and a str, char or enum variant in a fresh temp like the literal it stands for.
-fn lowerConst(b: *Builder, c: Typecheck.ConstSym) error{OutOfMemory}!Ir.Operand {
+/// A number takes its use's type `ty`, which an untyped constant has from its context.
+fn lowerConst(b: *Builder, c: Typecheck.ConstSym, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     const int_ty = Typecheck.Type.int;
     switch (c.value) {
         // The low 64 bits are the register's bits at any width, signed or not.
-        .int => |v| return .{ .value = try b.emit(.{ .iconst = @bitCast(@as(u64, @truncate(@as(u128, @bitCast(v))))) }, c.ty) },
-        .float => |v| return .{ .value = try b.emit(.{ .fconst = v }, c.ty) },
+        .int => |v| return .{ .value = try b.emit(.{ .iconst = @bitCast(@as(u64, @truncate(@as(u128, @bitCast(v))))) }, ty) },
+        .float => |v| return .{ .value = try b.emit(.{ .fconst = if (ty.isFloat32()) @as(f32, @floatCast(v)) else v }, ty) },
         .bool => |v| return .{ .value = try b.emit(.{ .bconst = v }, Typecheck.Type.bool) },
         .str => |bytes| return try strValue(b, try b.gpa.dupe(u8, bytes)),
         // A char stores its codepoint and an enum its tag at offset 0, as their literals do.
@@ -943,7 +944,7 @@ fn lowerConst(b: *Builder, c: Typecheck.ConstSym) error{OutOfMemory}!Ir.Operand 
 fn lowerIdentifier(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (closure.fnValueRef(b, node_idx)) |gid| return try closure.lowerFnValue(b, node_idx, gid, ty);
     switch (b.in.resolutions[node_idx.int()]) {
-        .constant => |cid| return try lowerConst(b, b.in.consts[cid]),
+        .constant => |cid| return try lowerConst(b, b.in.consts[cid], ty),
         else => {},
     }
     const home = try places.bindingHome(b, node_idx, ty);
@@ -1026,9 +1027,11 @@ fn lowerUnary(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!
         .minus => {
             const v = operandValue(try lowerExpr(b, n.lhs));
             const ty = b.in.nodes.typeOf(node_idx);
-            // A negated literal is a constant the checker range-checks (T0034), and the most
-            // negative int is only spelled that way, so it never gets a run-time test.
-            if (b.in.trap_overflow and b.in.tree.nodes[n.lhs.int()].tag != .literal_number) {
+            // A negated literal or constant is one the checker range-checks (T0034), and
+            // the most negative int is only spelled that way (`-128`, or `-N` with
+            // `N :=: 128`), so it never gets a run-time test.
+            const constant = b.in.tree.nodes[n.lhs.int()].tag == .literal_number or b.in.resolutions[n.lhs.int()] == .constant;
+            if (b.in.trap_overflow and !constant) {
                 const zero = try b.emit(.{ .iconst = 0 }, ty);
                 try emitOverflowGuard(b, .sub, zero, v, ty, .neg_overflow);
             }
@@ -3472,7 +3475,7 @@ pub fn aggregateValue(b: *Builder, expr: Ast.Index, ty: Typecheck.Type) error{Ou
 fn lowerFieldAccess(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{OutOfMemory}!Ir.Operand {
     if (closure.fnValueRef(b, node_idx)) |gid| return try closure.lowerFnValue(b, node_idx, gid, ty);
     switch (b.in.resolutions[node_idx.int()]) {
-        .constant => |cid| return try lowerConst(b, b.in.consts[cid]),
+        .constant => |cid| return try lowerConst(b, b.in.consts[cid], ty),
         else => {},
     }
     if (closure.boundMethodRef(b, node_idx)) |mi| return try closure.lowerBoundValue(b, node_idx, mi, ty);

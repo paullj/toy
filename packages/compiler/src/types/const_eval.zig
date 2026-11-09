@@ -2,7 +2,10 @@
 //! checker like any expression (`BodyChecker.checkConstDecl`), before the body pass,
 //! which reads each constant's type and value from the result. A use of a constant not
 //! yet checked checks it first, so the order follows the uses, and a use of one still
-//! being checked closes a cycle. A local constant is checked where its body declares it.
+//! being checked closes a cycle. A local constant is checked where its body declares it,
+//! except that one typed by its fn's type parameter is rejected here, once. Before any
+//! of it, `markUntyped` reads off the syntax which constants are untyped, so a use takes
+//! their width as it would a literal's.
 
 const std = @import("std");
 const Ast = @import("../ast/Ast.zig");
@@ -67,6 +70,49 @@ fn typeParamConst(t: *Typecheck, c: Typecheck.GraphConstInput) Error!void {
     for (proto.generic_params, names) |gp, *name| name.* = t.tokens[t.tree.nodes[gp.int()].main_token].text(t.source);
     if (!namesTypeParam(t.tree, t.tokens, t.source, decl.lhs, names)) return;
     try t.sink.report(.{ .span = t.spanOf(decl.lhs), .code = .T0083 }, "constant '{s}' cannot have a type parameter as its type", .{t.tokens[decl.main_token].text(t.source)});
+}
+
+/// Mark each constant declared with no type over literals and other such constants,
+/// which takes its width or precision from each use (`const_fold.Untyped`). The body
+/// checker asks this before typing a use, when the constant may not be checked yet, so
+/// it is read off the syntax, over the constants alone.
+pub fn markUntyped(t: *Typecheck) Error!void {
+    const state = try t.gpa.alloc(State, t.graph.consts.len);
+    defer t.gpa.free(state);
+    @memset(state, .unseen);
+    for (0..state.len) |cid| markOne(t, state, @intCast(cid));
+}
+
+fn markOne(t: *Typecheck, state: []State, cid: u32) void {
+    if (state[cid] != .unseen) return;
+    state[cid] = .checking;
+    defer state[cid] = .done;
+    const c = t.graph.consts[cid];
+    const m = &t.graph.mods[c.module];
+    const decl = m.tree.nodes[c.decl_node.int()];
+    if (decl.lhs != Ast.none or decl.rhs == Ast.none) return;
+    markRefs(t, state, m, decl.rhs);
+    const v: const_fold.View = .{ .tree = m.tree, .tokens = m.tokens, .source = m.source, .resolutions = m.resolutions, .consts = t.consts.items };
+    t.consts.items[cid].untyped = if (const_fold.isConstInt(v, decl.rhs)) .int else if (const_fold.isConstFloat(v, decl.rhs)) .float else .none;
+}
+
+/// Mark the constants an initializer's operands name, so its own mark can read theirs.
+/// One met again while it is being marked closes a cycle, reported when it is checked.
+fn markRefs(t: *Typecheck, state: []State, m: *const Typecheck.GraphCtx.ModuleCtx, node: Ast.Index) void {
+    if (node == Ast.none) return;
+    const n = m.tree.nodes[node.int()];
+    switch (n.tag) {
+        .identifier, .field_access => switch (m.resolutions[node.int()]) {
+            .constant => |cid| markOne(t, state, cid),
+            else => {},
+        },
+        .unary => markRefs(t, state, m, n.lhs),
+        .binary => {
+            markRefs(t, state, m, n.lhs);
+            markRefs(t, state, m, n.rhs);
+        },
+        else => {},
+    }
 }
 
 pub const ConstPass = struct {
@@ -240,6 +286,25 @@ test "an expression of literals and constants in a body folds, and out of range 
     var r = try Typecheck.checkSource("A: uint8 =: 250\nfn f() -> uint8 {\n    A + 10\n}\n");
     defer r.deinit(testing.allocator);
     try testing.expectEqualStrings("constant value 260 out of range for type 'uint8'", r.result.diags[0].message);
+}
+
+test "an untyped const takes the width its use expects, as a literal does" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("N :=: 5\nfn f() -> int8 {\n    x: int8 = N\n    y: uint16 = N\n    x + N\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 5\nM :=: N * 2 - 1\nfn f(b: uint8) -> uint8 {\n    b + M\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 128\nfn f() -> int8 {\n    -N\n}\n", &.{});
+    try Typecheck.expectDiagCodes("N :=: 5\nT: int8 =: N\nfn f() -> int8 {\n    T\n}\n", &.{});
+    try Typecheck.expectDiagCodes("F :=: 0.1\nfn f() -> float32 {\n    x: float32 = F\n    x +. F\n}\n", &.{});
+    try Typecheck.expectDiagCodes("BIG :=: 300\nfn f() -> int8 {\n    z: int8 = BIG\n    z\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("N :=: 5\nfn f() -> uint8 {\n    -N\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes("A :=: -B\nB :=: A\nX: int8 =: -A\n", &.{C.T0084});
+    try Typecheck.expectDiagCodes("T: int =: 5\nfn f() -> int8 {\n    T\n}\n", &.{C.T0042});
+    try Typecheck.expectDiagCodes("A: int16 =: 5\nN :=: A + 1\nfn f() -> int8 {\n    N\n}\n", &.{C.T0042});
+    try Typecheck.expectDiagCodes("N :=: when true { 1 } else { 2 }\nfn f() -> int8 {\n    N\n}\n", &.{C.T0042});
+    var r = try Typecheck.checkSource("BIG :=: 300\nfn f() -> int8 {\n    BIG\n}\n");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), r.result.diags.len);
+    try testing.expectEqualStrings("constant value 300 out of range for type 'int8'", r.result.diags[0].message);
 }
 
 test "a local const in a when arm not taken is checked as the rest of that arm is" {

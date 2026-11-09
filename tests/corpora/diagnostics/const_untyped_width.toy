@@ -1,0 +1,14 @@
+# A const with no declared type takes each use's width, so its value must fit that
+# width there, as a literal's must. A typed const keeps its declared type.
+BIG :=: 300
+N :=: 5
+SMALL: int16 =: 5
+
+fn main() -> int {
+    _z: int8 = BIG  #~ ERROR [T0034] constant value 300 out of range for type 'int8'
+    _n: uint8 = -N  #~ ERROR [T0034] constant value -5 out of range for type 'uint8'
+    _s: int8 = SMALL  #~ ERROR [T0041] cannot bind int16 to '_s' of type int8
+    b: uint8 = 1
+    _t := b + BIG  #~ ERROR [T0034] constant value 300 out of range for type 'uint8'
+    0
+}

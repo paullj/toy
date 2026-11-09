@@ -3,7 +3,8 @@
 //! constants. Every type comes from the checker's node types, so this file holds no
 //! type rule of its own: it reads a node's type for the width to compute at, and says
 //! when a value does not exist (`not_const`) or does not fit (`overflow`). The checker
-//! reads `isConstInt` to give a literal-only expression its place's width.
+//! reads `isConstInt` and `isConstFloat` to give a literal-only expression its place's
+//! width or precision.
 
 const std = @import("std");
 const Ast = @import("../ast/Ast.zig");
@@ -21,21 +22,54 @@ pub const View = struct {
     tree: Ast.Tree,
     tokens: []const Token,
     source: []const u8,
+    resolutions: []const Resolution,
+    consts: []const ConstSym,
 };
 
-/// Whether `node` is an integer constant built from literals alone, which, like a bare
-/// literal, has no width of its own until a place or sibling gives it one.
+/// The kind of value a constant declared with no type holds when its initializer is
+/// built only from literals and other such constants: like a literal, it has no width
+/// or precision of its own until a use gives it one.
+pub const Untyped = enum { none, int, float };
+
+fn untypedConst(v: View, node: Ast.Index) Untyped {
+    return switch (v.resolutions[node.int()]) {
+        .constant => |cid| v.consts[cid].untyped,
+        else => .none,
+    };
+}
+
+/// Whether `node` is an integer constant built from literals and untyped constants
+/// alone, which, like a bare literal, has no width of its own until a place or sibling
+/// gives it one.
 pub fn isConstInt(v: View, node: Ast.Index) bool {
     if (node == Ast.none) return false;
     const n = v.tree.nodes[node.int()];
     return switch (n.tag) {
         .literal_number => true,
+        .identifier, .field_access => untypedConst(v, node) == .int,
         .unary => switch (v.tokens[n.main_token].tag) {
             .minus, .tilde => isConstInt(v, n.lhs),
             else => false,
         },
         .binary => switch (v.tokens[n.main_token].tag) {
             .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent, .lt_lt, .gt_gt => isConstInt(v, n.lhs) and isConstInt(v, n.rhs),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+/// Whether `node` is a float constant built from literals, untyped constants and the
+/// dotted operators, which takes `float32` where one is expected as an integer
+/// constant takes a width.
+pub fn isConstFloat(v: View, node: Ast.Index) bool {
+    if (node == Ast.none) return false;
+    const n = v.tree.nodes[node.int()];
+    return switch (n.tag) {
+        .literal_float => true,
+        .identifier, .field_access => untypedConst(v, node) == .float,
+        .binary => switch (v.tokens[n.main_token].tag) {
+            .plus_dot, .minus_dot, .star_dot, .slash_dot => isConstFloat(v, n.lhs) and isConstFloat(v, n.rhs),
             else => false,
         },
         else => false,
@@ -138,7 +172,7 @@ pub fn fold(c: *const Ctx, node: Ast.Index) Error!Folded {
             else => .poison,
         },
         .identifier => switch (f.resolutions[node.int()]) {
-            .constant => |cid| return constant(c, cid),
+            .constant => |cid| return constant(c, cid, ty),
             .local => |slot| {
                 var b = c.binds;
                 while (b) |x| : (b = x.next) if (x.slot == slot) return .{ .value = try dupe(c.gpa, x.v) };
@@ -147,7 +181,7 @@ pub fn fold(c: *const Ctx, node: Ast.Index) Error!Folded {
             else => return .{ .not_const = node },
         },
         .field_access => switch (f.resolutions[node.int()]) {
-            .constant => |cid| return constant(c, cid),
+            .constant => |cid| return constant(c, cid, ty),
             else => return if (symbols_res.isQualifiedVariant(f.tree, f.resolutions, node)) variant(c, node, ty) else .{ .not_const = node },
         },
         .enum_init_unit => return if (n.lhs == Ast.none) variant(c, node, ty) else .{ .not_const = node },
@@ -162,9 +196,12 @@ pub fn fold(c: *const Ctx, node: Ast.Index) Error!Folded {
     }
 }
 
-fn constant(c: *const Ctx, cid: u32) Error!Folded {
+/// Constant `cid` named where its use is typed `ty`: an untyped float const used as a
+/// `float32` holds the float32 value, as a float literal there does.
+fn constant(c: *const Ctx, cid: u32, ty: Type) Error!Folded {
     const k = c.consts[cid];
     if (k.ty.kind == .invalid) return .poison;
+    if (k.value == .float and ty.isFloat32()) return .{ .value = .{ .float = round32(k.value.float) } };
     return .{ .value = try dupe(c.gpa, k.value) };
 }
 

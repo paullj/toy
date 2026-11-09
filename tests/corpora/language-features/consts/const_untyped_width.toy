@@ -1,0 +1,30 @@
+# Feature: a const with no declared type has no width of its own, as a literal has
+# none: each use takes the width its place expects (a binding, an argument, a sibling
+# operand, float32 for a float const), and `int` or `float` where nothing expects one.
+# expect: stdout "5\n5\n-128\n10\n9\n0.5\n6\n"
+# expect: exit 7
+import std/io
+
+N :=: 5
+MIN :=: 128
+TEN :=: N * 2
+HALF :=: 0.5
+SEVEN: int16 =: N + 2
+
+fn take16(v: uint16) -> uint16 { v }
+
+fn main() -> int {
+    x: int8 = N
+    y: uint16 = N
+    io.println(x)
+    io.println(take16(y))
+    m: int8 = -MIN
+    io.println(m)
+    b: uint8 = 1
+    io.println(b + 9)
+    io.println(b + TEN - 2)
+    f: float32 = HALF
+    io.println(f)
+    io.println(N + 1)
+    return SEVEN.into()
+}
