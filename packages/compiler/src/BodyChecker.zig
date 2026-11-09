@@ -6355,9 +6355,11 @@ test "an expression of literals and constants in a body folds, and out of range 
     try Typecheck.expectDiagCodes("A: uint8 =: 250\nfn f() -> uint8 {\n    K :=: A - 50\n    K + 5\n}\n", &.{});
     try Typecheck.expectDiagCodes("fn f() -> int8 {\n    100 + 100 - 100\n}\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    1 << 3\n}\n", &.{});
-    try Typecheck.expectDiagCodes("fn f() -> int8 {\n    1 << 10\n}\n", &.{C.T0034});
-    try Typecheck.expectDiagCodes("fn f() -> int {\n    x := 1 << 127\n    x\n}\n", &.{C.T0034});
-    try Typecheck.expectDiagCodes("fn f() -> int {\n    -1 << 200\n}\n", &.{C.T0034});
+    // Shifts never trap at run time, so they fold to the run-time value, never an error.
+    try Typecheck.expectDiagCodes("fn f() -> int8 {\n    1 << 10\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    x := 1 << 127\n    x\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    -1 << 200\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    9223372036854775807 << 25\n}\n", &.{});
     try Typecheck.expectDiagCodes("fn f() -> uint8 {\n    -(-1)\n}\n", &.{C.T0034});
     var r = try Typecheck.checkSource("A: uint8 =: 250\nfn f() -> uint8 {\n    A + 10\n}\n");
     defer r.deinit(testing.allocator);

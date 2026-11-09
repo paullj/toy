@@ -9,6 +9,6 @@ fn main() -> int {
     c: int8 = 100 + 100  #~ ERROR [T0034] literal out of range for type 'int8'
     d: uint8 = 1 - 2  #~ ERROR [T0034] literal out of range for type 'uint8'
     b = b + x  #~ ERROR [T0044] operands of '+' must have the same type
-    b = b + (1 << 10)  #~ ERROR [T0034] literal out of range for type 'int8'
+    b = b + (1 << 10)
     return if c == 0 && d == 0 { 1 } else { 0 }
 }

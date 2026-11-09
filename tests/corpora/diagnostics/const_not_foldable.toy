@@ -12,7 +12,6 @@ ORIGIN :=: Point { x: 0, y: 0 }  #~ ERROR [T0083] the value of constant 'ORIGIN'
 LIST :=: [1, 2, 3]  #~ ERROR [T0083] the value of constant 'LIST' is not known at compile time
 RING :=: Shape.Circle(1)  #~ ERROR [T0083] the value of constant 'RING' is not known at compile time
 HALF :=: 1 / 0  #~ ERROR [T0083] the value of constant 'HALF' is not known at compile time
-FAR :=: 1 << 200  #~ ERROR [T0034] literal out of range for type 'int'
 USES :=: ORIGIN
 
 fn main() -> int {
