@@ -483,3 +483,129 @@ pub fn literalsOnly(tree: Ast.Tree, node: Ast.Index) bool {
         else => false,
     };
 }
+
+const testing = std.testing;
+const Typecheck = @import("../types.zig");
+
+/// The folded value of the last constant `src` declares, which must check clean.
+fn lastValue(src: []const u8) !struct { ty: Type, value: Value, owned: Typecheck.Checked } {
+    var r = try Typecheck.checkSource(src);
+    errdefer r.deinit(testing.allocator);
+    for (r.result.diags) |d| std.debug.print("{s}\n", .{d.message});
+    try testing.expectEqual(@as(usize, 0), r.result.diags.len);
+    const c = r.result.consts[r.result.consts.len - 1];
+    return .{ .ty = c.ty, .value = c.value, .owned = r };
+}
+
+test "each scalar kind folds over literals, operators and other consts" {
+    const Case = struct { src: []const u8, ty: Type, value: Value };
+    const cases = [_]Case{
+        .{ .src = "N :=: 2 * 3 - 10\n", .ty = Type.int, .value = .{ .int = -4 } },
+        .{ .src = "N: uint8 =: 250 + 5\n", .ty = Type.uint8, .value = .{ .int = 255 } },
+        .{ .src = "N: int8 =: 100 +% 100\n", .ty = Type.int8, .value = .{ .int = -56 } },
+        .{ .src = "B: uint16 =: 1 << 4\nN :=: B * 2\n", .ty = Type.uint16, .value = .{ .int = 32 } },
+        .{ .src = "N :=: ~0\n", .ty = Type.int, .value = .{ .int = -1 } },
+        .{ .src = "N: uint8 =: ~0\n", .ty = Type.uint8, .value = .{ .int = 255 } },
+        .{ .src = "N :=: 1.5 +. 1.0\n", .ty = Type.float, .value = .{ .float = 2.5 } },
+        .{ .src = "N: float32 =: 0.1\n", .ty = Type.float32, .value = .{ .float = @as(f32, 0.1) } },
+        .{ .src = "A :=: 3\nN :=: A > 2 && !false\n", .ty = Type.bool, .value = .{ .bool = true } },
+        .{ .src = "N :=: \"a\" == \"b\"\n", .ty = Type.bool, .value = .{ .bool = false } },
+        .{ .src = "N :=: \"a\" < \"b\" && 'b' > 'a' && false < true\n", .ty = Type.bool, .value = .{ .bool = true } },
+        .{ .src = "N: float32 =: 16777217.0 +. 1.0\n", .ty = Type.float32, .value = .{ .float = 16777216.0 } },
+        .{ .src = "enum E { A, B }\nN :=: E.B\n", .ty = Type.enumT(0), .value = .{ .variant = 1 } },
+        .{ .src = "enum E { A, B(int) }\nN: E =: .A\n", .ty = Type.enumT(0), .value = .{ .variant = 0 } },
+        .{ .src = "C :=: false\nN :=: when C { 1 } else when !C { 2 } else { 3 }\n", .ty = Type.int, .value = .{ .int = 2 } },
+        .{ .src = "A: uint8 =: 7\nN :=: when A > 5 { A } else { 255 }\n", .ty = Type.uint8, .value = .{ .int = 7 } },
+        .{ .src = "N: str =: when 1 < 2 { \"a\" } else { \"b\" }\n", .ty = Type.str, .value = .{ .str = "a" } },
+        .{ .src = "N :=: when true { 1 } else { compile_error(\"no\") }\n", .ty = Type.int, .value = .{ .int = 1 } },
+        .{ .src = "enum E { A, B }\nN: uint8 =: when E.B { .A -> compile_error(\"no\"), .B -> 9 }\n", .ty = Type.uint8, .value = .{ .int = 9 } },
+        .{ .src = "N :=: when true { 1 } else when false { compile_error(\"no\") } else { compile_error(\"no\") }\n", .ty = Type.int, .value = .{ .int = 1 } },
+        .{ .src = "enum E { A, B, C }\nX :=: E.B\nN :=: when X { .A -> 1, .B | .C -> 2 }\n", .ty = Type.int, .value = .{ .int = 2 } },
+        .{ .src = "K :=: 3\nN: uint8 =: when K { 0 -> 1, _ if K > 2 -> 200, _ -> 3 }\n", .ty = Type.uint8, .value = .{ .int = 200 } },
+        .{ .src = "N: str =: when 1 > 2 { true -> \"t\", false -> \"f\" }\n", .ty = Type.str, .value = .{ .str = "f" } },
+        .{ .src = "L :=: 4\nN :=: when L { 0 -> 1, n -> n * 10 }\n", .ty = Type.int, .value = .{ .int = 40 } },
+        .{ .src = "L :=: 4\nN :=: when L { n if n > 3 -> n, _ -> 1 }\n", .ty = Type.int, .value = .{ .int = 4 } },
+        .{ .src = "L :=: 4\nN :=: when L { 0 -> 0, n -> when n > 3 { n } else { 0 } }\n", .ty = Type.int, .value = .{ .int = 4 } },
+    };
+    for (cases) |c| {
+        var got = try lastValue(c.src);
+        defer got.owned.deinit(testing.allocator);
+        if (c.ty.kind != .@"enum") try testing.expect(got.ty.eql(c.ty)) else try testing.expect(got.ty.kind == .@"enum");
+        try testing.expect(valueEql(got.value, c.value));
+    }
+}
+
+test "a generic enum's unit variant is a const, its type args from the declared type or the variant" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    const srcs = [_][]const u8{
+        "enum P[T] { E, V(T) }\nN: P[int] =: .E\n",
+        "enum P[T] { E, V(T) }\nN :=: P[int].E\n",
+        "N: Option[int] =: Option[int].none\n",
+        "enum P[T] { V(T), E }\nfn f() -> P[str] {\n    K: P[str] =: .E\n    K\n}\nN :=: P[bool].E\n",
+    };
+    for (srcs) |src| {
+        var got = try lastValue(src);
+        defer got.owned.deinit(testing.allocator);
+        try testing.expect(got.ty.isApp());
+        try testing.expect(got.value == .variant);
+    }
+    var w = try lastValue("enum P[T] { V(T), E }\nX :=: P[int].E\nN :=: when X { .V(_) -> 1, .E -> 2 }\n");
+    defer w.owned.deinit(testing.allocator);
+    try testing.expect(valueEql(w.value, .{ .int = 2 }));
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN :=: P.E\n", &.{C.T0016});
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN: P[int] =: .V(1)\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("enum P[T] { E, V(T) }\nN: P[int] =: P[bool].E\n", &.{C.T0041});
+}
+
+test "a computed value out of range is named as one, not as a literal" {
+    var r = try Typecheck.checkSource("A: uint8 =: 200\nN :=: A + 56\nM: uint8 =: 255 + 1\n");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), r.result.diags.len);
+    try testing.expectEqualStrings("constant value 256 out of range for type 'uint8'", r.result.diags[0].message);
+    try testing.expectEqualStrings("literal out of range for type 'uint8'", r.result.diags[1].message);
+}
+
+test "a str const owns its decoded bytes and a char const its codepoint" {
+    var s = try lastValue("A :=: \"hi\\n\"\nN: str =: A\n");
+    defer s.owned.deinit(testing.allocator);
+    try testing.expectEqualStrings("hi\n", s.value.str);
+    var c = try lastValue("N :=: '\\u{20AC}'\n");
+    defer c.owned.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0x20AC), c.value.char);
+}
+
+test "a when part that overflows while folding is its fold's error, not a crash" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    const big = "BIG :=: 9223372036854775807\n";
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { 1 } else { 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { return 3 }\n    0\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 > 0 { true -> 1, false -> 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG { _ if BIG + 1 > 0 -> 1, _ -> 2 }\n}\n", &.{C.T0034});
+    try Typecheck.expectDiagCodes(big ++ "fn f() -> int {\n    when BIG + 1 { _ -> 1 }\n}\n", &.{C.T0034});
+    // An error the body pass reports in the condition is the only one.
+    try Typecheck.expectDiagCodes("A: int8 =: 1\nB: int16 =: 1\nfn f() -> int {\n    when A + B > 0 { 1 } else { 2 }\n}\n", &.{C.T0044});
+}
+
+test "compile_error is an error only where it is compiled" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("N :=: when false { 1 } else { compile_error(\"no\") }\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("N :=: compile_error(\"no\")\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("N :=: compile_error()\n", &.{C.T0039});
+    try Typecheck.expectDiagCodes("N :=: when false { 1 } else { compile_error(2) }\n", &.{C.T0040});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K > 1 { 1 } else { compile_error(\"no\") }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> int {\n    when K < 1 { 1 } else { compile_error(\"no\") }\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() -> str {\n    when K { 2 -> \"two\", _ -> compile_error(\"no\") }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("K :=: 3\nfn f() -> str {\n    when K { 2 -> \"two\", _ -> compile_error(\"no\") }\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("K :=: 2\nfn f() {\n    when K < 1 { when true { compile_error(\"no\") } }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    compile_error(\"no\")\n}\n", &.{C.T0086});
+    try Typecheck.expectDiagCodes("fn f(s: str) -> int {\n    compile_error(s)\n}\n", &.{C.T0040});
+}
+
+test "a compile_error message that is not plain UTF-8 text shows as written" {
+    const src = "N :=: compile_error(\"bad \\xff\")\nfn f() -> int {\n    compile_error(\"a\\nb\")\n}\n";
+    var r = try Typecheck.checkSource(src);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), r.result.diags.len);
+    try testing.expectEqualStrings("bad \\xff", r.result.diags[0].message);
+    try testing.expectEqualStrings("a\\nb", r.result.diags[1].message);
+}
