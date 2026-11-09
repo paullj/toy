@@ -1455,17 +1455,17 @@ pub const BodyChecker = struct {
                 const want = resultWant(op_tok.tag, saved);
                 var lt: Type = undefined;
                 var rt: Type = undefined;
-                const l_into = bc.isIntoCall(n.lhs);
-                const r_into = bc.isIntoCall(n.rhs);
-                if (l_into and r_into) {
+                const l_ctx = bc.takesContextType(n.lhs);
+                const r_ctx = bc.takesContextType(n.rhs);
+                if (l_ctx and r_ctx) {
                     lt = try bc.typeOfExpected(n.lhs, want);
                     rt = try bc.typeOfExpected(n.rhs, want);
-                } else if (l_into) {
+                } else if (l_ctx) {
                     rt = try bc.typeOf(n.rhs);
-                    lt = try bc.typeOfExpected(n.lhs, bc.intoTarget(n.rhs, rt, want));
+                    lt = try bc.typeOfExpected(n.lhs, bc.contextTarget(n.rhs, rt, want));
                 } else {
                     lt = try bc.typeOf(n.lhs);
-                    rt = if (r_into) try bc.typeOfExpected(n.rhs, bc.intoTarget(n.lhs, lt, want)) else try bc.typeOf(n.rhs);
+                    rt = if (r_ctx) try bc.typeOfExpected(n.rhs, bc.contextTarget(n.lhs, lt, want)) else try bc.typeOf(n.rhs);
                 }
                 bc.body.expected = saved;
                 if (lt.kind == .invalid or rt.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
@@ -5485,22 +5485,26 @@ pub const BodyChecker = struct {
         };
     }
 
-    /// Whether `node` is a bare `v.into()`, whose target only its context can name: as a
-    /// binary operand it takes the other operand's type. A `-` or `~` passes its expected
-    /// type to its operand, so `-v.into()` takes it too.
-    fn isIntoCall(bc: *const BodyChecker, node: Ast.Index) bool {
+    /// Whether `node` has a type only its context can name, a bare `v.into()` or a variant
+    /// with no enum (`.Fast`): as a binary operand it takes the other operand's type. A `-`
+    /// or `~` passes its expected type to its operand, so `-v.into()` takes it too.
+    fn takesContextType(bc: *const BodyChecker, node: Ast.Index) bool {
         var n = bc.tree.nodes[node.int()];
         while (n.tag == .unary and n.lhs != Ast.none and (bc.tokens[n.main_token].tag == .minus or bc.tokens[n.main_token].tag == .tilde))
             n = bc.tree.nodes[n.lhs.int()];
+        switch (n.tag) {
+            .enum_init_unit, .enum_init_tuple, .enum_init_struct => return n.lhs == Ast.none,
+            else => {},
+        }
         if (n.tag != .call or Ast.rangeSlice(bc.tree, n.rhs.int()).len != 0) return false;
         const callee = bc.tree.nodes[n.lhs.int()];
         return callee.tag == .field_access and std.mem.eql(u8, bc.nameText(callee.main_token), "into");
     }
 
-    /// The target an `into()` operand converts to beside `sibling`, typed `st`. A constant
-    /// has no type of its own until it adopts one, and `never` gives none, so beside
-    /// either the operator's expected type (`want`) names it.
-    fn intoTarget(bc: *const BodyChecker, sibling: Ast.Index, st: Type, want: ?Type) ?Type {
+    /// The type a context-typed operand takes beside `sibling`, typed `st`. A constant has
+    /// no type of its own until it adopts one, and `never` gives none, so beside either the
+    /// operator's expected type (`want`) names it.
+    fn contextTarget(bc: *const BodyChecker, sibling: Ast.Index, st: Type, want: ?Type) ?Type {
         if (st.kind == .never or bc.isConstInt(sibling) or bc.isConstFloat(sibling)) return want;
         return st;
     }
@@ -5654,11 +5658,11 @@ pub const BodyChecker = struct {
 
     /// The type `place op= v` stores, `place op v`, given the place type `lt`. `v` is typed
     /// as a binary operand is, with no expected type, so a constant adopts the place's
-    /// width, an `into()` converts to it, and anything else must already match it; errors
+    /// width, an `into()` or a `.Variant` takes it, and anything else must already match it; errors
     /// name the compound operator.
     fn compoundValue(bc: *BodyChecker, stmt_idx: Ast.Index, base: TokenTag, lt: Type) error{OutOfMemory}!Type {
         const stmt = bc.tree.nodes[stmt_idx.int()];
-        var rt = try bc.typeOfExpected(stmt.rhs, if (bc.isIntoCall(stmt.rhs)) lt else null);
+        var rt = try bc.typeOfExpected(stmt.rhs, if (bc.takesContextType(stmt.rhs)) lt else null);
         if (lt.kind == .invalid or rt.kind == .invalid) return Type.invalid;
         rt = try bc.adoptConstWidth(stmt.rhs, rt, lt);
         const op_tok = bc.tokens[stmt.main_token];

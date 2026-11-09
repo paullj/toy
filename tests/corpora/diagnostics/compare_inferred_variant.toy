@@ -1,0 +1,16 @@
+# A variant with no enum named takes its type from the other operand: beside an int it
+# names no enum (T0062), beside another bare variant there is no type to take (T0062),
+# and beside an enum it must be one of that enum's variants (T0061).
+enum Mode { Fast, Small }
+
+fn main() -> int {
+    x := 3
+    m := Mode.Fast
+    if x == .Fast { return 1 }  #~ ERROR [T0062] '.Fast' expects an enum type, but int was expected here
+    if .Fast ==  #~ ERROR [T0062] cannot infer the enum type for '.Fast' here
+        .Small {  #~ ERROR [T0062] cannot infer the enum type for '.Small' here
+        return 2
+    }
+    if m == .Slow { return 3 }  #~ ERROR [T0061] enum 'Mode' has no variant 'Slow'
+    return 0
+}

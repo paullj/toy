@@ -15,5 +15,8 @@ pub fn selftest() -> int {
         .debug -> 1,
         .release -> 2,
     }
+    # The if-form must agree with the match form, or the result is 0.
+    os_if := when target.os == .macos { 1 } else when .linux == target.os { 2 } else { 0 }
+    if os_if != os { return 0 }
     return os * 100 + arch * 10 + profile
 }
