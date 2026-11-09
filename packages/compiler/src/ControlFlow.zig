@@ -11,6 +11,7 @@ const LayoutEngine = @import("layout/Engine.zig");
 const Type = @import("layout/Type.zig").Type;
 const VariantSym = LayoutEngine.VariantSym;
 const EnumSym = LayoutEngine.EnumSym;
+const Composite = @import("symbols/Composite.zig");
 
 /// Bound on the stack-allocated variant-coverage bitmap the exhaustiveness walks use.
 /// It is a soundness-safe cap, not a hard limit: every walk that reads it falls back to
@@ -30,6 +31,8 @@ pub const Ctx = struct {
     enums: []const EnumSym,
     tokens: []const Token,
     source: []const u8,
+    /// The generic instances, so an enum's instance (`Option[int]`) names its enum.
+    composite: ?*const Composite = null,
 
     /// Text of the token at `tok` (variant/name identifiers).
     fn nameText(ctx: Ctx, tok: u32) []const u8 {
@@ -46,7 +49,17 @@ pub const Ctx = struct {
             .enums = bc.model.enums,
             .tokens = bc.tokens,
             .source = bc.source,
+            .composite = bc.composite,
         };
+    }
+
+    /// The enum `ty` is a value of, a plain enum or an instance of a generic one.
+    pub fn enumId(ctx: Ctx, ty: Type) ?u32 {
+        if (ty.kind == .@"enum") return ty.enum_id;
+        const co = ctx.composite orelse return null;
+        if (!ty.isApp()) return null;
+        const e = co.at(ty.appIdx());
+        return if (e.ctor_is_enum) e.ctor else null;
     }
 };
 

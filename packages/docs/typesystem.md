@@ -272,17 +272,18 @@ pub DEFAULT: Mode =: .Fast
   `A: int16 =: 1`) keep their type everywhere.
 * The initializer is typed as any expression is, with the same rules and errors as in
   a function body, and then its value must be known at compile time: literals (int,
-  float, bool, char, str), other
-  constants, an enum's unit variant, and the integer, float, comparison and boolean
-  operators over them, and a `when` over them (see [When](#when)). `<`, `<=`, `>` and
+  float, bool, char, str), other constants, an enum's unit variant, and the integer,
+  float, comparison and boolean operators over them, and a `when` over them (see
+  [When](#when)). A unit variant of a generic enum takes its type arguments from the
+  declared type or the variant (`NONE: Option[int] =: .none`,
+  `NONE :=: Option[int].none`); with neither, it is **T0016**. `<`, `<=`, `>` and
   `>=` fold over int, char, bool and str; over
   any other type, whose order is a user `Ord` impl, they are **T0083**. Each literal
   intermediate is range-checked at the declared width, as in a body, so
   `N: uint8 =: 200 + 100 - 100` is **T0034**, as is a left shift of a nonzero value by
   the width or more, whatever the amount (`1 << 200`). A call (other than
-  `compile_error`), a struct literal, a `Vec`, a
-  payload variant (or a variant of a generic enum, such as `Option[int].None`), a local
-  variable or a division by zero is **T0083**, as is a local
+  `compile_error`), a struct literal, a `Vec`, a payload variant, a local variable or a
+  division by zero is **T0083**, as is a local
   constant typed by its function's type parameter (`N: T =: 5`). A constant
   whose initializer reaches itself, directly or through other constants, is
   **T0084**; the error spells the cycle (`A -> B -> A`) at the use that closes it.

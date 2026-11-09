@@ -1,0 +1,24 @@
+# Feature: a unit variant of a generic enum is a const value. Its type arguments come
+# from the declared type (`.none` under `Option[int]`) or from the variant itself
+# (`Pair[str].empty`), and a use compares with `==` as the variant written out does.
+# expect: exit 31
+
+enum Pair[T] { empty, two(T, T) }
+
+NONE: Option[int] =: .none
+EMPTY :=: Pair[str].empty
+CHOSEN :=: when EMPTY { .empty -> 16, .two(_, _) -> 0 }
+
+fn main() -> int {
+    r := 0
+    x: Option[int] = .none
+    if x == NONE { r = r + 1 }
+    y: Option[int] = .some(3)
+    if y != NONE { r = r + 2 }
+    p := EMPTY
+    if p == Pair[str].empty { r = r + 4 }
+    LOCAL: Pair[int] =: .empty
+    q: Pair[int] = .two(1, 2)
+    if q != LOCAL { r = r + 8 }
+    r + CHOSEN
+}

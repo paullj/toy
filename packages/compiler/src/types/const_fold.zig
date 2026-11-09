@@ -217,9 +217,9 @@ fn isCompileError(f: ControlFlow.Ctx, n: Ast.Node) bool {
 /// A unit variant of enum type `ty`; a payload variant is built at run time.
 fn variant(c: *const Ctx, node: Ast.Index, ty: Type) Folded {
     const f = c.flow;
-    if (ty.kind != .@"enum") return .{ .not_const = node };
+    const eid = f.enumId(ty) orelse return .{ .not_const = node };
     const name = f.tokens[f.tree.nodes[node.int()].main_token].text(f.source);
-    for (f.enums[ty.enum_id].variants, 0..) |vs, i| {
+    for (f.enums[eid].variants, 0..) |vs, i| {
         if (!std.mem.eql(u8, vs.name, name)) continue;
         if (vs.form != .unit) return .{ .not_const = node };
         return .{ .value = .{ .variant = @intCast(i) } };
