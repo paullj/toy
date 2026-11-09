@@ -66,9 +66,10 @@ h = (h ^ b) *% 1099511628211
 
 The checks follow the profile, not the passes: `toy build -O1` is still a debug build
 and still panics. The passes never fold an overflow into a wrapped value in a debug
-build: a constant that overflows, such as `x := 4 * 4611686018427387904`, folds to a
-panic at run time. A constant with a known width is checked when it is compiled instead
-(`c: int8 = 100 + 100` is T0034); with the wrapping operators it wraps
+build: `a := 4` then `x := a * 4611686018427387904` folds to a panic at run time. An
+expression made only of literals and constants is checked when it is compiled instead
+(`x := 4 * 4611686018427387904` and `c: int8 = 100 + 100` are T0034); with the
+wrapping operators it wraps
 (`c: int8 = 100 +% 100` is -56). A negated literal is a constant too, so
 `-9223372036854775808` never panics.
 

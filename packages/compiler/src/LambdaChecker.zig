@@ -107,13 +107,25 @@ fn sortedSet(items: []u32) []const u32 {
 
 /// Record the local an assignment to `place` writes.
 pub fn noteAssignedRoot(bc: *BodyChecker, place: Ast.Index) error{OutOfMemory}!void {
-    if (symbols_res.placeRoot(bc.tree, bc.resolutions, place)) |slot| try bc.assigned_roots.append(bc.gpa, slot);
+    if (symbols_res.placeRoot(bc.tree, bc.resolutions, place)) |slot| {
+        try rejectWhenBound(bc, slot, place);
+        try bc.assigned_roots.append(bc.gpa, slot);
+    }
 }
 
 /// Record the local a call writes through: the root of a `mut self` receiver place or
 /// of a `mut` argument.
 pub fn noteMutatedRoot(bc: *BodyChecker, place: Ast.Index) error{OutOfMemory}!void {
-    if (symbols_res.placeRoot(bc.tree, bc.resolutions, place)) |slot| try bc.mutated_roots.append(bc.gpa, slot);
+    if (symbols_res.placeRoot(bc.tree, bc.resolutions, place)) |slot| {
+        try rejectWhenBound(bc, slot, place);
+        try bc.mutated_roots.append(bc.gpa, slot);
+    }
+}
+
+/// R0007 when `place` writes through `slot`, a `when` arm binding.
+fn rejectWhenBound(bc: *BodyChecker, slot: u32, place: Ast.Index) error{OutOfMemory}!void {
+    if (std.mem.indexOfScalar(u32, bc.when_bound.items, slot) == null) return;
+    try bc.report(.{ .span = bc.spanOf(place), .code = .R0007 }, "cannot change a 'when' arm binding; it holds the scrutinee's compile-time value", .{});
 }
 
 /// `fn(params) -> R { body }`: a value of type `fn(P..) -> R`. A param's type is its

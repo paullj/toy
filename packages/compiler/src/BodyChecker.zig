@@ -34,6 +34,7 @@ const LambdaChecker = @import("LambdaChecker.zig");
 const CallInfer = @import("types/call_infer.zig");
 const Literal = @import("types/literal.zig");
 const const_fold = @import("types/const_fold.zig");
+const const_eval = @import("types/const_eval.zig");
 const nearmiss = @import("diagnostics/nearmiss.zig");
 const Model = Typecheck.Model;
 const FnSym = Typecheck.FnSym;
@@ -210,6 +211,9 @@ pub const Expected = struct { ty: Type, soft: bool = false };
 /// while it is checked (`enterBody`/`leaveBody`).
 pub const BodyCtx = struct {
     cur_ret: Type = .unit,
+    /// The `when` arm bindings in scope, each naming its scrutinee's value, for folding
+    /// a `when` part inside the arm. A lambda's locals are no arm's, so its body has none.
+    when_binds: ?*const const_fold.Bind = null,
     expected: ?Expected = null,
     /// The innermost `_` capture's hole while its body is checked: the one node whose
     /// typing with a known param type gives the capture its param type. `none` in any
@@ -296,6 +300,9 @@ pub const BodyChecker = struct {
     bound_roots: std.ArrayList(u32) = .empty,
     /// The locals an assignment writes (`x = ..`, or a place store rooted at `x`).
     assigned_roots: std.ArrayList(u32) = .empty,
+    /// The slots of the `when` arm bindings being checked, lambdas included. A fold reads
+    /// such a binding as its scrutinee's value, so nothing may change it.
+    when_bound: std.ArrayList(u32) = .empty,
     /// The assignment target being typed, or none: the member it names is a field, never a
     /// bound method, so `acc.plus = f` stays a missing field, and an index it names is a
     /// store. A node, not a flag, so the rest of the place (a call's arguments, a lambda's
@@ -418,6 +425,13 @@ pub const BodyChecker = struct {
     /// only at zero.
     untaken_arms: u32 = 0,
 
+    /// Set while the operands of a constant expression's outermost operation are typed.
+    in_const_op: bool = false,
+
+    /// Set while the top-level constants are checked, before the body pass: a use of a
+    /// constant not yet checked checks it first (`ConstPass.use`).
+    const_pass: ?*const_eval.ConstPass = null,
+
     /// The ordered generic-param names + the concrete args they bind to, in
     /// generic-param order (`names[i]` binds `types[i]`).
     pub const Subst = struct { names: []const []const u8, types: []const Type };
@@ -438,6 +452,7 @@ pub const BodyChecker = struct {
         bc.mutated_roots.deinit(bc.gpa);
         bc.bound_roots.deinit(bc.gpa);
         bc.assigned_roots.deinit(bc.gpa);
+        bc.when_bound.deinit(bc.gpa);
         bc.boxed.deinit(bc.gpa);
         bc.sink.deinit();
         bc.derive_reqs.deinit(bc.gpa);
@@ -771,8 +786,7 @@ pub const BodyChecker = struct {
             .for_in2_stmt => try bc.checkForIn2(stmt_idx, null),
             .labeled => _ = try bc.checkLabeled(stmt_idx, false),
             .local_fn => try LambdaChecker.checkLocalFn(bc, stmt_idx, stmt),
-            // Folded with the top-level constants, before any body is checked.
-            .const_decl => {},
+            .const_decl => try bc.checkConstDecl(stmt_idx, bc.localConstId(stmt_idx)),
             .break_stmt => {
                 const ctx = bc.targetCtx(stmt_idx) orelse {
                     // No matching context: a bare break with an empty stack ("outside a
@@ -1335,6 +1349,14 @@ pub const BodyChecker = struct {
     pub fn typeOf(bc: *BodyChecker, node_idx: Ast.Index) error{OutOfMemory}!Type {
         if (node_idx == Ast.none) return .invalid; // structural poison: no emit (exempt)
         const n = bc.tree.nodes[(node_idx).int()];
+        const operation = n.tag == .binary or n.tag == .unary;
+        const mark = if (operation) bc.sink.count() else 0;
+        // Only the outermost operation of a constant expression folds: a fold covers its
+        // operands, so folding at each level would cost the square of its depth.
+        const in_const_op = bc.in_const_op;
+        const const_root = operation and !in_const_op and const_fold.isConstExpr(bc.tree, bc.resolutions, node_idx);
+        bc.in_const_op = operation and (in_const_op or const_root);
+        defer bc.in_const_op = in_const_op;
         const ty: Type = switch (n.tag) {
             .literal_number => try bc.typeNumericLiteral(n.main_token, bc.literalExpected(n.main_token)),
             // A float literal has no precision of its own until a place gives it one, as an
@@ -1346,7 +1368,7 @@ pub const BodyChecker = struct {
             .identifier => switch (bc.resolutions[(node_idx).int()]) {
                 .local => |slot| bc.slotType(slot),
                 .func => |gid| try bc.typeOfFnValue(node_idx, gid, n.main_token),
-                .constant => |cid| bc.model.consts[cid].ty,
+                .constant => |cid| try bc.constType(node_idx, cid),
                 .unresolved => blk: {
                     // Resolve quietly skips a struct- or enum-named identifier (a type
                     // name in a position it doesn't bind: a constructor, a variant or an
@@ -1387,7 +1409,6 @@ pub const BodyChecker = struct {
                 const operand = try bc.typeOf(n.lhs);
                 if (operand.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
                 if (operand.kind == .never) break :blk Type.never;
-                if (bc.expectedTy()) |e| if (e.isInteger() and bc.isConstInt(node_idx)) try bc.checkConstRange(node_idx, e);
                 switch (op) {
                     .minus => {
                         if (operand.isInteger()) break :blk operand;
@@ -1415,7 +1436,6 @@ pub const BodyChecker = struct {
                     const lt = try bc.typeOfExpected(n.lhs, e.ty);
                     const rt = try bc.typeOfExpected(n.rhs, e.ty);
                     if (lt.kind == .invalid or rt.kind == .invalid) break :blk Type.invalid; // poison propagation: no emit (exempt)
-                    if (e.ty.isInteger()) try bc.checkConstRange(node_idx, e.ty);
                     break :blk try bc.binaryResult(node_idx, .{ .node = node_idx }, op_tok.tag, op_tok.text(bc.source), lt, rt);
                 };
                 // Type each operand with NO expected type, then let a constant operand
@@ -1549,6 +1569,7 @@ pub const BodyChecker = struct {
             else => Type.invalid, // defensive unknown-kind fallthrough: no emit (exempt)
         };
         bc.node_types[(node_idx).int()] = ty;
+        if (const_root) try bc.rangeCheckConst(node_idx, mark);
         return ty;
     }
 
@@ -1747,7 +1768,7 @@ pub const BodyChecker = struct {
         // A qualified `mod.f` in value position: the resolver bound the access itself.
         switch (bc.resolutions[(node_idx).int()]) {
             .func => |gid| return bc.typeOfFnValue(node_idx, gid, n.main_token),
-            .constant => |cid| return bc.model.consts[cid].ty,
+            .constant => |cid| return bc.constType(node_idx, cid),
             else => {},
         }
         if (try bc.reportTypeNotValue(node_idx)) return bc.poison();
@@ -2593,18 +2614,8 @@ pub const BodyChecker = struct {
             return;
         }
         if (!Ast.isWhen(bc.tree, bc.tokens, node_idx)) return bc.warnConstIfCond(n.lhs);
-        switch (bc.model.whenCond(bc.graph_mod, node_idx)) {
-            .bool => |taken| bc.setCalleeAt(node_idx, Callee.whenArm(if (taken) 0 else 1)),
-            .not_const => try bc.sink.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when condition is not known at compile time", .{}),
-            .fold_error => |i| if (!bc.errorsSince(mark)) try bc.reportWhenError(i),
-            else => {},
-        }
-    }
-
-    /// The error that stopped a well-typed `when` part folding, such as an overflow.
-    pub fn reportWhenError(bc: *BodyChecker, i: u32) error{OutOfMemory}!void {
-        const e = bc.model.when_errors[i];
-        try bc.report(.{ .span = e.span, .code = e.code }, "{s}", .{e.msg});
+        const v = try bc.foldWhenPart("condition", n.lhs, mark) orelse return;
+        if (v == .bool) bc.setCalleeAt(node_idx, Callee.whenArm(if (v.bool) 0 else 1)) else const_fold.freeValue(bc.gpa, v);
     }
 
     /// Enter arm `arm` of the construct at `node_idx`: 1 when it is a `when` arm lowering
@@ -5516,23 +5527,99 @@ pub const BodyChecker = struct {
         return const_fold.isConstInt(bc.foldView(), node);
     }
 
-    fn constValue(bc: *const BodyChecker, node: Ast.Index, t: Type) ?i128 {
-        return const_fold.constValue(bc.foldView(), node, t);
+    /// T0034 when the operation at `node`, made only of literals and constants, computes
+    /// an integer its type does not hold at any step. One reported since `mark` is the
+    /// operation's error already.
+    fn rangeCheckConst(bc: *BodyChecker, node: Ast.Index, mark: usize) error{OutOfMemory}!void {
+        if (bc.errorsSince(mark)) return;
+        const f = try bc.fold(node);
+        switch (f) {
+            .value => |v| const_fold.freeValue(bc.gpa, v),
+            .overflow => |o| try bc.reportOverflow(o),
+            else => {},
+        }
     }
 
-    /// T0034 when constant `node`, typed at `t`, folds outside `t` though each operand
-    /// fits it: an operand that does not fit has reported already, and the wider
-    /// expression would only repeat it.
-    fn checkConstRange(bc: *BodyChecker, node: Ast.Index, t: Type) error{OutOfMemory}!void {
-        const v = bc.constValue(node, t) orelse return;
-        if (Literal.fitsValue(v, t)) return;
-        const n = bc.tree.nodes[node.int()];
-        const operands = [_]Ast.Index{ n.lhs, if (n.tag == .binary) n.rhs else Ast.none };
-        for (operands) |o| if (o != Ast.none) {
-            const ov = bc.constValue(o, t) orelse return;
-            if (!Literal.fitsValue(ov, t)) return;
-        };
-        try bc.report(.{ .span = bc.spanOf(node), .code = .T0034 }, "literal out of range for type '{f}'", .{bc.fmtType(t)});
+    pub fn reportOverflow(bc: *BodyChecker, o: @FieldType(const_fold.Folded, "overflow")) error{OutOfMemory}!void {
+        const at: DiagnosticSink.Report = .{ .span = bc.spanOf(o.node), .code = .T0034 };
+        if (const_fold.literalsOnly(bc.tree, o.node))
+            try bc.report(at, "literal out of range for type '{f}'", .{bc.fmtType(o.ty)})
+        else if (o.v) |v|
+            try bc.report(at, "constant value {d} out of range for type '{f}'", .{ v, bc.fmtType(o.ty) })
+        else
+            try bc.report(at, "constant value out of range for type '{f}'", .{bc.fmtType(o.ty)});
+    }
+
+    /// The value of the typed expression at `node`, with the `when` arm bindings in scope.
+    pub fn fold(bc: *BodyChecker, node: Ast.Index) error{OutOfMemory}!const_fold.Folded {
+        const c: const_fold.Ctx = .{ .gpa = bc.gpa, .flow = bc.cflow(), .consts = bc.model.consts, .binds = bc.body.when_binds };
+        return const_fold.fold(&c, node);
+    }
+
+    /// The value of a typed `when` `part` (condition, scrutinee or guard) at `node`, owned
+    /// by the caller, or null after reporting why it has none: T0085 over the whole part,
+    /// or the overflow that stopped it unless typing it reported an error since `mark`.
+    pub fn foldWhenPart(bc: *BodyChecker, part: []const u8, node: Ast.Index, mark: usize) error{OutOfMemory}!?const_fold.Value {
+        switch (try bc.fold(node)) {
+            .value => |v| return v,
+            .not_const => try bc.sink.report(.{ .span = bc.spanOf(node), .code = .T0085 }, "when {s} is not known at compile time", .{part}),
+            .overflow => |o| if (!bc.errorsSince(mark)) try bc.reportOverflow(o),
+            .never, .poison => {},
+        }
+        return null;
+    }
+
+    /// The type of constant `cid`, named at `node`.
+    fn constType(bc: *BodyChecker, node: Ast.Index, cid: u32) error{OutOfMemory}!Type {
+        if (bc.const_pass) |p| try p.use(bc, node, cid);
+        return bc.model.consts[cid].ty;
+    }
+
+    /// `N :=: e` or `N: T =: e`: `e` is typed as any expression is, against `T` when
+    /// given, and must have a value while compiling. Records the constant's type and
+    /// value, or poison after an error. A redeclared name has no constant to record.
+    pub fn checkConstDecl(bc: *BodyChecker, decl_idx: Ast.Index, cid: ?u32) error{OutOfMemory}!void {
+        const decl = bc.tree.nodes[decl_idx.int()];
+        const name = bc.nameText(decl.main_token);
+        const mark = bc.sink.count();
+        var declared: ?Type = null;
+        if (decl.lhs != Ast.none) {
+            // A value has no one type across a generic fn's instances; the const pass
+            // reported a constant typed by a type parameter once, for the template.
+            if (const_eval.namesTypeParam(bc.tree, bc.tokens, bc.source, decl.lhs, bc.gph_generic_params)) return bc.recordConst(cid, const_eval.poison);
+            declared = bc.typeFromNode(decl.lhs);
+        }
+        const got = try bc.typeOfExpected(decl.rhs, declared);
+        if (declared) |d| if (!bc.assignableOrPoison(d, got))
+            try bc.report(.{ .span = bc.spanOf(decl.rhs), .code = .T0041 }, "cannot bind {f} to '{s}' of type {f}", .{ bc.fmtType(got), name, bc.fmtType(d) });
+        const ty = declared orelse got;
+        if (bc.errorsSince(mark) or ty.kind == .invalid or ty.kind == .never) return bc.recordConst(cid, const_eval.poison);
+        switch (try bc.fold(decl.rhs)) {
+            .value => |v| return bc.recordConst(cid, .{ .ty = ty, .value = v }),
+            .not_const => |at| try bc.report(.{ .span = bc.spanOf(at), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{name}),
+            .overflow => |o| try bc.reportOverflow(o),
+            .never, .poison => {},
+        }
+        bc.recordConst(cid, const_eval.poison);
+    }
+
+    /// The id of the local constant `decl_idx` declares, or null when the resolver
+    /// rejected it as a redeclaration. A local constant is rare, so a scan is cheap.
+    fn localConstId(bc: *const BodyChecker, decl_idx: Ast.Index) ?u32 {
+        for (bc.model.graph.consts, 0..) |c, i| {
+            if (c.module == bc.graph_mod and c.decl_node == decl_idx) return @intCast(i);
+        }
+        return null;
+    }
+
+    /// Store constant `cid`'s checked type and value, freeing what a re-check replaces.
+    /// Each constant is checked by one body (or the const pass) at a time, so the shared
+    /// table takes the write without a lock.
+    fn recordConst(bc: *BodyChecker, cid: ?u32, sym: Typecheck.ConstSym) void {
+        const c = cid orelse return const_fold.freeValue(bc.gpa, sym.value);
+        const slot = &bc.model.consts[c];
+        const_fold.freeValue(bc.gpa, slot.value);
+        slot.* = sym;
     }
 
     /// The type `place op= v` stores, `place op v`, given the place type `lt`. `v` is typed

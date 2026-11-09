@@ -15,8 +15,8 @@ const Typecheck = @import("types.zig");
 const BodyChecker = BC.BodyChecker;
 const Literal = @import("types/literal.zig");
 const Callee = @import("symbols/Callee.zig").Callee;
-const const_eval = @import("types/const_eval.zig");
-const WhenCond = const_eval.WhenCond;
+const const_fold = @import("types/const_fold.zig");
+const Value = const_fold.Value;
 const DiagnosticSink = @import("diagnostics/Sink.zig");
 const Span = @import("diagnostics/model.zig").Span;
 
@@ -87,15 +87,24 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
     var has_wildcard = false;
     var warned = false;
     var result: Type = Type.never;
-    // Chosen before the arms are checked, so each knows whether it is lowered.
+    // A `when`'s arm is chosen as the arms are checked, each before its body, so the
+    // body knows whether it is lowered: the first whose guard holds and whose pattern
+    // takes the scrutinee's value. A part with no value leaves every arm untaken.
     const is_when = Ast.isWhen(bc.tree, bc.tokens, node_idx);
-    if (is_when) try chooseWhenArm(bc, node_idx, n, st, bc.errorsSince(mark));
+    const scrut: ?Value = if (is_when) try bc.foldWhenPart("scrutinee", n.lhs, mark) else null;
+    defer if (scrut) |v| const_fold.freeValue(bc.gpa, v);
+    var choosing = scrut != null;
+    const outer_binds = bc.body.when_binds;
+    defer bc.body.when_binds = outer_binds;
     for (arms, 0..) |arm_idx, arm_i| {
-        const skip = bc.enterArm(node_idx, @intCast(arm_i));
-        defer bc.untaken_arms -= skip;
         const arm = bc.tree.nodes[(arm_idx).int()];
         const h = Ast.armHeaderAt(bc.tree, (arm.rhs).int());
         const guarded = h.guard != Ast.none;
+        var bind: const_fold.Bind = undefined;
+        bc.body.when_binds = if (scrut) |v| const_fold.armBind(bc.cflow(), &bind, arm.lhs, v, outer_binds) else outer_binds;
+        const bound = bc.when_bound.items.len;
+        defer bc.when_bound.items.len = bound;
+        if (bc.body.when_binds == &bind) try bc.when_bound.append(bc.gpa, bind.slot);
         // Tested BEFORE this arm contributes, so the arm that COMPLETES coverage
         // (and the required int `_`) is reachable; only an arm reached while already
         // saturated by prior unguarded arms warns. Argument-free so per-generic-instance
@@ -105,18 +114,27 @@ pub fn typeOfMatch(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node) error{Out
             warned = true;
         }
         try checkPattern(bc, arm.lhs, st, &cov, &has_wildcard, !guarded);
+        var holds = true;
         if (guarded) {
             // A guard is a bool whatever the arms yield, so their expected type is no hint
             // for it (the scrutinee keeps it: `match n.try_into() { .ok(c) -> c, .. }`).
             const guard_mark = bc.sink.count();
             const gt = try bc.typeOfExpected(h.guard, null);
-            if (!BodyChecker.condFits(gt))
-                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0045 }, "{s} guard must be bool, got {f}", .{ bc.nameText(n.main_token), bc.fmtType(gt) })
-            else if (is_when and !bc.errorsSince(guard_mark)) switch (bc.model.whenCond(bc.graph_mod, h.guard)) {
-                .fold_error => |i| try bc.reportWhenError(i),
-                else => {},
-            };
+            if (!BodyChecker.condFits(gt)) {
+                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0045 }, "{s} guard must be bool, got {f}", .{ bc.nameText(n.main_token), bc.fmtType(gt) });
+                choosing = false;
+            } else if (is_when) {
+                if (try bc.foldWhenPart("guard", h.guard, guard_mark)) |g| {
+                    holds = g == .bool and g.bool;
+                } else choosing = false;
+            }
         }
+        if (choosing and holds and takes(bc.cflow(), arm.lhs, st, scrut.?)) {
+            bc.setCalleeAt(node_idx, Callee.whenArm(@intCast(arm_i)));
+            choosing = false;
+        }
+        const skip = bc.enterArm(node_idx, @intCast(arm_i));
+        defer bc.untaken_arms -= skip;
         const body_ty0 = try bc.typeOfArm(h.body, bc.body.expected, result);
         const body_ty: Type = if (armDiverges(bc, h.body)) Type.never else body_ty0;
         result = try bc.merge(n.main_token, result, body_ty);
@@ -150,45 +168,10 @@ fn reportUncovered(sink: *DiagnosticSink, gpa: std.mem.Allocator, span: Span, kw
     }
 }
 
-/// A `when`'s scrutinee and guards fold before the body pass; the first arm whose guard
-/// holds and whose pattern takes the scrutinee's value is the one lowering emits. A
-/// guard's fold error is reported once the guard is typed; the scrutinee's here, unless
-/// typing it reported an error (`scrut_errs`).
-fn chooseWhenArm(bc: *BodyChecker, node_idx: Ast.Index, n: Ast.Node, st: Type, scrut_errs: bool) error{OutOfMemory}!void {
-    const v = bc.model.whenCond(bc.graph_mod, node_idx);
-    var chosen: ?u32 = null;
-    var folded = true;
-    switch (v) {
-        .not_const => try bc.report(.{ .span = bc.spanOf(n.lhs), .code = .T0085 }, "when scrutinee is not known at compile time", .{}),
-        .fold_error => |i| if (!scrut_errs) try bc.reportWhenError(i),
-        else => {},
-    }
-    if (v == .not_const or v == .fold_error or v == .invalid) folded = false;
-    for (Ast.rangeSlice(bc.tree, n.rhs.int()), 0..) |arm_idx, i| {
-        const arm = bc.tree.nodes[arm_idx.int()];
-        const h = Ast.armHeaderAt(bc.tree, arm.rhs.int());
-        const guard_holds = h.guard == Ast.none or switch (bc.model.whenCond(bc.graph_mod, h.guard)) {
-            .bool => |b| b,
-            .not_const => blk: {
-                try bc.report(.{ .span = bc.spanOf(h.guard), .code = .T0085 }, "when guard is not known at compile time", .{});
-                folded = false;
-                break :blk false;
-            },
-            else => blk: {
-                folded = false;
-                break :blk false;
-            },
-        };
-        if (chosen == null and guard_holds and takes(bc.cflow(), arm.lhs, st, v)) chosen = @intCast(i);
-    }
-    if (!folded) return;
-    if (chosen) |arm| bc.setCalleeAt(node_idx, Callee.whenArm(arm));
-}
-
 /// Whether `pat` matches `v`, the folded value of a `when` scrutinee of type `ty`. A
 /// variant pattern takes only a payload it matches irrefutably, so for an enum this is
 /// also whether the pattern covers that variant.
-pub fn takes(ctx: ControlFlow.Ctx, pat_idx: Ast.Index, ty: Type, v: WhenCond) bool {
+pub fn takes(ctx: ControlFlow.Ctx, pat_idx: Ast.Index, ty: Type, v: Value) bool {
     const pat = ctx.tree.nodes[pat_idx.int()];
     const tok = ctx.tokens[pat.main_token];
     return switch (pat.tag) {
@@ -212,35 +195,6 @@ pub fn takes(ctx: ControlFlow.Ctx, pat_idx: Ast.Index, ty: Type, v: WhenCond) bo
         },
         else => false,
     };
-}
-
-/// T0048 at `span` when the unguarded arms of a `when` over a `ty` (enum, bool or int)
-/// in a constant's initializer leave a value out, as the body pass reports for a match.
-pub fn checkWhenCoverage(ctx: ControlFlow.Ctx, sink: *DiagnosticSink, gpa: std.mem.Allocator, span: Span, arms: []const Ast.Index, ty: Type) error{OutOfMemory}!bool {
-    var bool_cov: BoolCov = .{};
-    const variants: []const VariantSym = if (ty.kind == .@"enum") ctx.enums[ty.enum_id].variants else &.{};
-    const seen = try gpa.alloc(bool, variants.len);
-    defer gpa.free(seen);
-    @memset(seen, false);
-    var has_wildcard = false;
-    for (arms) |arm_idx| {
-        const arm = ctx.tree.nodes[arm_idx.int()];
-        if (Ast.armHeaderAt(ctx.tree, arm.rhs.int()).guard != Ast.none) continue;
-        if (ControlFlow.irrefutable(ctx, arm.lhs, ty)) has_wildcard = true;
-        for (seen, 0..) |*s, i| {
-            if (takes(ctx, arm.lhs, ty, .{ .variant = @intCast(i) })) s.* = true;
-        }
-        if (takes(ctx, arm.lhs, ty, .{ .bool = true })) bool_cov.t = true;
-        if (takes(ctx, arm.lhs, ty, .{ .bool = false })) bool_cov.f = true;
-    }
-    const cov: Cov = switch (ty.kind) {
-        .@"enum" => .{ .@"enum" = seen },
-        .bool => .{ .bool = &bool_cov },
-        else => .int,
-    };
-    if (has_wildcard or matchSaturated(cov, false)) return true;
-    try reportUncovered(sink, gpa, span, "when", cov, false, variants);
-    return false;
 }
 
 // Pattern irrefutability lives in `ControlFlow.zig` too (pure walks over the
@@ -593,4 +547,15 @@ test "pattern diagnostics span the pattern or binder list at fault" {
         .{ .src = "fn f(x: str) -> int { return match x { _ -> 1 } }\n", .key = "match scrutinee must be", .want = "x" },
         .{ .src = "enum E { a, b }\nfn f(e: E) -> int {\n return match e {\n  .a -> 1\n  .b -> 2\n  E.a -> 3\n }\n}\n", .key = "unreachable match arm", .want = "E.a" },
     });
+}
+
+test "a when arm binding holds its scrutinee's compile-time value, so nothing may change it" {
+    const C = @import("diagnostics/codes.zig").Code;
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    when 1 { n -> {\n        n = 5\n        K :=: n\n        K + n\n    } }\n}\n", &.{C.R0007});
+    try Typecheck.expectDiagCodes("L :=: 4\nfn f() -> int {\n    when L { n -> {\n        n += 1\n        when n > 3 { 10 } else { 20 } } }\n}\n", &.{C.R0007});
+    try Typecheck.expectDiagCodes("fn f() -> int {\n    when 1 { n -> {\n        g := fn() { n = 2 }\n        g()\n        n\n    } }\n}\n", &.{C.R0007});
+    try Typecheck.expectDiagCodes("fn bump(mut x: int) { x = x + 1 }\nfn f() -> int {\n    when 1 { n -> {\n        bump(n)\n        n\n    } }\n}\n", &.{C.R0007});
+    // A `match` binding is an ordinary local, and a `when` whose scrutinee has no value
+    // binds nothing to keep.
+    try Typecheck.expectDiagCodes("fn f(k: int) -> int {\n    match k { n -> {\n        n = 5\n        n\n    } }\n}\n", &.{});
 }

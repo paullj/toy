@@ -65,11 +65,12 @@ An integer literal takes the width it is expected to have and must fit it (**T00
 A negated literal is checked as the negative value it denotes: `-128` fits an `int8`,
 and `-1` fits no unsigned width (`v: uint8 = -1`, `id(-1)` with `fn id(x: uint8)` and
 `v: uint = -1` are T0034); only `-0` does. A constant built from literals alone (`-1`,
-`~1`, `1 + 2`, but not a shift) is a literal too: beside an operand of an integer type
-it takes that width, as a bare literal does (`b + -1` and `b += 1 + 2` with `b: int8`
-are `int8`), and its folded value must fit the width it takes (`c: int8 = 100 + 100` is
-T0034). One given no width (`x := 9223372036854775807 + 1`) is an `int` whose folded
-value is not checked when compiled (a debug build panics on it when it runs). On values, `+`, `-`, `*`, `/` and unary `-` panic on overflow in a
+`~1`, `1 + 2`, `1 << 3`) is a literal too: beside an operand of an integer type it
+takes that width, as a bare literal does (`b + -1` and `b += 1 + 2` with `b: int8` are
+`int8`). An integer expression made only of literals and [constants](#constants) is
+computed while compiling, and each step must fit its type: `c: int8 = 100 + 100`,
+`x := 9223372036854775807 + 1` and, with `A: uint8 =: 250`, `n := A + 10` are T0034,
+not a panic when the program runs. On values, `+`, `-`, `*`, `/` and unary `-` panic on overflow in a
 debug build and wrap at the operand width in a release build (see `profiles.md`), so
 two `int8` 100s add to -56 in release. Unary `-` on an unsigned value is `0 - u`
 (`u: uint8 = 1` then `-u` is 255 in release). The wrapping operators `+%`, `-%` and `*%`
@@ -259,16 +260,19 @@ pub DEFAULT: Mode =: .Fast
   and a float literal is `float`. `N: T =: e` checks `e` against `T`; a literal that
   does not fit `T` is **T0034**, and a value of another type is **T0041**. The token
   is `=:` in place of `=`, so the pair mirrors `x := e` / `x: T = e`.
-* The value must fold at compile time: literals (int, float, bool, char, str), other
+* The initializer is typed as any expression is, with the same rules and errors as in
+  a function body, and then its value must be known at compile time: literals (int,
+  float, bool, char, str), other
   constants, an enum's unit variant, and the integer, float, comparison and boolean
   operators over them, and a `when` over them (see [When](#when)). `<`, `<=`, `>` and
   `>=` fold over int, char, bool and str; over
   any other type, whose order is a user `Ord` impl, they are **T0083**. Each literal
   intermediate is range-checked at the declared width, as in a body, so
-  `N: uint8 =: 200 + 100 - 100` is **T0034**. A call (other than `compile_error`), a
-  struct literal, a `Vec`, a
+  `N: uint8 =: 200 + 100 - 100` is **T0034**, as is a left shift of a nonzero value by
+  the width or more, whatever the amount (`1 << 200`). A call (other than
+  `compile_error`), a struct literal, a `Vec`, a
   payload variant (or a variant of a generic enum, such as `Option[int].None`), a local
-  variable, a division by zero or a shift past the width is **T0083**, as is a local
+  variable or a division by zero is **T0083**, as is a local
   constant typed by its function's type parameter (`N: T =: 5`). A constant
   whose initializer reaches itself, directly or through other constants, is
   **T0084**; the error spells the cycle (`A -> B -> A`) at the use that closes it.
@@ -276,7 +280,9 @@ pub DEFAULT: Mode =: .Fast
   named everywhere in its module, in any order. A local one is named from its
   declaration to the end of its block, like a local variable, and may be named in a
   lambda or local function there without a capture. Its initializer is resolved
-  before the name is bound, so it cannot name itself. A local constant that hides an
+  before the name is bound, so it cannot name itself. A local constant is checked
+  where its block is, so one in an arm a `when` did not take may be a `compile_error`.
+  A local constant that hides an
   outer binding, or a local that hides a local constant, warns **W0009** as a
   shadowing variable does. Calling a constant is **T0055**.
 * `pub N :=: e` exports it: an importer names it `mod.N`, or selects it with

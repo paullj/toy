@@ -1824,12 +1824,8 @@ sealed_methods_len: usize = 0,
 /// function indices in source order, and so do we (Pass A below).
 fns: std.ArrayList(FnSym),
 
-/// The constant table, parallel to `Resolve`'s `constant` ids (`foldConsts`).
+/// The constant table, parallel to `Resolve`'s `constant` ids (`const_eval.checkAll`).
 consts: std.ArrayList(ConstSym) = .empty,
-/// Every `when`'s folded condition, by `const_eval.whenKey`.
-when_conds: std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = .empty,
-/// The errors `when_conds` entries name by `fold_error`. OWNS each `msg`.
-when_errors: std.ArrayList(const_eval.WhenError) = .empty,
 
 /// The struct table: one `StructSym` per struct id. The bare-name → global-id
 /// map lives per-module in the graph ctx (`activeStructMap`).
@@ -2125,10 +2121,9 @@ pub const Model = struct {
     enums: []const EnumSym,
     graph: *GraphCtx,
     gph_fn_names: ?[]const []const u8,
-    /// The folded constants by global const id, frozen before the body pass.
-    consts: []const ConstSym = &.{},
-    when_conds: *const std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = &empty_when_conds,
-    when_errors: []const const_eval.WhenError = &.{},
+    /// The checked constants by global const id. Not frozen: the const pass fills the
+    /// top-level ones and each body its own local ones, as it checks them.
+    consts: []ConstSym = &.{},
     /// The program-wide inherent-method table, frozen from Pass A. Read-only
     /// during the parallel body pass; drives `BodyChecker` method dispatch.
     methods: []const Method,
@@ -2160,16 +2155,9 @@ pub const Model = struct {
     pub fn preludeProtocols(model: *const Model) PreludeProtocolIds {
         return if (model.prelude) |p| p.protocols else .{};
     }
-
-    /// The folded condition of the `when` at `node` in module `mod`.
-    pub fn whenCond(model: *const Model, mod: u32, node: Ast.Index) const_eval.WhenCond {
-        return model.when_conds.get(const_eval.whenKey(mod, node)) orelse .invalid;
-    }
 };
 
 const BodyChecker = @import("BodyChecker.zig").BodyChecker;
-
-const empty_when_conds: std.AutoHashMapUnmanaged(u64, const_eval.WhenCond) = .empty;
 
 /// Freeze the Pass-A tables into a read-only `Model`. The slices alias the live
 /// `Typecheck` ArrayLists; valid for as long as those are not mutated (Pass C).
@@ -2181,8 +2169,6 @@ fn buildModel(t: *Typecheck) Model {
         .graph = t.graph,
         .gph_fn_names = t.gph_fn_names,
         .consts = t.consts.items,
-        .when_conds = &t.when_conds,
-        .when_errors = t.when_errors.items,
         .methods = t.methods.items,
         .templates = t.templates.items,
         .rejected_methods = t.rejected_methods.items,
@@ -2238,6 +2224,28 @@ fn bodyCheckerFor(t: *const Typecheck, model: *const Model, f: FnSym, slots: Nod
     // abstract `App`'s failing `type_var` as its source param name.
     bc.gph_generic_params = f.generic_params;
     bc.closures = Closure.findFn(mc.closures, f.decl_node);
+    return bc;
+}
+
+/// Construct a `BodyChecker` for a top-level constant's initializer in module `mod`,
+/// as `bodyCheckerFor` does for a fn: no params, no return type, no lambdas recorded.
+pub fn constCheckerFor(t: *const Typecheck, model: *const Model, mod: u32) BodyChecker {
+    const mc = &t.graph.mods[mod];
+    var bc: BodyChecker = .{
+        .model = model,
+        .gpa = t.gpa,
+        .tree = mc.tree,
+        .tokens = mc.tokens,
+        .source = mc.source,
+        .resolutions = mc.resolutions,
+        .node_types = t.gph_node_types.?[mod],
+        .callees = t.gph_callees.?[mod],
+        .graph_mod = mod,
+        .sink = DiagnosticSink.init(t.gpa),
+        .gph_fn_names = t.gph_fn_names,
+        .composite = t.composite,
+    };
+    bc.sink.setScope(mod);
     return bc;
 }
 
@@ -2438,9 +2446,6 @@ pub fn checkGraph(
         t.fns.deinit(gpa);
         const_eval.freeValues(gpa, t.consts.items);
         t.consts.deinit(gpa);
-        t.when_conds.deinit(gpa);
-        for (t.when_errors.items) |e| gpa.free(e.msg);
-        t.when_errors.deinit(gpa);
         // Any instances not transferred into the result (an error path) are freed
         // here; the success path empties `t.mono` via `toOwnedSlice` first.
         for (t.mono.items) |*inst| {
@@ -2912,7 +2917,10 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
         }
     }
 
-    try const_eval.foldAll(t);
+    const n_consts = t.graph.consts.len;
+    try t.consts.ensureTotalCapacity(t.gpa, n_consts);
+    t.consts.items.len = n_consts;
+    @memset(t.consts.items, const_eval.poison);
 
     // Phase A2: pub-signature coherence. A `pub` fn that names a NON-pub type in a
     // param/return position is an error (an importer could not name that type).
@@ -2957,6 +2965,7 @@ fn runGraph(t: *Typecheck, mods: []const GraphModuleInput, fns: []const GraphFnI
     // — the fan-out unit. The merge (concat + stable sort) happens once, serial,
     // after the join, so PARALLEL == SERIAL.
     const model = t.buildModel();
+    try const_eval.checkAll(t, &model);
     try t.checkBodies(&model);
 
     // Monomorphization tail: a SERIAL pass on the LIVE tables, after the
