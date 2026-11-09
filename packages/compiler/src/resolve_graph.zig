@@ -87,6 +87,8 @@ pub const GlobalConst = struct {
     /// The fn a local constant is declared in, whose type parameters are in scope at
     /// its type; `Ast.none` at top level.
     owner_fn: Ast.Index = Ast.none,
+    /// Declared in a block: a fn's, or one in a top-level initializer, which has no fn.
+    local: bool = false,
 };
 
 /// The whole-graph resolve output. Caller owns it; free with `deinit`.
@@ -1852,7 +1854,7 @@ const GraphResolve = struct {
         }
         try g.warnShadow(name, decl.main_token);
         const cid: u32 = @intCast(g.consts.items.len);
-        try g.consts.append(g.gpa, .{ .module = g.cur_mod, .decl_node = decl_idx, .is_pub = false, .owner_fn = g.cur_fn });
+        try g.consts.append(g.gpa, .{ .module = g.cur_mod, .decl_node = decl_idx, .is_pub = false, .owner_fn = g.cur_fn, .local = true });
         try scope.consts.put(g.gpa, name, cid);
     }
 
@@ -1955,12 +1957,20 @@ const GraphResolve = struct {
     /// uncalled method would false-positive. A recursive-only fn writes a `.func` at its
     /// self-call, so it is (correctly) not flagged. Emission walks `fns` in id order for a
     /// deterministic sink (resolveGraph is sequential; `-j1` == `-jN`).
-    fn warnUnusedFns(g: *GraphResolve) !void {
+    ///
+    /// The same sweep credits constants: a non-`pub` one that no `.constant` resolution
+    /// names warns as an unused binding, W0001 in a body and W0003 at top level, the way a
+    /// local `:=` and a top-level fn do.
+    fn warnUnusedDecls(g: *GraphResolve) !void {
         const called = try g.gpa.alloc(bool, g.fns.items.len);
         defer g.gpa.free(called);
         @memset(called, false);
+        const named = try g.gpa.alloc(bool, g.consts.items.len);
+        defer g.gpa.free(named);
+        @memset(named, false);
         for (g.resolutions) |modres| for (modres) |r| switch (r) {
             .func => |gid| called[gid] = true,
+            .constant => |cid| named[cid] = true,
             else => {},
         };
         for (g.fns.items, 0..) |f, gid| {
@@ -1971,6 +1981,17 @@ const GraphResolve = struct {
             if (name.len != 0 and name[0] == '_') continue;
             if (f.module == g.graph.entry_index and std.mem.eql(u8, name, "main")) continue;
             try g.sink.report(.{ .span = g.tokSpan(f.module, name_tok), .code = .W0003, .scope = f.module }, "unused function '{s}'; remove it, make it 'pub', or prefix with '_' to silence", .{name});
+        }
+        for (g.consts.items, 0..) |c, cid| {
+            if (c.is_pub or named[cid]) continue;
+            const name_tok = g.constNameTok(@intCast(cid));
+            const name = g.nameOf(c.module, name_tok);
+            if (name.len != 0 and name[0] == '_') continue;
+            const span = g.tokSpan(c.module, name_tok);
+            if (!c.local)
+                try g.sink.report(.{ .span = span, .code = .W0003, .scope = c.module }, "unused constant '{s}'; remove it, make it 'pub', or prefix with '_' to silence", .{name})
+            else
+                try g.sink.report(.{ .span = span, .code = .W0001, .scope = c.module }, "unused constant '{s}'; prefix with '_' (as '_{s}') to silence", .{ name, name });
         }
     }
 
@@ -2239,7 +2260,7 @@ pub fn resolveGraph(gpa: std.mem.Allocator, graph: *const Graph.Graph) !GraphRes
     try g.injectImportedTypes();
     for (0..n) |i| try g.resolveModule(@intCast(i));
 
-    try g.warnUnusedFns();
+    try g.warnUnusedDecls();
     try g.warnUnusedImports();
 
     const out_closures = try gpa.alloc([]Closure.FnClosures, n);
@@ -3147,6 +3168,75 @@ test "an uncalled private fn warns W0003 with its bare source name" {
         }
     };
     try withResolvedGraph(".toy-test-unused-fn", files, "main.toy", Check.run);
+}
+
+test "an unused private top-level const warns W0003; a pub, used or `_` one does not" {
+    const files = &[_]FixtureFile{
+        .{ .path = "main.toy", .source =
+        \\import lib/conf
+        \\UNUSED :=: 1
+        \\USED :=: 2
+        \\VIA_CONST :=: 3
+        \\BY_CONST :=: VIA_CONST + 1
+        \\_SILENT :=: 4
+        \\pub API :=: 5
+        \\fn main() -> int { return USED + BY_CONST + conf.N }
+        \\
+        },
+        .{ .path = "lib/conf.toy", .source =
+        \\pub N :=: 5
+        \\PRIVATE :=: 6
+        \\
+        },
+    };
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 2), countCode(r, .W0003));
+            var names: [2][]const u8 = undefined;
+            var i: usize = 0;
+            for (r.diags) |d| if (d.code == .W0003) {
+                names[i] = d.message;
+                i += 1;
+            };
+            const joined = try std.mem.concat(testing.allocator, u8, &names);
+            defer testing.allocator.free(joined);
+            try testing.expect(std.mem.indexOf(u8, joined, "unused constant 'UNUSED'") != null);
+            try testing.expect(std.mem.indexOf(u8, joined, "unused constant 'PRIVATE'") != null);
+        }
+    };
+    try withResolvedGraph(".toy-test-unused-const", files, "main.toy", Check.run);
+}
+
+test "an unused local const warns W0001, in a body or an initializer; a used or `_` one does not" {
+    const files = &[_]FixtureFile{.{ .path = "main.toy", .source =
+        \\fn main() -> int {
+        \\    K :=: 1
+        \\    L :=: 2
+        \\    _M :=: 3
+        \\    f := fn() -> int { J :=: 4
+        \\        return 0 }
+        \\    return L + f() + N
+        \\}
+        \\N :=: when true { 1 } else { Q :=: 3
+        \\    5 }
+        \\
+    }};
+    const Check = struct {
+        fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
+            _ = g;
+            try testing.expectEqual(@as(usize, 3), countCode(r, .W0001));
+            try testing.expectEqual(@as(usize, 0), countCode(r, .W0003));
+            var k = false;
+            var j = false;
+            for (r.diags) |d| if (d.code == .W0001) {
+                k = k or std.mem.indexOf(u8, d.message, "unused constant 'K'") != null;
+                j = j or std.mem.indexOf(u8, d.message, "unused constant 'J'") != null;
+            };
+            try testing.expect(k and j);
+        }
+    };
+    try withResolvedGraph(".toy-test-unused-local-const", files, "main.toy", Check.run);
 }
 
 test "a called private fn does not warn W0003" {

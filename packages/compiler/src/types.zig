@@ -617,6 +617,7 @@ pub const GraphConstInput = struct {
     module: u32,
     decl_node: Ast.Index,
     owner_fn: Ast.Index = Ast.none,
+    local: bool = false,
 };
 
 /// A constant's type and folded value, by global const id. A use lowers to `value`.

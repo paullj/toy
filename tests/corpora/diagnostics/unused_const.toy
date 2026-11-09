@@ -1,0 +1,14 @@
+# An unused constant warns as the binding of its scope does: a private top-level one as an
+# unused declaration (W0003, like a fn) and a local one as an unused binding (W0001, like a
+# `:=`). A `pub` one is API, a used or `_`-prefixed one is not reported.
+SPARE :=: 1  #~ WARN [W0003] unused constant 'SPARE'
+USED :=: 2
+_SILENT :=: 3
+pub API :=: 4
+
+fn main() -> int {
+    LIMIT :=: 5  #~ WARN [W0001] unused constant 'LIMIT'
+    STEP :=: 6
+    _QUIET :=: 7
+    return USED + STEP
+}
