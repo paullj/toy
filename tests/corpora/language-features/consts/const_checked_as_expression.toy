@@ -1,0 +1,28 @@
+# Feature: a const's initializer is typed as any expression is, a local const in a when
+# arm not taken may hold a compile_error, and an expression of literals and consts in a
+# body is computed while compiling.
+# expect: stdout "245\n16\n40\n"
+# expect: exit 3
+import std/io
+
+A: uint8 =: 250
+MASK: uint8 =: 1 << 4
+OS :=: 2
+SCALE :=: when OS { 1 -> 5, n -> n * 20 }
+
+fn pick() -> int {
+    when OS == 1 {
+        N :=: compile_error("only on os 2")
+        return N
+    }
+    K :=: 3
+    K
+}
+
+fn main() -> int {
+    n := A - 5
+    io.println(n)
+    io.println(MASK)
+    io.println(SCALE)
+    pick()
+}

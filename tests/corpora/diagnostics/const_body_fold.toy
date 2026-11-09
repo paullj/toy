@@ -1,0 +1,42 @@
+# An expression made only of literals and constants is a constant expression in a body
+# too: its value is computed while compiling, and one its type does not hold is an
+# error then, not a panic at run time. A local constant in a when arm not taken is
+# checked as the rest of that arm is: a compile_error there is no error.
+A: uint8 =: 250
+DEBUG :=: false
+
+fn sum() -> uint8 {
+    n := A + 10  #~ ERROR [T0034] constant value 260 out of range for type 'uint8'
+    n
+}
+
+fn negate() -> uint8 {
+    -A  #~ ERROR [T0034] constant value -250 out of range for type 'uint8'
+}
+
+fn literals() -> int8 {
+    100 + 100 - 100  #~ ERROR [T0034] literal out of range for type 'int8'
+}
+
+fn untaken() -> int {
+    when DEBUG {
+        N :=: compile_error("debug only")
+        SMALL: uint8 =: 300  #~ ERROR [T0034] literal out of range for type 'uint8'
+        return N
+    }
+    0
+}
+
+fn taken() -> int {
+    when !DEBUG {
+        N :=: compile_error("release")  #~ ERROR [T0086] release
+        return N
+    }
+    0
+}
+
+fn main() -> int {
+    _s := sum() + negate()
+    _l := literals()
+    untaken() + taken()
+}

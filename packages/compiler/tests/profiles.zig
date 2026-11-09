@@ -263,8 +263,8 @@ test "profiles: debug and release never reuse each other's cache entries or outp
 
 /// One function per checked operator, width and signedness, each called from `main` on
 /// the case its first argument names, so one build covers every case without -O1 folding
-/// the operands away. `folded` multiplies two literals with no width to range-check them
-/// against, which -O1 does fold.
+/// the operands away. `folded` multiplies a literal by a local holding one, which -O1
+/// folds; two literals alone would be a constant expression the checker rejects.
 const overflow_prog =
     \\import std/io
     \\import std/os
@@ -293,7 +293,8 @@ const overflow_prog =
     \\fn div(a: int, b: int) -> int { a / b }
     \\fn divby16(mut x: int16, d: int16) { x /= d }
     \\fn folded() -> int {
-    \\    x := 4 * 4611686018427387904
+    \\    a := 4
+    \\    x := a * 4611686018427387904
     \\    return x
     \\}
     \\fn main() {
