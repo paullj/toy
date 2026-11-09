@@ -96,8 +96,26 @@ pub fn calledExterns(a: std.mem.Allocator, graph: *const Graph.Graph, tc: *const
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     const untaken = try a.alloc(?std.DynamicBitSetUnmanaged, graph.modules.len);
     @memset(untaken, null);
+    const has_when = try a.alloc(?bool, graph.modules.len);
+    @memset(has_when, null);
+    var scanned: std.AutoHashMapUnmanaged(usize, void) = .empty;
     for (tc.bodies.items) |body| {
         const m = &graph.modules[body.mod];
+        if (has_when[body.mod] == null) has_when[body.mod] = for (m.tokens) |tok| {
+            if (tok.tag == .kw_when) break true;
+        } else false;
+        // With no `when` there is no untaken arm, so the callee table alone names every
+        // call; walking each body's tree for the arms cost check ~5% on large programs.
+        // A module's fns share its whole table, so each distinct table is scanned once.
+        if (!has_when[body.mod].?) {
+            const seen = try scanned.getOrPut(a, @intFromPtr(body.nodes.callees.ptr));
+            if (seen.found_existing) continue;
+            for (body.nodes.callees) |c| switch (c.view()) {
+                .direct => |gid| if (tc.sigs[gid].kind == .import) try names.put(a, tc.sigs[gid].name, {}),
+                else => {},
+            };
+            continue;
+        }
         if (untaken[body.mod] == null) untaken[body.mod] = try .initEmpty(a, m.nodes.len);
         var v: CallVisitor = .{
             .a = a,
