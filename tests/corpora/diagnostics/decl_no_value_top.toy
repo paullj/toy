@@ -1,0 +1,10 @@
+# A top-level const with no value on its line is an error at that line. The next
+# line is a declaration of its own, so its errors report too and a good one parses.
+A :=:  #~ ERROR [P0002] expected a value on the same line as the declaration
+C: int =:  #~ ERROR [P0002] expected a value on the same line as the declaration
+B :=: 3 4  #~ ERROR [P0004] expected a newline or '}' after statement
+E :=: 5
+
+fn main() -> int {
+    return E
+}

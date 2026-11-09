@@ -1,0 +1,17 @@
+# A local declaration with no value on its line is an error at that line, in each
+# of its forms. The next line is a statement of its own, so its errors report too. A
+# value that starts on the next line is no error.
+fn main() -> int {
+    a :=  #~ ERROR [P0002] expected a value on the same line as the declaration
+    b := 1 2  #~ ERROR [P0004] expected a newline or '}' after statement
+    c: int =  #~ ERROR [P0002] expected a value on the same line as the declaration
+    d: int = 3
+    E :=:  #~ ERROR [P0002] expected a value on the same line as the declaration
+    F: int =:  #~ ERROR [P0002] expected a value on the same line as the declaration
+    G :=: 4
+    h :=
+        5
+    I: int =:
+        6
+    return d + G + h + I
+}
