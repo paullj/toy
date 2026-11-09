@@ -187,7 +187,17 @@ test "an initializer that does not fold, fit or bind is one coded error, and poi
     try Typecheck.expectDiagCodes("K :=: 2\nfn f(n: int) -> int {\n    when K > 1 { 1 } else { n + true }\n}\n", &.{C.T0044});
     try Typecheck.expectDiagCodes("N :=: when true { 1 }\n", &.{C.T0059});
     try Typecheck.expectDiagCodes("N :=: when true { 1 } else { \"x\" }\n", &.{C.T0058});
+    try Typecheck.expectDiagCodes("N :=: when false { 1 } else { x := 2\n x }\n", &.{C.T0083});
     try Typecheck.expectDiagCodes("N :=: when true { 1 } else { x := 2\n x }\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("fn ten() -> int { 10 }\nN :=: when true { 1 } else { ten() }\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn ten() -> int { 10 }\nN :=: when X { .A -> 1, .B(x) -> x + ten() }\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn ten() -> int { 10 }\nN :=: when X { .A -> 1, .B(x) if x > ten() -> x, _ -> 2 }\n", &.{C.T0085});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f() -> int {\n    when X { .A -> 1, .B(z) -> { L :=: z\n L } }\n}\n", &.{C.T0083});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f(n: int) -> int {\n    when X { .A -> 1, .B(z) if z > n -> z, _ -> 5 }\n}\n", &.{C.T0085});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f(n: int) -> int {\n    when X { .A -> 1, .B(z) -> when z > n { z } else { 0 } }\n}\n", &.{C.T0085});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f() -> int {\n    when X { .A -> 1, .B(z) -> when z > 1 { z } else { 0 } }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f() -> int {\n    when X { .A -> 1, .B(z) if z > 1 -> z, _ -> 5 }\n}\n", &.{});
+    try Typecheck.expectDiagCodes("enum E { A, B(int) }\nX: E =: .A\nfn f() -> int {\n    when X { .B(z) if z > 1 -> z, _ -> 5 }\n}\n", &.{});
     try Typecheck.expectDiagCodes("A: uint8 =: 1\nN: uint8 =: when true { A } else { 256 }\n", &.{C.T0034});
     try Typecheck.expectDiagCodes("A: uint8 =: 1\nN :=: when true { A } else { 256 }\n", &.{C.T0058});
     try Typecheck.expectDiagCodes("enum E { A, B }\nN :=: when E.A { .A -> 1 }\n", &.{C.T0048});

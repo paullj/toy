@@ -5561,12 +5561,14 @@ pub const BodyChecker = struct {
     /// The value of a typed `when` `part` (condition, scrutinee or guard) at `node`, owned
     /// by the caller, or null after reporting why it has none: T0085 over the whole part,
     /// or the overflow that stopped it unless typing it reported an error since `mark`.
+    /// A part over a payload binding is null with no error: only an arm its `when` does
+    /// not take may hold it.
     pub fn foldWhenPart(bc: *BodyChecker, part: []const u8, node: Ast.Index, mark: usize) error{OutOfMemory}!?const_fold.Value {
         switch (try bc.fold(node)) {
             .value => |v| return v,
             .not_const => try bc.sink.report(.{ .span = bc.spanOf(node), .code = .T0085 }, "when {s} is not known at compile time", .{part}),
             .overflow => |o| if (!bc.errorsSince(mark)) try bc.reportOverflow(o),
-            .never, .poison => {},
+            .unknown, .never, .poison => {},
         }
         return null;
     }
@@ -5630,7 +5632,7 @@ pub const BodyChecker = struct {
         if (bc.errorsSince(mark) or ty.kind == .invalid or ty.kind == .never) return bc.recordConst(cid, const_eval.poison);
         switch (try bc.fold(decl.rhs)) {
             .value => |v| return bc.recordConst(cid, .{ .ty = ty, .value = v }),
-            .not_const => |at| try bc.report(.{ .span = bc.spanOf(at), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{name}),
+            .not_const, .unknown => |at| try bc.report(.{ .span = bc.spanOf(at), .code = .T0083 }, "the value of constant '{s}' is not known at compile time", .{name}),
             .overflow => |o| try bc.reportOverflow(o),
             .never, .poison => {},
         }
