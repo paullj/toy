@@ -1,0 +1,33 @@
+# Unary `-` on an unsigned value or constant is an error, at every width: its only
+# in-range result is 0. `0 -% x` is the wrapping negation. A negative literal for an
+# unsigned type stays T0034.
+A: uint8 =: 250
+
+fn neg8(x: uint8) -> uint8 {
+    -x  #~ ERROR [T0087] cannot negate unsigned type 'uint8'; use '0 -% x' to wrap
+}
+
+fn neg64(x: uint64) -> uint64 {
+    -x  #~ ERROR [T0087] cannot negate unsigned type 'uint64'
+}
+
+fn neg_const() -> uint8 {
+    -A  #~ ERROR [T0087] cannot negate unsigned type 'uint8'
+}
+
+fn neg_local_const() -> uint {
+    B: uint =: 3
+    -B  #~ ERROR [T0087] cannot negate unsigned type 'uint'
+}
+
+fn wrap(x: uint8) -> uint8 {
+    0 -% x
+}
+
+fn main() -> int {
+    v: uint8 = -1  #~ ERROR [T0034] literal out of range for type 'uint8'
+    _a := neg8(v) + neg_const() + wrap(v)
+    _b := neg64(1)
+    _c := neg_local_const()
+    0
+}

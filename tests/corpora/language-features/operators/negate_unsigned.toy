@@ -1,6 +1,6 @@
 # Feature: a negated zero literal fits an unsigned width and the signed min fits its
 # width (a nonzero negated literal into an unsigned width is T0034). Unary `-` on an
-# unsigned VALUE is `0 - u`, which overflows unless u is 0; `0 -% u` wraps at its width.
+# unsigned value is T0087; `0 -% u` is the negation that wraps at its width.
 fn main() -> int {
     a: uint8 = -0
     b: uint = -0x0

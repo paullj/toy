@@ -1,7 +1,7 @@
 # Feature: a debug build's overflow test fires only past the edge. Every `+`, `-`, `*` and
-# unary `-` here lands exactly on its type's min or max, at each width and signedness,
+# signed unary `-` here lands exactly on its type's min or max, at each width and signedness,
 # directly and through the compound forms, so none panics.
-# expect: stdout "127\n-128\n-127\n-128\n64\n255\n0\n255\n0\n32767\n-32768\n2147483647\n-2147483648\n4294967295\n0\n65535\n9223372036854775807\n-9223372036854775808\n-9223372036854775807\n-9223372036854775808\n18446744073709551615\n0\n18446744073709551615\n4294967296\n"
+# expect: stdout "127\n-128\n-127\n-128\n64\n255\n0\n255\n32767\n-32768\n2147483647\n-2147483648\n4294967295\n0\n65535\n9223372036854775807\n-9223372036854775808\n-9223372036854775807\n-9223372036854775808\n18446744073709551615\n0\n18446744073709551615\n4294967296\n"
 import std/io
 
 fn main() {
@@ -20,7 +20,6 @@ fn main() {
     io.println(u + z)
     io.println(z - z)
     io.println(k * 17)
-    io.println(-(z - z))
     h: int16 = 32766
     h += 1
     lo: int16 = -32767

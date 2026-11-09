@@ -277,7 +277,7 @@ const overflow_prog =
     \\fn addu8(a: uint8, b: uint8) -> uint8 { a + b }
     \\fn subu8(a: uint8, b: uint8) -> uint8 { a - b }
     \\fn mulu8(a: uint8, b: uint8) -> uint8 { a * b }
-    \\fn negu8(a: uint8) -> uint8 { -a }
+    \\fn negu8(a: uint8) -> uint8 { 0 -% a }
     \\fn add(a: int, b: int) -> int { a + b }
     \\fn sub(a: int, b: int) -> int { a - b }
     \\fn mul(a: int, b: int) -> int { a * b }
@@ -358,7 +358,7 @@ const overflow_cases = [_]struct { panic: ?[]const u8, wraps_to: []const u8 }{
     .{ .panic = "'+'", .wraps_to = "0" },
     .{ .panic = "'-'", .wraps_to = "255" },
     .{ .panic = "'*'", .wraps_to = "0" },
-    .{ .panic = "negation", .wraps_to = "255" },
+    .{ .panic = null, .wraps_to = "255" },
     .{ .panic = "'+'", .wraps_to = "-9223372036854775808" },
     .{ .panic = "'-'", .wraps_to = "9223372036854775807" },
     .{ .panic = "'*'", .wraps_to = "0" },
