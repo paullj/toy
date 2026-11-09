@@ -449,6 +449,35 @@ test "only the externs lowered code calls are imported, and only those are check
     });
 }
 
+test "core reads errno through when target.os: a macOS binary imports only __error" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const root = ".toy-test-ffi-errno";
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    const src =
+        \\import std/fs
+        \\
+        \\fn main() -> int {
+        \\    return match fs.read_file("no/such/file") {
+        \\        .ok(_) -> 1,
+        \\        .err(e) -> match e { .not_found -> 7, _ -> 2 },
+        \\    }
+        \\}
+        \\
+    ;
+    const w = try project(gpa, io, root, &.{.{ "main.toy", src }});
+    defer gpa.free(w);
+    try harness.buildIn(gpa, io, w, &.{ "build", "main.toy", "-o", "e" });
+    try std.testing.expectEqual(@as(u8, 7), try harness.runExitIn(gpa, io, w, "e"));
+    const image = try readIn(gpa, io, w, "e");
+    defer gpa.free(image);
+    try std.testing.expect(std.mem.indexOf(u8, image, "___error\x00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, image, "__errno_location") == null);
+}
+
 test "warm rebuild: a changed library set relinks, and equals a cold build" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});

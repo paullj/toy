@@ -1,6 +1,7 @@
 # The quarantined libSystem process clients: argv, the environment, errno, exit and the
 # clocks. C strings are copied into gc strs on the way in (D66), so no toy str ever points
 # into C memory that a later setenv or exit could free.
+import core/target
 import core/text
 
 pub extern fn _NSGetArgc() -> rawptr
@@ -11,6 +12,7 @@ pub extern fn getenv(name: rawptr) -> int
 pub extern fn strlen(s: rawptr) -> int
 pub extern fn exit(code: int) -> never
 pub extern fn __error() -> rawptr
+pub extern fn __errno_location() -> rawptr
 # Returns a uint64, which stays positive in an int for the next 292 years.
 pub extern fn clock_gettime_nsec_np(clock: int) -> int
 pub extern fn nanosleep(req: rawptr, rem: rawptr) -> int
@@ -77,7 +79,16 @@ pub fn cstr_to_str(c: cstr) -> str {
 
 # The calling thread's errno, as the last failed libSystem call left it.
 pub fn errno() -> int {
-    return load_i32(unsafe { __error() })
+    return load_i32(errno_loc())
+}
+
+# Both externs are always declared; only the taken arm is lowered, so a binary imports
+# just its own OS's symbol.
+pub fn errno_loc() -> rawptr {
+    return when target.os {
+        .macos -> unsafe { __error() },
+        .linux -> unsafe { __errno_location() },
+    }
 }
 
 # std cannot name an extern, so it ends the process through this wrapper.
