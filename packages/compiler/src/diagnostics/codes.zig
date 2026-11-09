@@ -153,7 +153,7 @@ pub const Code = enum(u16) {
     // Warning band (W####).
     W0001, // unused-variable
     W0002, // unused-parameter
-    W0003, // unused-function
+    W0003, // unused-declaration
     W0004, // unused-import
     W0005, // unreachable-code
     W0006, // unreachable-match-arm
@@ -314,7 +314,7 @@ pub const table = [_]Entry{
     .{ .code = .T0087, .str = "T0087", .slug = "unsigned-negation" },
     .{ .code = .W0001, .str = "W0001", .slug = "unused-variable", .default_severity = .warning },
     .{ .code = .W0002, .str = "W0002", .slug = "unused-parameter", .default_severity = .warning },
-    .{ .code = .W0003, .str = "W0003", .slug = "unused-function", .default_severity = .warning },
+    .{ .code = .W0003, .str = "W0003", .slug = "unused-declaration", .default_severity = .warning },
     .{ .code = .W0004, .str = "W0004", .slug = "unused-import", .default_severity = .warning },
     .{ .code = .W0005, .str = "W0005", .slug = "unreachable-code", .default_severity = .warning },
     .{ .code = .W0006, .str = "W0006", .slug = "unreachable-match-arm", .default_severity = .warning },
@@ -602,9 +602,9 @@ test "str/defaultSeverity/slug for none and a real code" {
     try testing.expectEqual(Severity.warning, defaultSeverity(.W0002));
     try testing.expectEqual(Code.W0002, fromStr("W0002").?);
 
-    // Unused-function warning code — sibling of W0001/W0002, also .warning by default.
+    // Unused-declaration warning code — sibling of W0001/W0002, also .warning by default.
     try testing.expectEqualStrings("W0003", str(.W0003).?);
-    try testing.expectEqualStrings("unused-function", slug(.W0003).?);
+    try testing.expectEqualStrings("unused-declaration", slug(.W0003).?);
     try testing.expectEqual(Severity.warning, defaultSeverity(.W0003));
     try testing.expectEqual(Code.W0003, fromStr("W0003").?);
 

@@ -62,7 +62,7 @@ test "docForStr resolves a known code and rejects garbage" {
     try testing.expect(std.mem.indexOf(u8, w2, "unused parameter") != null);
 
     const w3 = docForStr("W0003") orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, w3, "unused function") != null);
+    try testing.expect(std.mem.indexOf(u8, w3, "unused declaration") != null);
 
     const w4 = docForStr("W0004") orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, w4, "unused import") != null);

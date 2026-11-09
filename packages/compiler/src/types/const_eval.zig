@@ -54,7 +54,7 @@ pub fn checkAll(t: *Typecheck, model: *const Typecheck.Model) Error!void {
     var pass: ConstPass = .{ .t = t, .model = model, .state = state };
     defer pass.stack.deinit(t.gpa);
     for (t.graph.consts, 0..) |c, cid| {
-        if (c.owner_fn == Ast.none) try pass.check(@intCast(cid)) else try typeParamConst(t, c);
+        if (!c.local) try pass.check(@intCast(cid)) else if (c.owner_fn != Ast.none) try typeParamConst(t, c);
     }
 }
 
