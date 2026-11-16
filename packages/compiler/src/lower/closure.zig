@@ -13,8 +13,8 @@ const Closure = @import("../symbols/Closure.zig");
 const Spec = @import("../symbols/Spec.zig");
 const Link = @import("../link/Link.zig");
 const Ir = @import("../ir/Ir.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
-const GcLayout = @import("../codegen/abi/GcLayout.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
+const GcLayout = @import("../layout/GcLayout.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const Builder = L.Builder;
 const Inputs = L.Inputs;
@@ -400,7 +400,7 @@ pub fn lowerBoundValue(b: *Builder, node_idx: Ast.Index, mi: u32, ty: Typecheck.
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },
         .bound_copy => {
-            const env = try L.emitGcAlloc(b, @max(8, Abi.typeSize(recv_ty, b.in.layouts, b.in.enum_layouts)), try L.emitLayoutOf(b, recv_ty));
+            const env = try L.emitGcAlloc(b, @max(8, ValueLayout.typeSize(recv_ty, b.in.layouts, b.in.enum_layouts)), try L.emitLayoutOf(b, recv_ty));
             try L.lowerExprInto(b, n.lhs, env, recv_ty);
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },

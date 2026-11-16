@@ -9,6 +9,7 @@ const Mir = @import("../Mir.zig");
 const Link = @import("../../../link/Link.zig");
 const runtime = @import("../../runtime/runtime.zig");
 const Isa = @import("../../Isa.zig");
+const Target = @import("../../../Target.zig");
 pub const Inst = @import("Inst.zig");
 pub const Isel = @import("Isel.zig");
 pub const Emit = @import("Emit.zig");
@@ -18,6 +19,8 @@ const panic = @import("runtime/panic.zig");
 const str = @import("runtime/str.zig");
 
 pub const relocs: Link.Patcher = reloc.patcher;
+
+pub const c_abis = [_]Target.CAbi{ .aapcs64_apple, .aapcs64 };
 
 /// Every AArch64 instruction is one 4-byte word.
 pub fn instCount(code: []const u8) usize {
@@ -142,7 +145,7 @@ fn hasWord(fc: Link.FnCode, w: u32) bool {
 fn lowerOk(gpa: std.mem.Allocator, func: *const Ir.Function) !Link.FnCode {
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, func, &.{}, &.{}, false, false, &diags);
+    var fc = try lowerMir(gpa, func, &.{}, &.{}, .aapcs64_apple, false, false, &diags);
     errdefer fc.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items.len);
     return fc;
@@ -182,7 +185,7 @@ test "mir: a fn lowers through MIR with the x29 frame, its int params kept in th
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
-    var fl = try FrameLayout.compute(gpa, &func, &.{}, &.{});
+    var fl = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
     defer fl.deinit(gpa);
 
     var fc = try lowerOk(gpa, &func);
@@ -368,7 +371,7 @@ test "mir: a shape the selector does not cover is an internal-error diagnostic a
     func.values[1].type = Type.unit;
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
-    var fc = try lowerMir(gpa, &func, &.{}, &.{}, false, false, &diags);
+    var fc = try lowerMir(gpa, &func, &.{}, &.{}, .aapcs64_apple, false, false, &diags);
     defer fc.deinit(gpa);
     try testing.expectEqual(@as(usize, 1), diags.items.len);
     try testing.expect(std.mem.startsWith(u8, diags.items[0].message, "internal compiler error"));
@@ -407,7 +410,7 @@ test "mir: a frame that one value nearly fills says so, not too many locals" {
         defer func.deinit(gpa);
         var diags: std.ArrayList(Diagnostic) = .empty;
         defer diags.deinit(gpa);
-        var fc = try lowerMir(gpa, &func, &layouts, &.{}, false, false, &diags);
+        var fc = try lowerMir(gpa, &func, &layouts, &.{}, .aapcs64_apple, false, false, &diags);
         defer fc.deinit(gpa);
         try testing.expectEqual(@as(usize, 1), diags.items.len);
         try testing.expectEqualStrings(k.message, diags.items[0].message);
@@ -438,13 +441,13 @@ test "mir: a back edge carries the safepoint placeholder and emits no poll" {
     };
     defer func.deinit(gpa);
 
-    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, &.{}, &.{}) };
+    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{}) };
     defer frame.deinit(gpa);
     var mf = try Isel.newFunc(gpa, &func);
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .c_abi = .aapcs64_apple, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;
@@ -477,13 +480,13 @@ test "mir: a loop closed by a cond_br polls too" {
     };
     defer func.deinit(gpa);
 
-    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, &.{}, &.{}) };
+    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{}) };
     defer frame.deinit(gpa);
     var mf = try Isel.newFunc(gpa, &func);
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .c_abi = .aapcs64_apple, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;
@@ -580,7 +583,7 @@ test "a hand-built main links to an image that returns 42 (no front-end)" {
         .literals = try gpa.alloc(Link.Literal, 0),
     }};
 
-    const image = try @import("../../../link/emit.zig").emitExecutable(io, gpa, &@import("../../CodegenMir.zig").CodegenMir(@This()).backend, &fns, .{ .kind = .user_fn, .name = "main" }, .{ .identifier = "m" });
+    const image = try @import("../../../link/emit.zig").emitExecutable(io, gpa, &@import("../../CodegenMir.zig").CodegenMir(@This()).backends[0], &fns, .{ .kind = .user_fn, .name = "main" }, .{ .identifier = "m" });
     defer gpa.free(image);
 
     var tmp = testing.tmpDir(.{});

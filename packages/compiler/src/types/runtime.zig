@@ -416,8 +416,8 @@ test "the bundled collector takes what lower passes it" {
     try testing.expectEqual(@as(usize, 0), got.len);
 }
 
-test "the bundled collector's size classes are Abi.size_classes" {
-    const size_classes = @import("../codegen/abi/Abi.zig").size_classes;
+test "the bundled collector's size classes are ValueLayout.size_classes" {
+    const size_classes = @import("../layout/ValueLayout.zig").size_classes;
     const src = for (@import("bundled_std").modules) |m| {
         if (std.mem.eql(u8, m.path, "core/rt/gc")) break m.source;
     } else return error.TestUnexpectedResult;

@@ -1,5 +1,7 @@
 //! AArch64 (AAPCS64) calling-convention decisions — the ONE place that turns
-//! target-independent typed values into physical register/stack assignments
+//! target-independent typed values into physical register/stack assignments.
+//! Sizes and alignments come from the target-neutral `layout/ValueLayout.zig`; this
+//! module only places values. A C call follows the target's `CAbi`.
 //! The IR carries no registers, no frame offsets, no calling
 //! convention; this module decides reg-pair vs indirect, x8 sret, and the
 //! NGRN/NSAA walk, given only a `Type` slice + the read-only layout tables.
@@ -29,9 +31,15 @@
 //!     GPR (if NGRN<8) else 8 stack bytes.
 //!   * an indirect (>16B) RESULT uses x8 (the indirect-result register) which is
 //!     SEPARATE from the GPR arg sequence — it does NOT consume an NGRN.
+//!   * a C call (`Conv.c`) follows the target's `CAbi`. Apple's variant passes
+//!     every vararg on the stack in an 8-byte slot and packs a stack argument at
+//!     its C size; standard AAPCS64 places varargs as fixed args and gives every
+//!     stack argument an 8-byte slot.
 
 const std = @import("std");
 const Typecheck = @import("../../types.zig");
+const ValueLayout = @import("../../layout/ValueLayout.zig");
+const Target = @import("../../Target.zig");
 
 const Abi = @This();
 
@@ -59,87 +67,6 @@ pub const num_fp_args: u32 = 8;
 ///                  `never`/`invalid`), so only a genuine unit value is placed here.
 pub const AbiClass = enum { scalar, fp, reg_pair, indirect, zero };
 
-/// The allocator's size-class ladder (bytes). `gc_alloc` rounds a small request up to
-/// the first class `>= size`; a request past the last class is a large object. The one
-/// authority for the taxonomy — the collector (`core/rt/gc.toy`) mirrors it, which a test in
-/// `types/runtime.zig` pins, and `sizeClassFor` derives a type's static class from it, so
-/// the descriptor and the allocator agree.
-pub const size_classes = [_]u16{ 16, 32, 48, 64, 96, 128, 192, 256, 512, 1024, 2048, 4096, 8192 };
-
-/// The static allocation size class for `size`: the first ladder class `>= size`, or `0`
-/// (the large-object marker — a direct span-aligned mmap, no class arena) when `size`
-/// exceeds the largest class.
-pub fn sizeClassFor(size: u32) u16 {
-    for (size_classes) |cls| if (size <= cls) return cls;
-    return 0;
-}
-
-/// The static per-type descriptor the allocator / a later precise-tracing milestone reads:
-/// the type's byte size, its natural alignment, and its allocation size class. A pure
-/// function of the layout snapshot; provisioned minimally (its runtime consumer is a later
-/// milestone).
-pub const Descriptor = struct { size: u32, @"align": u32, size_class: u16 };
-
-/// The `Descriptor` for a reified type over the layout snapshot.
-pub fn descriptorFor(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) Descriptor {
-    const size = typeSize(ty, layouts, enum_layouts);
-    return .{ .size = size, .@"align" = typeAlign(ty, layouts, enum_layouts), .size_class = sizeClassFor(size) };
-}
-
-/// Byte layout of the emitted per-type descriptor RECORD: a fixed `stride`-byte, all-8-byte
-/// little-endian record `{size, align, size_class, hash_off, eq_off}`, where each `*_off` is
-/// an erased unit's `__text` byte offset (0 = absent). This is the SINGLE authority for those
-/// offsets: `link.buildDescTable` writes them and `link.emit` reserves table entries by
-/// `stride`. The `.toy` runtime hard-codes the same numbers and cannot import this authority
-/// (no Zig consts in `.toy`) — the `descriptor record layout` test below pins the mirror.
-pub const desc = struct {
-    pub const size_off: u32 = 0;
-    pub const align_off: u32 = 8;
-    pub const size_class_off: u32 = 16;
-    pub const hash_off: u32 = 24;
-    pub const eq_off: u32 = 32;
-    pub const stride: u32 = 40;
-};
-
-test "descriptor record layout is five contiguous 8-byte fields the .toy runtime mirrors" {
-    // Each field is 8 bytes, so every offset is the previous + 8 and `stride` closes the record.
-    try std.testing.expectEqual(@as(u32, 0), desc.size_off);
-    try std.testing.expectEqual(desc.size_off + 8, desc.align_off);
-    try std.testing.expectEqual(desc.align_off + 8, desc.size_class_off);
-    try std.testing.expectEqual(desc.size_class_off + 8, desc.hash_off);
-    try std.testing.expectEqual(desc.hash_off + 8, desc.eq_off);
-    try std.testing.expectEqual(desc.eq_off + 8, desc.stride);
-    // The `.toy` runtime hard-codes these exact byte offsets. If a change here trips this
-    // assertion, update the mirrors before shipping:
-    //   core/mem.toy  (mp_find/mp_set/mp_grow): `load(offset(dp, 24))` = hash, `(dp, 32)` = eq
-    //   core/desc_selftest.toy: the same hash@24 / eq@32 descriptor reads
-    try std.testing.expectEqual(@as(u32, 24), desc.hash_off);
-    try std.testing.expectEqual(@as(u32, 32), desc.eq_off);
-    try std.testing.expectEqual(@as(u32, 40), desc.stride);
-}
-
-/// Byte size of a type (int/bool 8, str 16, struct/enum → its layout size).
-pub fn typeSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
-    return switch (ty.kind) {
-        .int, .bool, .float, .rawptr, .cstr => 8,
-        .str => 16,
-        .@"struct" => layouts[ty.struct_id].size,
-        .@"enum" => enum_layouts[ty.enum_id].size,
-        else => 0,
-    };
-}
-
-/// Natural alignment of a type (8 for scalars/str; a struct/enum's layout
-/// alignment).
-pub fn typeAlign(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) u32 {
-    return switch (ty.kind) {
-        .int, .bool, .float, .str, .rawptr, .cstr => 8,
-        .@"struct" => layouts[ty.struct_id].@"align",
-        .@"enum" => enum_layouts[ty.enum_id].@"align",
-        else => 1,
-    };
-}
-
 /// Whether a type is a value AGGREGATE (str / struct / enum) — passed in a reg
 /// pair (<=16B) or indirect+x8 (>16B), copied by bytes.
 pub fn isAggregate(ty: Type) bool {
@@ -164,7 +91,7 @@ pub fn classify(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLay
     // `.float`) correctly stays on the GPR reg-pair/indirect path.
     if (ty.kind == .float) return .fp;
     if (!isAggregate(ty)) return .scalar;
-    return if (typeSize(ty, layouts, enum_layouts) <= 16) .reg_pair else .indirect;
+    return if (ValueLayout.typeSize(ty, layouts, enum_layouts) <= 16) .reg_pair else .indirect;
 }
 
 /// Where one parameter (or one outbound call argument) lives per AAPCS64. The
@@ -225,7 +152,7 @@ pub fn classifyRet(ty: Type, layouts: []const Layout, enum_layouts: []const Enum
     switch (classify(ty, layouts, enum_layouts)) {
         .scalar => return .{ .reg = .{ .regs = 1 } },
         .fp => return .fp_reg,
-        .reg_pair => return .{ .reg = .{ .regs = @intCast(eightbytes(typeSize(ty, layouts, enum_layouts))) } },
+        .reg_pair => return .{ .reg = .{ .regs = @intCast(eightbytes(ValueLayout.typeSize(ty, layouts, enum_layouts))) } },
         .indirect => return .sret,
         // Unreachable in practice (the `.unit` early-out above), but the switch
         // must stay exhaustive over `AbiClass`.
@@ -251,6 +178,7 @@ fn walkAbi(
     enum_layouts: []const EnumLayout,
 ) u32 {
     std.debug.assert(out_locs.len == types_.len);
+    const rules = rulesOf(conv);
     var ngrn: u32 = 0;
     // NSRN is the SIMD&FP arg counter — INDEPENDENT of NGRN. A float consumes
     // only NSRN; an int/bool/aggregate consumes only NGRN. Structural: the `.fp`
@@ -259,8 +187,8 @@ fn walkAbi(
     var nsaa: u32 = 0;
     for (types_, 0..) |ty, i| {
         // Apple arm64 passes every C vararg on the stack in its own 8-byte slot, never in a
-        // register, whatever registers are left (unlike standard AAPCS64).
-        if (i >= fixed) {
+        // register, whatever registers are left; standard AAPCS64 places them as fixed args.
+        if (i >= fixed and rules == .aapcs64_apple) {
             nsaa = std.mem.alignForward(u32, nsaa, 8);
             out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = 8 } };
             nsaa += 8;
@@ -269,7 +197,7 @@ fn walkAbi(
         // An extern struct passed to C goes in its C layout (AAPCS64 B.2-B.4, C.2-C.4):
         // a homogeneous float aggregate in V-registers, else its C size picks a GPR run
         // or a pointer to a copy. A struct that does not fit whole goes to the stack.
-        if (conv == .c and isCStruct(ty, layouts)) {
+        if (rules != .toy and isCStruct(ty, layouts)) {
             const size = cLayout(ty, layouts).size;
             if (hfaOf(ty, layouts)) |h| {
                 if (nsrn + h.count <= num_fp_args) {
@@ -313,10 +241,7 @@ fn walkAbi(
                     out_locs[i] = .{ .fpr = @intCast(nsrn) };
                     nsrn += 1;
                 } else {
-                    const bytes: u32 = switch (conv) {
-                        .toy => 8,
-                        .c => cScalarSize(ty),
-                    };
+                    const bytes = stackBytes(rules, ty);
                     nsaa = std.mem.alignForward(u32, nsaa, bytes);
                     out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = bytes } };
                     nsaa += bytes;
@@ -332,7 +257,7 @@ fn walkAbi(
                 }
             },
             .reg_pair => {
-                const ebs = eightbytes(typeSize(ty, layouts, enum_layouts));
+                const ebs = eightbytes(ValueLayout.typeSize(ty, layouts, enum_layouts));
                 if (ngrn + ebs <= num_gpr_args) {
                     out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = @intCast(ebs) } };
                     ngrn += ebs;
@@ -349,10 +274,7 @@ fn walkAbi(
                     out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = 1 } };
                     ngrn += 1;
                 } else {
-                    const bytes: u32 = switch (conv) {
-                        .toy => 8,
-                        .c => cScalarSize(ty),
-                    };
+                    const bytes = stackBytes(rules, ty);
                     nsaa = std.mem.alignForward(u32, nsaa, bytes);
                     out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = bytes } };
                     nsaa += bytes;
@@ -363,11 +285,36 @@ fn walkAbi(
     return nsaa;
 }
 
-/// Whose calling convention a call follows. Toy functions give every stack argument
-/// an 8-byte slot. A C function follows Apple's arm64 variant of AAPCS64, which packs
-/// a stack argument at its own size and alignment. Toy defines C-callable functions only
-/// as the adapters a C callback goes through.
-pub const Conv = enum { toy, c };
+/// Whose calling convention a call follows: toy's own, or the target's C one. Toy defines
+/// C-callable functions only as the adapters a C callback goes through.
+pub const Conv = union(enum) {
+    toy,
+    c: CAbi,
+};
+
+/// The C calling convention of a target (`Target.cAbi`).
+pub const CAbi = Target.CAbi;
+
+/// The placement rules a convention follows on aarch64.
+const Rules = enum { toy, aapcs64_apple, aapcs64 };
+
+fn rulesOf(conv: Conv) Rules {
+    return switch (conv) {
+        .toy => .toy,
+        .c => |a| switch (a) {
+            .aapcs64_apple => .aapcs64_apple,
+            .aapcs64 => .aapcs64,
+            // x86_64's convention arrives with its ISA (#60 C3); no aarch64 target picks it.
+            .sysv64 => @panic("internal compiler error: the sysv64 C ABI is not implemented"),
+        },
+    };
+}
+
+/// The bytes a scalar argument takes on the stack. Toy and standard AAPCS64 give each its
+/// own 8-byte slot; Apple packs a C argument at its own size and alignment.
+fn stackBytes(rules: Rules, ty: Type) u32 {
+    return if (rules == .aapcs64_apple) cScalarSize(ty) else 8;
+}
 
 /// The bytes a scalar takes as a C argument on the stack or as a C struct field: a narrow
 /// int its width, a `bool` one byte (C `_Bool`), a `float32` four, everything else 8.
@@ -434,7 +381,7 @@ pub fn planParamsConv(
 
 /// Whether a function returning `ret` under `conv` gets its result buffer in x8.
 pub fn retIsSret(conv: Conv, ret: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) bool {
-    if (conv == .c and isCStruct(ret, layouts)) return cRet(ret, layouts) == .sret;
+    if (rulesOf(conv) != .toy and isCStruct(ret, layouts)) return cRet(ret, layouts) == .sret;
     return classifyRet(ret, layouts, enum_layouts) == .sret;
 }
 
@@ -766,7 +713,7 @@ test "planCall: >=9 scalar args overflow to the stack (NSAA)" {
     try testing.expect(!plan.sret_in_x8);
 }
 
-test "planCallConv .c: stack args past x7 pack at their own size and alignment" {
+test "aapcs64_apple: stack args past x7 pack at their own size and alignment" {
     const gpa = testing.allocator;
     const ls: []const Layout = &.{};
     const el: []const EnumLayout = &.{};
@@ -774,7 +721,7 @@ test "planCallConv .c: stack args past x7 pack at their own size and alignment" 
     const i16_: Type = .{ .kind = .int, .int_desc = .{ .width = .w16 } };
     const i32_: Type = .{ .kind = .int, .int_desc = .{ .width = .w32 } };
     const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, i8_, i16_, i8_, i32_, Type.bool, Type.int };
-    var plan = try planCallConv(gpa, .c, &args, args.len, Type.int, ls, el);
+    var plan = try planCallConv(gpa, apple, &args, args.len, Type.int, ls, el);
     defer plan.deinit(gpa);
     const want = [_][2]u32{ .{ 0, 1 }, .{ 2, 2 }, .{ 4, 1 }, .{ 8, 4 }, .{ 12, 1 }, .{ 16, 8 } };
     for (want, 8..) |w, i| {
@@ -788,12 +735,12 @@ test "planCallConv .c: stack args past x7 pack at their own size and alignment" 
     try testing.expectEqual(@as(u32, 48), toy.nsaa_bytes);
 }
 
-test "planCallConv .c: varargs each take an 8-byte stack slot, ints and floats alike, with registers left" {
+test "aapcs64_apple: varargs each take an 8-byte stack slot, ints and floats alike, with registers left" {
     const gpa = testing.allocator;
     const ls: []const Layout = &.{};
     const el: []const EnumLayout = &.{};
     const args = [_]Type{ Type.cstr, Type.int, Type.float, Type.cstr, Type.int };
-    var plan = try planCallConv(gpa, .c, &args, 1, Type.int32, ls, el);
+    var plan = try planCallConv(gpa, apple, &args, 1, Type.int32, ls, el);
     defer plan.deinit(gpa);
     try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
     for (1..args.len) |i| {
@@ -802,10 +749,13 @@ test "planCallConv .c: varargs each take an 8-byte stack slot, ints and floats a
     }
     try testing.expectEqual(@as(u32, 32), plan.nsaa_bytes);
 
-    var none = try planCallConv(gpa, .c, args[0..1], 1, Type.int32, ls, el);
+    var none = try planCallConv(gpa, apple, args[0..1], 1, Type.int32, ls, el);
     defer none.deinit(gpa);
     try testing.expectEqual(@as(u32, 0), none.nsaa_bytes);
 }
+
+const apple: Conv = .{ .c = .aapcs64_apple };
+const standard: Conv = .{ .c = .aapcs64 };
 
 fn cStruct(name: []const u8, fields: []const Type) Layout {
     return .{ .name = name, .field_names = &.{}, .field_types = @constCast(fields), .offsets = &.{}, .size = @intCast(fields.len * 8), .@"align" = 8, .is_extern = true };
@@ -832,7 +782,7 @@ test "cLayout: C alignment and padding, nested extern structs" {
     try testing.expectEqual(CRet.sret, cRet(Type.structT(4), &ls));
 }
 
-test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest whole on the stack" {
+test "aapcs64_apple: extern structs by C size, HFAs in V-registers, the rest whole on the stack" {
     const gpa = testing.allocator;
     const pair = [_]Type{ Type.int, Type.int32, Type.bool };
     const vec4d = [_]Type{ Type.float, Type.float, Type.float, Type.float };
@@ -842,7 +792,7 @@ test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest w
     const el: []const EnumLayout = &.{};
     const i = Type.int;
     const args = [_]Type{ i, i, i, i, i, i, i, Type.structT(0), Type.structT(1), Type.structT(1), Type.structT(2), Type.structT(3) };
-    var plan = try planCallConv(gpa, .c, &args, args.len, Type.structT(3), &ls, el);
+    var plan = try planCallConv(gpa, apple, &args, args.len, Type.structT(3), &ls, el);
     defer plan.deinit(gpa);
     try testing.expectEqual(@as(u32, 0), plan.locs[7].stack.nsaa_off);
     try testing.expectEqual(@as(u32, 16), plan.locs[7].stack.bytes);
@@ -855,13 +805,13 @@ test "planCallConv .c: extern structs by C size, HFAs in V-registers, the rest w
     try testing.expect(plan.sret_in_x8);
 
     const fl = [_]Type{ Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32 };
-    var fp = try planCallConv(gpa, .c, &fl, fl.len, Type.float32, &ls, el);
+    var fp = try planCallConv(gpa, apple, &fl, fl.len, Type.float32, &ls, el);
     defer fp.deinit(gpa);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.nsaa_off);
     try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.bytes);
 }
 
-test "planParamsConv .c: a C callback's params arrive as a C call places them; its sret by C size" {
+test "aapcs64_apple: a C callback's params arrive as a C call places them; its sret by C size" {
     const gpa = testing.allocator;
     // C size 12 (x registers), toy size 24 (which toy would return through x8).
     const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
@@ -869,9 +819,9 @@ test "planParamsConv .c: a C callback's params arrive as a C call places them; i
     const el: []const EnumLayout = &.{};
     const i = Type.int;
     const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
-    var c = try planParamsConv(gpa, .c, &params, Type.structT(0), &ls, el);
+    var c = try planParamsConv(gpa, apple, &params, Type.structT(0), &ls, el);
     defer c.deinit(gpa);
-    var call = try planCallConv(gpa, .c, &params, params.len, Type.structT(0), &ls, el);
+    var call = try planCallConv(gpa, apple, &params, params.len, Type.structT(0), &ls, el);
     defer call.deinit(gpa);
     for (c.locs, call.locs) |p, a| try testing.expectEqualDeep(a, p);
     try testing.expectEqual(@as(u32, 1), c.locs[8].stack.bytes);
@@ -931,30 +881,6 @@ test "planCall: aggregate return sets sret_in_x8" {
     // the result does not consume a GPR; the int arg is still x0.
     try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
     try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-}
-
-test "sizeClassFor: rounds up to the first class, large past the ladder marks 0" {
-    try testing.expectEqual(@as(u16, 16), sizeClassFor(8)); // scalar → smallest class
-    try testing.expectEqual(@as(u16, 16), sizeClassFor(16)); // exact boundary
-    try testing.expectEqual(@as(u16, 32), sizeClassFor(17)); // just over → next class
-    try testing.expectEqual(@as(u16, 48), sizeClassFor(48)); // a non-pow2 class, exact
-    try testing.expectEqual(@as(u16, 8192), sizeClassFor(8192)); // the last class, exact
-    try testing.expectEqual(@as(u16, 0), sizeClassFor(8193)); // past the ladder → large marker
-}
-
-test "descriptorFor: reads size/align off the layout, classes by size" {
-    const gpa = testing.allocator;
-    const ls = try mkLayouts(gpa, &.{24}); // struct#0 is 24 bytes, align 8
-    defer gpa.free(ls);
-    const el: []const EnumLayout = &.{};
-    const d = descriptorFor(structOf(0), ls, el);
-    try testing.expectEqual(@as(u32, 24), d.size);
-    try testing.expectEqual(@as(u32, 8), d.@"align");
-    try testing.expectEqual(@as(u16, 32), d.size_class);
-    // A bare int: 8 bytes, align 8, smallest class.
-    const di = descriptorFor(Type.int, &.{}, el);
-    try testing.expectEqual(@as(u32, 8), di.size);
-    try testing.expectEqual(@as(u16, 16), di.size_class);
 }
 
 test "classify: unit is zero" {
@@ -1029,4 +955,113 @@ test "planCall: no args -> empty locs, zero nsaa" {
 
     try testing.expectEqual(@as(usize, 0), plan.locs.len);
     try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
+}
+
+test "aapcs64: varargs take registers like fixed args, then 8-byte stack slots" {
+    const gpa = testing.allocator;
+    const ls: []const Layout = &.{};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const args = [_]Type{ Type.cstr, i, Type.float, Type.cstr, Type.float32, i, i, i, i, i, Type.int8, Type.float };
+    var plan = try planCallConv(gpa, standard, &args, 1, Type.int32, ls, el);
+    defer plan.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
+    try testing.expectEqual(@as(u8, 1), plan.locs[1].gpr.first);
+    try testing.expectEqual(@as(u8, 0), plan.locs[2].fpr);
+    try testing.expectEqual(@as(u8, 2), plan.locs[3].gpr.first);
+    try testing.expectEqual(@as(u8, 1), plan.locs[4].fpr);
+    for (5..9, 3..) |k, r| try testing.expectEqual(@as(u8, @intCast(r)), plan.locs[k].gpr.first);
+    try testing.expectEqual(@as(u8, 7), plan.locs[9].gpr.first);
+    try testing.expectEqual(@as(u32, 0), plan.locs[10].stack.nsaa_off);
+    try testing.expectEqual(@as(u32, 8), plan.locs[10].stack.bytes);
+    try testing.expectEqual(@as(u8, 2), plan.locs[11].fpr);
+    try testing.expectEqual(@as(u32, 8), plan.nsaa_bytes);
+}
+
+test "aapcs64: more than 8 int or float args spill to 8-byte stack slots" {
+    const gpa = testing.allocator;
+    const ls: []const Layout = &.{};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const ints = [_]Type{ i, i, i, i, i, i, i, i, Type.int32, i };
+    var ip = try planCallConv(gpa, standard, &ints, ints.len, i, ls, el);
+    defer ip.deinit(gpa);
+    for (0..8) |k| try testing.expectEqual(@as(u8, @intCast(k)), ip.locs[k].gpr.first);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, ip.locs[8]);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 8 } }, ip.locs[9]);
+    try testing.expectEqual(@as(u32, 16), ip.nsaa_bytes);
+
+    const f = Type.float32;
+    const floats = [_]Type{ f, f, f, f, f, f, f, f, f, Type.float };
+    var fp = try planCallConv(gpa, standard, &floats, floats.len, f, ls, el);
+    defer fp.deinit(gpa);
+    for (0..8) |k| try testing.expectEqual(@as(u8, @intCast(k)), fp.locs[k].fpr);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, fp.locs[8]);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 8 } }, fp.locs[9]);
+    try testing.expectEqual(@as(u32, 16), fp.nsaa_bytes);
+}
+
+test "aapcs64: small ints on the stack each take an 8-byte slot" {
+    const gpa = testing.allocator;
+    const ls: []const Layout = &.{};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const args = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.int16, Type.uint8, Type.int32, Type.bool, i };
+    var plan = try planCallConv(gpa, standard, &args, args.len, i, ls, el);
+    defer plan.deinit(gpa);
+    for (8..args.len) |k| try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = @intCast((k - 8) * 8), .bytes = 8 } }, plan.locs[k]);
+    try testing.expectEqual(@as(u32, 48), plan.nsaa_bytes);
+}
+
+test "aapcs64: HFAs in V-registers, a 16-byte pair in x registers or whole on the stack, larger structs indirect, sret by C size" {
+    const gpa = testing.allocator;
+    const pair = [_]Type{ Type.int, Type.int32, Type.bool };
+    const vec4d = [_]Type{ Type.float, Type.float, Type.float, Type.float };
+    const vec2f = [_]Type{ Type.float32, Type.float32 };
+    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
+    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
+    const ls = [_]Layout{ cStruct("Pair", &pair), cStruct("Vec4d", &vec4d), cStruct("Vec2f", &vec2f), cStruct("Big", &big), cStruct("Three", &three) };
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const pair_t = Type.structT(0);
+    const big_t = Type.structT(3);
+
+    const fits = [_]Type{ pair_t, big_t, i, i, i, i, Type.structT(1), Type.structT(2) };
+    var a = try planCallConv(gpa, standard, &fits, fits.len, big_t, &ls, el);
+    defer a.deinit(gpa);
+    try testing.expectEqual(ParamLoc{ .gpr = .{ .first = 0, .count = 2 } }, a.locs[0]);
+    try testing.expectEqual(ParamLoc{ .gpr_ptr = 2 }, a.locs[1]);
+    try testing.expectEqual(ParamLoc{ .fpr_run = .{ .first = 0, .count = 4, .single = false } }, a.locs[6]);
+    try testing.expectEqual(ParamLoc{ .fpr_run = .{ .first = 4, .count = 2, .single = true } }, a.locs[7]);
+    try testing.expect(a.sret_in_x8);
+    try testing.expectEqual(@as(u32, 0), a.nsaa_bytes);
+
+    const spills = [_]Type{ i, i, i, i, i, i, i, pair_t, Type.structT(1), Type.structT(1), Type.structT(2), big_t };
+    var b = try planCallConv(gpa, standard, &spills, spills.len, Type.structT(4), &ls, el);
+    defer b.deinit(gpa);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 16 } }, b.locs[7]);
+    try testing.expectEqual(@as(u8, 0), b.locs[8].fpr_run.first);
+    try testing.expectEqual(@as(u8, 4), b.locs[9].fpr_run.first);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 16, .bytes = 8 } }, b.locs[10]);
+    try testing.expectEqual(ParamLoc{ .stack_ptr = 24 }, b.locs[11]);
+    try testing.expectEqual(@as(u32, 32), b.nsaa_bytes);
+    try testing.expect(!b.sret_in_x8);
+}
+
+test "aapcs64: a C callback's params arrive where a C call puts them" {
+    const gpa = testing.allocator;
+    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
+    const ls = [_]Layout{cStruct("Three", &three)};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.float32, Type.structT(0) };
+    var p = try planParamsConv(gpa, standard, &params, Type.structT(0), &ls, el);
+    defer p.deinit(gpa);
+    var c = try planCallConv(gpa, standard, &params, params.len, Type.structT(0), &ls, el);
+    defer c.deinit(gpa);
+    for (p.locs, c.locs) |x, y| try testing.expectEqualDeep(y, x);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, p.locs[8]);
+    try testing.expectEqual(@as(u8, 0), p.locs[9].fpr);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 16 } }, p.locs[10]);
+    try testing.expect(!p.sret_in_x8);
 }

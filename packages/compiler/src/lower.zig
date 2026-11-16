@@ -39,8 +39,8 @@ const Spec = @import("symbols/Spec.zig");
 const LayoutEngine = @import("layout/Engine.zig");
 const Link = @import("link/Link.zig");
 const Ir = @import("ir/Ir.zig");
-const Abi = @import("codegen/abi/Abi.zig");
-const GcLayout = @import("codegen/abi/GcLayout.zig");
+const ValueLayout = @import("layout/ValueLayout.zig");
+const GcLayout = @import("layout/GcLayout.zig");
 const Sig = @import("symbols/Sig.zig").Sig;
 const Mono = @import("symbols/Mono.zig");
 const Derive = @import("symbols/Derive.zig");
@@ -986,7 +986,7 @@ fn lowerIdentifier(b: *Builder, node_idx: Ast.Index, ty: Typecheck.Type) error{O
 /// cell pointer.
 fn lowerRefNew(b: *Builder, operand: Ast.Index, tok: u32) error{OutOfMemory}!Ir.Operand {
     const t = b.in.nodes.typeOf(operand);
-    const cellptr = try emitGcAlloc(b, Abi.typeSize(t, b.in.layouts, b.in.enum_layouts), try emitLayoutOf(b, t));
+    const cellptr = try emitGcAlloc(b, ValueLayout.typeSize(t, b.in.layouts, b.in.enum_layouts), try emitLayoutOf(b, t));
     switch (passKind(b, t)) {
         .box => {
             const v = try lowerExpr(b, operand);
@@ -2383,9 +2383,9 @@ fn lowerTypeIntrinsicCall(b: *Builder, n: Ast.Node) error{OutOfMemory}!Ir.Operan
             const tnodes = Ast.rangeSlice(b.in.tree, (callee_node.rhs).int());
             const t = b.in.nodes.typeOf(tnodes[0]);
             const c: u32 = if (bik == .size_of)
-                Abi.typeSize(t, b.in.layouts, b.in.enum_layouts)
+                ValueLayout.typeSize(t, b.in.layouts, b.in.enum_layouts)
             else
-                Abi.typeAlign(t, b.in.layouts, b.in.enum_layouts);
+                ValueLayout.typeAlign(t, b.in.layouts, b.in.enum_layouts);
             return .{ .value = try b.emit(.{ .iconst = @intCast(c) }, Typecheck.Type.int) };
         },
         .layout_of => {

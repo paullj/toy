@@ -48,6 +48,8 @@ pub const CodegenMir = @import("codegen/CodegenMir.zig");
 pub const Isa = @import("codegen/Isa.zig");
 pub const CodegenRuntime = @import("codegen/runtime/runtime.zig");
 pub const Abi = @import("codegen/abi/Abi.zig");
+pub const ValueLayout = @import("layout/ValueLayout.zig");
+pub const GcLayout = @import("layout/GcLayout.zig");
 pub const FrameLayout = @import("codegen/frame/FrameLayout.zig");
 pub const Ir = @import("ir/Ir.zig");
 pub const Opt = @import("opt/Opt.zig");
@@ -117,6 +119,8 @@ test {
     _ = Isa;
     _ = CodegenRuntime;
     _ = Abi;
+    _ = ValueLayout;
+    _ = GcLayout;
     _ = FrameLayout;
     _ = Ir;
     _ = Opt;

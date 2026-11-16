@@ -18,7 +18,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Abi = @import("../codegen/abi/Abi.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
 const Engine = @import("../query/Engine.zig");
 
 // The stable symbol identity types now live in the `symbols/` peer data module
@@ -696,7 +696,7 @@ pub fn stackMapRows(fns: []const FnCode) usize {
 /// the caller's canonical order, each `{size, align, size_class, hash_off, eq_off}`. A name's `*_off` is the erased unit's `__text` byte offset (resolved from
 /// the interned handle → `offsets`), or 0 when the name is absent.
 fn buildDescTable(gpa: std.mem.Allocator, entries: []const DescEntry, si: *SymInterner, offsets: []const u32) ![]u8 {
-    const d = Abi.desc;
+    const d = ValueLayout.desc;
     const buf = try gpa.alloc(u8, entries.len * d.stride);
     errdefer gpa.free(buf);
     var pos: usize = 0;

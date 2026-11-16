@@ -24,7 +24,6 @@ const Key = @import("Key.zig");
 const Target = @import("../Target.zig");
 const Isa = @import("../codegen/Isa.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
-const FrameLayout = @import("../codegen/frame/FrameLayout.zig");
 const Ast = @import("../ast/Ast.zig");
 const Fingerprint = @import("Fingerprint.zig");
 const AstWalk = @import("AstWalk.zig");
@@ -553,7 +552,7 @@ pub fn lowerFitted(
         const frame_env = c.frame_envs and Closure.ownerHasFrameEnv(c.lambda_units, owner);
         const unboxed = body == .source and c.storage.frame_addrs.len != 0;
         if (!frame_env and !unboxed) return irf;
-        if (try FrameLayout.fits(gpa, &irf, in.layouts, in.enum_layouts)) return irf;
+        if (try Isa.fitsEveryBackend(gpa, &irf, in.layouts, in.enum_layouts)) return irf;
         irf.deinit(gpa);
     }
     var heap = in;
@@ -635,7 +634,7 @@ pub fn codegen(
     tmp_tag: usize,
     slot: *Slot,
 ) !void {
-    const backend = Isa.of(target.arch) orelse return error.UnsupportedTarget;
+    const backend = Isa.of(target) orelse return error.UnsupportedTarget;
     return self.serve(gpa, io, backend, try unitKey(gpa, target, fr), tmp_tag, slot, fr);
 }
 

@@ -28,7 +28,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const Link = @import("Link.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
 const MachO = @import("MachO.zig");
 const CodeSign = @import("CodeSign.zig");
 const Dylib = @import("Dylib.zig");
@@ -176,14 +176,14 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
     if (n_desc > 0) {
         for (descriptors, 0..) |e, i| {
             if (off_by_hash.contains(e.desc_hash)) return error.CstringHashCollision;
-            try off_by_hash.put(gpa, e.desc_hash, @intCast(@as(usize, desc_table_off) + i * Abi.desc.stride));
+            try off_by_hash.put(gpa, e.desc_hash, @intCast(@as(usize, desc_table_off) + i * ValueLayout.desc.stride));
         }
     }
     // The GC stack map is reserved BETWEEN the descriptor table and the symtab, only when
     // the collector runs. When no gc, `stackmap_off`/`stackmap_len` collapse and
     // `symtab_off == after_desc` — the panic-but-not-gc corpus stays byte-identical.
     const after_desc: u32 = if (n_desc > 0)
-        std.mem.alignForward(u32, desc_table_off + @as(u32, @intCast(n_desc * Abi.desc.stride)), 8)
+        std.mem.alignForward(u32, desc_table_off + @as(u32, @intCast(n_desc * ValueLayout.desc.stride)), 8)
     else
         desc_table_off;
     const stackmap_off: u32 = after_desc;
@@ -495,7 +495,7 @@ pub fn assembleAndSign(
 /// Whether toy emits code for `target`: it has an ISA module for the arch and writes
 /// Mach-O only, so any other target stops at `toy check`.
 pub fn canEmit(target: Target) bool {
-    return Isa.of(target.arch) != null and target.objectFormat() == .macho;
+    return Isa.of(target) != null and target.objectFormat() == .macho;
 }
 
 /// The runnable image for `target`, in its object format. The driver rejects a target
@@ -551,7 +551,7 @@ const T = Link.TestIsa;
 
 /// `T.patcher` with a placeholder body per hand builtin. `panic`'s imports `write`, as
 /// every ISA's does.
-const test_backend: Isa.Backend = .{ .lower = noLower, .relocs = T.patcher, .hand_builtins = &test_builtins, .inst_count = noCount };
+const test_backend: Isa.Backend = .{ .c_abi = .aapcs64_apple, .lower = noLower, .fits = noFits, .relocs = T.patcher, .hand_builtins = &test_builtins, .inst_count = noCount };
 
 const test_builtins = blk: {
     var out: [runtime.hand_builtins.len]Isa.BuiltinFn = undefined;
@@ -572,6 +572,10 @@ fn testBuiltin(comptime name: []const u8) Isa.BuiltinFn {
             return .{ .sym = .{ .kind = .builtin, .name = try gpa.dupe(u8, name) }, .code = code, .relocs = relocs, .literals = &.{} };
         }
     }.lower;
+}
+
+fn noFits(_: std.mem.Allocator, _: *const @import("../ir/Ir.zig").Function, _: []const @import("../types.zig").Layout, _: []const @import("../types.zig").EnumLayout) error{OutOfMemory}!bool {
+    unreachable;
 }
 
 fn noCount(_: []const u8) usize {

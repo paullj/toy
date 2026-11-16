@@ -32,7 +32,7 @@ const link = @import("../link/emit.zig");
 const Isa = @import("../codegen/Isa.zig");
 const Dylib = @import("../link/Dylib.zig");
 const MachO = @import("../link/MachO.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
 const StdNames = @import("../symbols/StdNames.zig");
@@ -634,7 +634,7 @@ pub fn lowerGraphProgram(
     var desc_plan: std.ArrayList(Link.DescEntry) = .empty;
     defer desc_plan.deinit(gpa);
     for (tc.descriptor_types) |dt| {
-        const d = Abi.descriptorFor(dt.ty, tc.layouts, tc.enum_layouts);
+        const d = ValueLayout.descriptorFor(dt.ty, tc.layouts, tc.enum_layouts);
         try desc_plan.append(gpa, .{
             .desc_hash = try Link.descHash(gpa, dt.ty),
             .size = d.size,
@@ -668,7 +668,7 @@ pub fn lowerGraphProgram(
     const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "", .fixed_files = graph.seeded_from } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, Isa.of(target.arch) orelse return error.UnsupportedTarget, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
+    const out = relink(io, gpa, Isa.of(target) orelse return error.UnsupportedTarget, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -770,7 +770,7 @@ pub fn buildImage(
     libs: Dylib.Linking,
     debug: MachO.Debug,
 ) ![]u8 {
-    const backend = Isa.of(target.arch) orelse return error.UnsupportedTarget;
+    const backend = Isa.of(target) orelse return error.UnsupportedTarget;
     return link.writeImage(io, gpa, target, &backend.relocs, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
 }
 

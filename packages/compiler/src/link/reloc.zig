@@ -156,7 +156,7 @@ test "reserved side-table base hashes are pairwise distinct and nonzero" {
 }
 
 test "every control block field core/rt/gc names fits in __bss" {
-    const classes = @import("../codegen/abi/Abi.zig").size_classes.len;
+    const classes = @import("../layout/ValueLayout.zig").size_classes.len;
     const src = for (@import("bundled_std").modules) |m| {
         if (std.mem.eql(u8, m.path, "core/rt/gc")) break m.source;
     } else return error.TestUnexpectedResult;

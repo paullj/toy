@@ -18,13 +18,45 @@ const types = @import("../types.zig");
 const Mir = @import("mir/Mir.zig");
 const LinearScan = @import("mir/LinearScan.zig");
 const Isa = @import("Isa.zig");
+const Target = @import("../Target.zig");
 
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
 pub fn CodegenMir(comptime I: type) type {
     comptime Isa.check(I);
     return struct {
-        pub const backend: Isa.Backend = .{ .lower = lowerMir, .relocs = I.relocs, .hand_builtins = &I.hand_builtins, .inst_count = I.instCount };
+        /// One backend per C convention the ISA implements.
+        pub const backends = blk: {
+            var out: [I.c_abis.len]Isa.Backend = undefined;
+            for (I.c_abis, &out) |c_abi, *b| b.* = backendFor(c_abi);
+            break :blk out;
+        };
+
+        fn backendFor(comptime c_abi: Target.CAbi) Isa.Backend {
+            const For = struct {
+                fn lower(
+                    gpa: std.mem.Allocator,
+                    func: *const Ir.Function,
+                    layouts: []const types.Layout,
+                    enum_layouts: []const types.EnumLayout,
+                    is_entry: bool,
+                    guard_stack: bool,
+                    diags: *std.ArrayList(Diagnostic),
+                ) error{OutOfMemory}!Link.FnCode {
+                    return lowerMir(gpa, func, layouts, enum_layouts, c_abi, is_entry, guard_stack, diags);
+                }
+
+                fn fits(
+                    gpa: std.mem.Allocator,
+                    func: *const Ir.Function,
+                    layouts: []const types.Layout,
+                    enum_layouts: []const types.EnumLayout,
+                ) error{OutOfMemory}!bool {
+                    return FrameLayout.fits(gpa, func, c_abi, layouts, enum_layouts);
+                }
+            };
+            return .{ .c_abi = c_abi, .lower = For.lower, .fits = For.fits, .relocs = I.relocs, .hand_builtins = &I.hand_builtins, .inst_count = I.instCount };
+        }
 
         /// Lower `func` to machine code. A fn the backend cannot lower records one diagnostic in
         /// `diags` and returns an empty `FnCode`; the caller fails the build on it. Caller owns
@@ -34,11 +66,12 @@ pub fn CodegenMir(comptime I: type) type {
             func: *const Ir.Function,
             layouts: []const types.Layout,
             enum_layouts: []const types.EnumLayout,
+            c_abi: Target.CAbi,
             is_entry: bool,
             guard_stack: bool,
             diags: *std.ArrayList(Diagnostic),
         ) error{OutOfMemory}!Link.FnCode {
-            var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, layouts, enum_layouts) catch |e| switch (e) {
+            var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, c_abi, layouts, enum_layouts) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.FrameTooLarge => return fail(gpa, func, diags, frameTooLargeMessage(func, layouts, enum_layouts)),
                 error.ParamOffsetTooLarge => return fail(gpa, func, diags, "too many parameters for codegen (stack-arg offset out of range)"),
@@ -60,6 +93,7 @@ pub fn CodegenMir(comptime I: type) type {
                 .ir = func,
                 .layouts = layouts,
                 .enum_layouts = enum_layouts,
+                .c_abi = c_abi,
                 .is_entry = is_entry,
                 .fl = &frame.layout,
                 .roots = roots,
