@@ -11,6 +11,7 @@ pub const Cache = @import("query/Cache.zig");
 pub const QueryEngine = @import("query/Engine.zig");
 pub const QueryKey = @import("query/Key.zig");
 pub const StageGraph = @import("query/StageGraph.zig");
+pub const Target = @import("Target.zig");
 pub const Driver = @import("driver/Driver.zig");
 pub const Graph = @import("driver/Graph.zig");
 pub const DriverCodegen = @import("driver/Codegen.zig");

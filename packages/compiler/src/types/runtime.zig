@@ -114,7 +114,7 @@ fn runtimeErrors(gpa: std.mem.Allocator, comptime dir: []const u8, rt: []const u
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, f.path }), .data = f.source });
     }
     const cache = try Cache.init(io, dir ++ "/.cache");
-    var graph = try Graph.discover(gpa, io, cache, "native", dir ++ "/main.toy", .{ .allow_core_imports = true });
+    var graph = try Graph.discover(gpa, io, cache, .aarch64_macos, dir ++ "/main.toy", .{ .allow_core_imports = true });
     defer graph.deinit(gpa);
     try testing.expect(graph.err == null);
     var res = try ResolveGraph.resolveGraph(gpa, &graph);

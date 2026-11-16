@@ -21,6 +21,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Phase_ = @import("Phase.zig");
+const Target = @import("../Target.zig");
 
 const Cache = @This();
 
@@ -38,20 +39,19 @@ pub const Phase = Phase_.Kind;
 /// Identifies a single cacheable unit of work.
 pub const Key = struct {
     phase: Phase,
-    /// Target triple (e.g. "native", "aarch64-macos"). Ignored for
-    /// target-independent phases.
-    target: []const u8,
+    /// Ignored for target-independent phases.
+    target: Target,
     /// Hash of the phase's inputs (for lexing, the source bytes).
     input: u64,
 
-    pub fn fromSource(phase: Phase, target: []const u8, source: []const u8) Key {
+    pub fn fromSource(phase: Phase, target: Target, source: []const u8) Key {
         return .{ .phase = phase, .target = target, .input = std.hash.Wyhash.hash(0, source) };
     }
 
     /// Key a phase directly by a precomputed content fingerprint (codegen),
     /// rather than by rehashing a source byte range. `digest()` folds `input`
     /// verbatim, so the fingerprint IS the cache identity.
-    pub fn fromFingerprint(phase: Phase, target: []const u8, fp: u64) Key {
+    pub fn fromFingerprint(phase: Phase, target: Target, fp: u64) Key {
         return .{ .phase = phase, .target = target, .input = fp };
     }
 
@@ -63,7 +63,7 @@ pub const Key = struct {
         std.debug.assert(k.phase.cacheable());
         var h = std.hash.Wyhash.init(0);
         h.update(&[_]u8{@intFromEnum(k.phase)});
-        if (k.phase.targetSensitive()) h.update(k.target);
+        if (k.phase.targetSensitive()) h.update(&k.target.keyBytes());
         h.update(std.mem.asBytes(&k.input));
         return h.final();
     }
@@ -731,7 +731,7 @@ const testing = std.testing;
 
 test "a disabled cache misses every get and drops every put without touching io" {
     const c = Cache.disabled;
-    const k = Key.fromSource(.lex, "native", "fn main() {}");
+    const k = Key.fromSource(.lex, .aarch64_macos, "fn main() {}");
     try c.put(u8, Io.failing, k, 0, &[_]u8{ 1, 2, 3 });
     try testing.expect((try c.get(u8, testing.allocator, Io.failing, k)) == null);
 }
@@ -776,23 +776,32 @@ test "cacheable/targetSensitive classify the unified enum's tiers" {
 }
 
 test "same phase + content => same digest" {
-    const a = Cache.Key.fromSource(.lex, "native", "fn main() {}");
-    const b = Cache.Key.fromSource(.lex, "native", "fn main() {}");
+    const a = Cache.Key.fromSource(.lex, .aarch64_macos, "fn main() {}");
+    const b = Cache.Key.fromSource(.lex, .aarch64_macos, "fn main() {}");
     try testing.expectEqual(a.digest(), b.digest());
 }
 
 test "different content => different digest" {
-    const a = Cache.Key.fromSource(.lex, "native", "fn a() {}");
-    const b = Cache.Key.fromSource(.lex, "native", "fn b() {}");
+    const a = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
+    const b = Cache.Key.fromSource(.lex, .aarch64_macos, "fn b() {}");
     try testing.expect(a.digest() != b.digest());
 }
 
 test "lexing is target-independent: target does not change the key" {
     // Lexing doesn't depend on the target, so the same source must reuse one
     // cache entry across targets rather than re-lex per target.
-    const native = Cache.Key.fromSource(.lex, "native", "fn main() {}");
-    const arm = Cache.Key.fromSource(.lex, "aarch64-macos", "fn main() {}");
-    try testing.expectEqual(native.digest(), arm.digest());
+    const arm = Cache.Key.fromSource(.lex, .aarch64_macos, "fn main() {}");
+    const x86 = Cache.Key.fromSource(.lex, .x86_64_linux, "fn main() {}");
+    try testing.expectEqual(arm.digest(), x86.digest());
+}
+
+test "codegen keys differ per target, and native shares its triple's entries" {
+    const mac = Cache.Key.fromFingerprint(.codegen, .aarch64_macos, 7);
+    try testing.expect(mac.digest() != Cache.Key.fromFingerprint(.codegen, .aarch64_linux, 7).digest());
+    try testing.expect(mac.digest() != Cache.Key.fromFingerprint(.codegen, .x86_64_linux, 7).digest());
+    const native = Target.parse("native") catch return error.SkipZigTest;
+    const triple = try Target.parse(native.name());
+    try testing.expectEqual(Cache.Key.fromFingerprint(.codegen, native, 7).digest(), Cache.Key.fromFingerprint(.codegen, triple, 7).digest());
 }
 
 test "Pack: put/flush then load round-trips entries through the single pack file" {
@@ -805,8 +814,8 @@ test "Pack: put/flush then load round-trips entries through the single pack file
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
-    const k2 = Cache.Key.fromSource(.lex, "native", "fn b() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
+    const k2 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn b() {}");
     const v1 = [_]u8{ 1, 2, 3, 4, 5 };
     const v2 = [_]u8{ 9, 8, 7 };
 
@@ -835,7 +844,7 @@ test "Pack: put/flush then load round-trips entries through the single pack file
         defer gpa.free(g2);
         try testing.expectEqualSlices(u8, &v2, g2);
         // An absent key is still a clean miss.
-        try testing.expect((try cache.get(u8, gpa, io, Cache.Key.fromSource(.lex, "native", "fn c() {}"))) == null);
+        try testing.expect((try cache.get(u8, gpa, io, Cache.Key.fromSource(.lex, .aarch64_macos, "fn c() {}"))) == null);
     }
 }
 
@@ -849,7 +858,7 @@ test "Pack: a corrupt pack file => cold (empty index), never a false hit" {
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
     {
         var pack = Cache.Pack.init(gpa);
         defer pack.deinit();
@@ -893,8 +902,8 @@ test "Pack: flush is byte-identical regardless of insertion order" {
     defer Io.Dir.cwd().deleteTree(io, dir_a) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir_b) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
-    const k2 = Cache.Key.fromSource(.lex, "native", "fn b() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
+    const k2 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn b() {}");
 
     {
         var pack = Cache.Pack.init(gpa);
@@ -937,8 +946,8 @@ test "Pack: load carries prior entries forward across a flush" {
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
-    const k2 = Cache.Key.fromSource(.lex, "native", "fn b() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
+    const k2 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn b() {}");
 
     // Build 1: write k1.
     {
@@ -1109,7 +1118,7 @@ test "Pack: codegen + manifest coexist; a corrupt manifest drops only the manife
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
     const e: Cache.Pack.ManifestEntry = .{ .mtime = 9, .size = 9, .ctime = 9, .content_fp = 9 };
     {
         var pack = Cache.Pack.init(gpa);
@@ -1155,7 +1164,7 @@ test "Pack: a corrupt manifest FRAMING (bad n_manifest) degrades the whole pack 
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    const k1 = Cache.Key.fromSource(.lex, "native", "fn a() {}");
+    const k1 = Cache.Key.fromSource(.lex, .aarch64_macos, "fn a() {}");
     const e: Cache.Pack.ManifestEntry = .{ .mtime = 9, .size = 9, .ctime = 9, .content_fp = 9 };
     {
         var pack = Cache.Pack.init(gpa);

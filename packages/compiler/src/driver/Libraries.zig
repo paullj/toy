@@ -282,6 +282,23 @@ fn conflict(a: std.mem.Allocator, graph: *const Graph.Graph, sym: []const u8, fi
     };
 }
 
+/// Whether the program names a library of its own: a `-l`, or an extern in a user
+/// module. The bundled modules' externs bind to the system C library, which every
+/// target has.
+pub fn namesLibraries(graph: *const Graph.Graph, req: Request) bool {
+    if (req.libs.len != 0) return true;
+    for (graph.modules) |*m| {
+        if (m.bundled) continue;
+        const tree = m.tree();
+        const prog = tree.nodes[Ast.root(tree.nodes).int()];
+        if (prog.tag != .program) continue;
+        for (Ast.rangeSlice(tree, prog.lhs.int())) |idx| {
+            if (tree.nodes[idx.int()].tag == .extern_fn_decl) return true;
+        }
+    }
+    return false;
+}
+
 /// Collect and resolve the program's libraries. `graph` must have discovered cleanly.
 pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: Request) !Result {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -494,6 +511,20 @@ fn freeGraphOfMods(gpa: std.mem.Allocator, g: *Graph.Graph) void {
         if (m.pub_bits.len != 0) gpa.free(m.pub_bits);
     }
     g.deinit(gpa);
+}
+
+test "a program names libraries when the command line gives -l or a user module declares an extern" {
+    const gpa = testing.allocator;
+    var bare = try graphOfMods(gpa, &.{
+        .{ .path = "main", .src = "fn main() -> int { 0 }\n" },
+        .{ .path = "core/c", .src = "pub extern fn strlen(p: rawptr) -> int\n", .bundled = true },
+    });
+    defer freeGraphOfMods(gpa, &bare);
+    try testing.expect(!namesLibraries(&bare, .{}));
+    try testing.expect(namesLibraries(&bare, .{ .libs = &.{"z"} }));
+    var ext = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern fn labs(x: int) -> int\nfn main() -> int { 0 }\n" }});
+    defer freeGraphOfMods(gpa, &ext);
+    try testing.expect(namesLibraries(&ext, .{}));
 }
 
 test "a block that binds a symbol the runtime imports is R0018 at the block's extern" {

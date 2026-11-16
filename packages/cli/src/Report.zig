@@ -35,12 +35,12 @@ const fmt_row_dash = std.fmt.comptimePrint("{{s: <{d}}} {{s: >{d}}} {{s: >{d}}} 
 /// Print the per-file summary; returns the number of files that failed (for the
 /// caller's exit status). Per-diagnostic detail lines route through the Renderer
 /// via `printFailure`.
-pub fn report(out: *Io.Writer, gpa: std.mem.Allocator, level: Style.ColorLevel, results: []const Driver.FileResult, emit: Driver.Emit, target: []const u8, dump: bool, cfg: SevCfg.SeverityConfig) !usize {
+pub fn report(out: *Io.Writer, gpa: std.mem.Allocator, level: Style.ColorLevel, results: []const Driver.FileResult, emit: Driver.Emit, target: toyc.Target, dump: bool, cfg: SevCfg.SeverityConfig) !usize {
     var stamp_buf: [version.stamp_max]u8 = undefined;
     // Header: the version stamp bold, labels plain.
     try out.writeAll("compiler ");
     try sty_head.styled(out, level, version.stamp(&stamp_buf));
-    try out.print("  target {s}  emit {t}\n", .{ target, emit });
+    try out.print("  target {s}  emit {t}\n", .{ target.name(), emit });
 
     var total_tokens: usize = 0;
     var total_bytes: usize = 0;

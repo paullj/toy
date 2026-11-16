@@ -29,6 +29,7 @@ const Engine = toyc.QueryEngine;
 const version = toyc.version;
 // The CLI framework + terminal library, reached through the library module (never
 // via relative `../cli`/`../term` paths). `AppCli` is the sibling app schema.
+const builtin = @import("builtin");
 const cli = @import("cli/Cli.zig");
 const term = toyc.term;
 const Style = term.Style;
@@ -320,6 +321,42 @@ pub fn main(init: std.process.Init) !void {
     if (failures > 0) std.process.exit(1);
 }
 
+/// The `--target` choice as a `Target`, `native` resolved to the host. With no choice it
+/// is the driver's default, as for the LSP, so a host toy cannot build for still checks.
+fn resolveTarget(usage: Usage, choice: anytype) toyc.Target {
+    const t = choice orelse return Driver.default_target;
+    return toyc.Target.parse(@tagName(t)) catch |e| switch (e) {
+        error.UnsupportedHost => argErr(usage, "toy does not build for this host (" ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "); pass --target"),
+        // The option's value list is `Target.spellings`, each of which parses.
+        error.UnknownTarget => unreachable,
+    };
+}
+
+/// `run` executes what it builds, so it takes only the host. Checked before `canEmit`, so
+/// a cross `run` hears that first; the hint names a build only where one would work.
+fn rejectCrossRun(usage: Usage, target: toyc.Target) !?u8 {
+    const host = toyc.Target.host orelse return null;
+    if (target.eql(host)) return null;
+    try sty_err.styled(usage.w, usage.level, "error");
+    try usage.w.print(": toy run runs only programs built for this host ({s}), not for {s}\n", .{ host.name(), target.name() });
+    if (toyc.link.canEmit(target))
+        try usage.w.print("  = help: build it with 'toy build --target {s}' and run the binary on a machine of that target\n", .{target.name()})
+    else
+        try usage.w.print("  = help: 'toy check --target {s}' checks the program for it\n", .{target.name()});
+    try usage.w.flush();
+    return usage_exit;
+}
+
+/// A target toy checks but cannot emit code for yet: R0021, before any work is done.
+fn rejectUnemittable(usage: Usage, target: toyc.Target) !?u8 {
+    if (toyc.link.canEmit(target)) return null;
+    try sty_err.styled(usage.w, usage.level, "error");
+    try usage.w.print("[{s}]: code emission for {s} is not supported yet\n", .{ codes.str(.R0021).?, target.name() });
+    try usage.w.print("  = help: 'toy check --target {s}' checks the program for it\n", .{target.name()});
+    try usage.w.flush();
+    return usage_exit;
+}
+
 /// The exit code of every usage error (a bad flag, value, command or input count),
 /// kept apart from a compile failure's 1 so a script can tell "you called toy wrong"
 /// from "your program is wrong".
@@ -354,7 +391,7 @@ const State = struct {
     check_ndjson: bool = false,
     // `check --exit-zero`: always exit 0 even with errors (editor/LSP streaming).
     check_exit_zero: bool = false,
-    target: []const u8 = Driver.default_target,
+    target: toyc.Target = Driver.default_target,
     out_path: ?[]const u8 = null,
     codegen_stats: bool = false,
     mode: Engine.Mode = .normal,
@@ -405,7 +442,7 @@ fn applyParsed(gpa: std.mem.Allocator, comptime cmd: cli.Spec.Command, p: anytyp
     // order, so apply .verify first then let .force win (no script passes both).
     if (p.verify) st.mode = .verify;
     if (p.no_cache) st.mode = .force;
-    st.target = if (p.target) |t| @tagName(t) else Driver.default_target;
+    st.target = resolveTarget(usage, p.target);
     st.out_path = p.output;
     st.color_choice = switch (p.color orelse .auto) {
         .auto => .auto,
@@ -507,7 +544,7 @@ fn optPass(choice: anytype) Opt.Pass {
 /// shaping + input knobs. Fills paths, target, color, the severity rules, and the
 /// check-only knobs. Returns a non-null `?u8` exit code on a bad severity spec.
 fn applyCheckParsed(gpa: std.mem.Allocator, p: anytype, usage: Usage, st: *State, sev_rules: *std.ArrayList(SevCfg.Rule)) !?u8 {
-    st.target = if (p.target) |t| @tagName(t) else Driver.default_target;
+    st.target = resolveTarget(usage, p.target);
     st.color_choice = switch (p.color orelse .auto) {
         .auto => .auto,
         .always => .always,
@@ -785,7 +822,7 @@ fn emitExecutable(
     out: *Io.Writer,
     level: Style.ColorLevel,
     usage: Usage,
-    target: []const u8,
+    target: toyc.Target,
     paths: []const []const u8,
     out_path: ?[]const u8,
     run_after: bool,
@@ -810,6 +847,9 @@ fn emitExecutable(
         try argLine(usage, if (run_after) "run takes exactly one input file (the entry module); pass program arguments after --" else "build takes exactly one input file (the entry module)");
         return usage_exit;
     }
+
+    if (run_after) if (try rejectCrossRun(usage, target)) |code| return code;
+    if (try rejectUnemittable(usage, target)) |code| return code;
 
     var tail_io = Engine.pool(gpa, threads);
     defer tail_io.deinit();
@@ -999,6 +1039,7 @@ fn emitExecutable(
     const image = try Codegen.buildImage(
         io,
         gpa,
+        target,
         Decide.basename(resolved_out),
         lp.text,
         lp.entry_off,
@@ -1095,7 +1136,7 @@ fn emitIr(
     out: *Io.Writer,
     level: Style.ColorLevel,
     usage: Usage,
-    target: []const u8,
+    target: toyc.Target,
     paths: []const []const u8,
     profile: Profile,
     specialize: bool,
@@ -1273,7 +1314,7 @@ fn runCheck(
     out: *Io.Writer,
     level: Style.ColorLevel,
     usage: Usage,
-    target: []const u8,
+    target: toyc.Target,
     profile: Profile.Name,
     paths: []const []const u8,
     ndjson: bool,
@@ -1383,26 +1424,33 @@ fn runCheck(
             return 2;
         };
     }
-    var libs = toyc.Libraries.collect(gpa, cio, graph, link) catch |e| {
+    // The library resolver reads Mach-O dylibs, so it says nothing true about another
+    // object format's libraries; until one is read, those checks wait for the build.
+    var libs: ?toyc.Libraries.Result = if (target.objectFormat() == .macho) toyc.Libraries.collect(gpa, cio, graph, link) catch |e| {
         try argLine(usage, @errorName(e));
         return 2;
-    };
-    defer libs.deinit();
-    if (try reportLibraryUsage(usage, &libs)) |code| return code;
+    } else null;
+    defer if (libs) |*l| l.deinit();
+    if (libs) |*l| if (try reportLibraryUsage(usage, l)) |code| return code;
+    if (libs == null and toyc.Libraries.namesLibraries(graph, link)) {
+        try usage.w.print("note: library and extern symbol checks are skipped for {s}: toy cannot read its shared libraries yet\n", .{target.name()});
+        try usage.w.flush();
+    }
+    const lib_diags: []const toyc.DiagnosticSink.Diagnostic = if (libs) |l| l.diags else &.{};
     // Which externs the program calls is known only once its `when`s have folded clean.
     const unexported: []const toyc.DiagnosticSink.Diagnostic = if (tc) |*t|
-        (if (Check.tallyGraph(t.diags, sev).errors == 0) try libs.unexportedCalls(cio, graph, t) else &.{})
+        (if (libs != null and Check.tallyGraph(t.diags, sev).errors == 0) try libs.?.unexportedCalls(cio, graph, t) else &.{})
     else
         &.{};
     ns_typecheck = lapNs(cio, timings, &last_ns);
     // A library error sits beside the type errors: like them, it is a fault in the
     // program that `check` reports with the rest.
     const checked: []const toyc.DiagnosticSink.Diagnostic = if (tc) |t| t.diags else &.{};
-    const type_diags = try gpa.alloc(toyc.DiagnosticSink.Diagnostic, checked.len + libs.diags.len + unexported.len);
+    const type_diags = try gpa.alloc(toyc.DiagnosticSink.Diagnostic, checked.len + lib_diags.len + unexported.len);
     defer gpa.free(type_diags);
     @memcpy(type_diags[0..checked.len], checked);
-    @memcpy(type_diags[checked.len..][0..libs.diags.len], libs.diags);
-    @memcpy(type_diags[checked.len + libs.diags.len ..], unexported);
+    @memcpy(type_diags[checked.len..][0..lib_diags.len], lib_diags);
+    @memcpy(type_diags[checked.len + lib_diags.len ..], unexported);
 
     // SINGLE-MODULE (no imports discovered): render against the entry's ON-DISK `file`,
     // not its module `path` (a bare stem like `fix_bad` vs `/tmp/fix_bad.toy`), so the

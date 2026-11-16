@@ -29,6 +29,7 @@ const DiagnosticMod = @import("../diagnostics/Diagnostic.zig");
 const codes = @import("../diagnostics/codes.zig");
 const Span = @import("../diagnostics/model.zig").Span;
 const Profile = @import("Profile.zig");
+const Target = @import("../Target.zig");
 const Diagnostic = DiagnosticMod.Diagnostic;
 const BundledStd = @import("bundled_std");
 
@@ -67,18 +68,17 @@ fn bundledLookup(path: []const u8) ?[]const u8 {
 /// names it, and the module's own lex and parse are keyed by its content, so the target
 /// and profile reach every cache key that reads them with no key of their own. Each
 /// variant is a static string, so a `BundledCache` keyed by its address tells them apart.
-fn targetSource(target: []const u8, profile: Profile.Name) []const u8 {
-    // Every `--target` spelling (`Driver.targets`) names aarch64-macos, the one back-end.
-    _ = target;
-    return switch (profile) {
-        inline else => |p| comptime targetVariant(.macos, .aarch64, p),
+fn targetSource(target: Target, profile: Profile.Name) []const u8 {
+    return switch (target.os) {
+        inline else => |os| switch (target.arch) {
+            inline else => |arch| switch (profile) {
+                inline else => |p| comptime targetVariant(os, arch, p),
+            },
+        },
     };
 }
 
-pub const Os = enum { macos, linux };
-pub const Arch = enum { aarch64, x86_64 };
-
-fn targetVariant(comptime os: Os, comptime arch: Arch, comptime profile: Profile.Name) []const u8 {
+fn targetVariant(comptime os: Target.Os, comptime arch: Target.Arch, comptime profile: Profile.Name) []const u8 {
     @setEvalBranchQuota(100_000);
     return bundledLookup(StdNames.target_module).? ++ "pub os: Os =: ." ++ @tagName(os) ++
         "\npub arch: Arch =: ." ++ @tagName(arch) ++
@@ -445,7 +445,7 @@ pub fn discover(
     gpa: std.mem.Allocator,
     io: Io,
     cache: Cache,
-    target: []const u8,
+    target: Target,
     entry_path: []const u8,
     opts: DiscoverOptions,
 ) !Graph {
@@ -616,7 +616,7 @@ const Discoverer = struct {
     gpa: std.mem.Allocator,
     io: Io,
     cache: Cache,
-    target: []const u8,
+    target: Target,
     /// `--timings` probe for this stage's lex+parse queries (compute vs
     /// cache). Null on a plain build => no clock reads.
     probe: ?*Engine.StageProbe = null,
@@ -1476,7 +1476,7 @@ fn withFixtureRoots(
         break :blk final;
     };
     const roots: Roots = .{ .root = if (root) |r| dir_name ++ "/" ++ r else null, .include = &inc };
-    var g = try discover(gpa, io, cache, "native", entry_path, .{ .roots = roots });
+    var g = try discover(gpa, io, cache, .aarch64_macos, entry_path, .{ .roots = roots });
     defer g.deinit(gpa);
     try check(gpa, &g);
 }
@@ -1705,16 +1705,16 @@ test "discover: a bundled cache parses each std module once and later graphs mat
     var cache: BundledCache = .{};
     defer cache.deinit(gpa);
 
-    var fresh = try discover(gpa, Io.failing, Cache.disabled, "native", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay });
+    var fresh = try discover(gpa, Io.failing, Cache.disabled, .aarch64_macos, "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay });
     defer fresh.deinit(gpa);
     try testing.expect(fresh.err == null);
-    var cold = try discover(gpa, Io.failing, Cache.disabled, "native", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache });
+    var cold = try discover(gpa, Io.failing, Cache.disabled, .aarch64_macos, "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache });
     defer cold.deinit(gpa);
     var bundled: usize = 0;
     for (fresh.modules) |m| bundled += @intFromBool(m.bundled);
     try testing.expect(bundled > 0);
     try testing.expectEqual(bundled, cache.map.count());
-    var warm = try discover(gpa, Io.failing, Cache.disabled, "native", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache });
+    var warm = try discover(gpa, Io.failing, Cache.disabled, .aarch64_macos, "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache });
     defer warm.deinit(gpa);
     try testing.expectEqual(bundled, cache.map.count());
 
@@ -1735,7 +1735,7 @@ test "discover: a bundled cache parses each std module once and later graphs mat
     };
 }
 
-test "discover: core/target carries the build's target and profile, one variant per profile" {
+test "discover: core/target carries the build's os, arch and profile, one variant each" {
     const gpa = testing.allocator;
     const entry_src: []const u8 = "import core/target_selftest\nfn main() -> int { return target_selftest.selftest() }\n";
     const Lookup = struct {
@@ -1747,9 +1747,11 @@ test "discover: core/target carries the build's target and profile, one variant 
     const overlay: Overlay = .{ .ctx = @ptrCast(&entry_src), .getFn = Lookup.get, .disk = false };
     var cache: BundledCache = .{};
     defer cache.deinit(gpa);
-    var sources: [2][]const u8 = undefined;
-    for ([_]Profile.Name{ .debug, .release }, &sources) |profile, *out| {
-        var g = try discover(gpa, Io.failing, Cache.disabled, "native", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache, .allow_core_imports = true, .profile = profile });
+    const targets = [_]Target{ .aarch64_macos, .aarch64_linux, .x86_64_linux };
+    var sources: [targets.len * 2][]const u8 = undefined;
+    var n: usize = 0;
+    for (targets) |target| for ([_]Profile.Name{ .debug, .release }) |profile| {
+        var g = try discover(gpa, Io.failing, Cache.disabled, target, "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay, .bundled_cache = &cache, .allow_core_imports = true, .profile = profile });
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         const m = for (g.modules) |m| {
@@ -1757,16 +1759,14 @@ test "discover: core/target carries the build's target and profile, one variant 
         } else return error.TestUnexpectedResult;
         try testing.expect(m.bundled);
         try testing.expect(std.mem.startsWith(u8, m.source, bundledLookup(StdNames.target_module).?));
-        try testing.expect(std.mem.indexOf(u8, m.source, "pub os: Os =: .macos\n") != null);
-        try testing.expect(std.mem.indexOf(u8, m.source, "pub arch: Arch =: .aarch64\n") != null);
-        try testing.expect(std.mem.endsWith(u8, m.source, switch (profile) {
-            .debug => "pub profile: Profile =: .debug\n",
-            .release => "pub profile: Profile =: .release\n",
-        }));
-        out.* = targetSource("native", profile);
-    }
-    try testing.expect(sources[0].ptr != sources[1].ptr);
-    try testing.expectEqualStrings(sources[0], targetSource("aarch64-macos", .debug));
+        var buf: [128]u8 = undefined;
+        const want = try std.fmt.bufPrint(&buf, "pub os: Os =: .{t}\npub arch: Arch =: .{t}\npub profile: Profile =: .{t}\n", .{ target.os, target.arch, profile });
+        try testing.expect(std.mem.endsWith(u8, m.source, want));
+        try testing.expectEqualStrings(targetSource(target, profile), m.source);
+        sources[n] = targetSource(target, profile);
+        n += 1;
+    };
+    for (sources, 0..) |a, i| for (sources[i + 1 ..]) |b| try testing.expect(a.ptr != b.ptr);
 }
 
 test "single: trivial one-module graph from a parsed source" {
@@ -1841,7 +1841,7 @@ test "discover: a same-size edit that MOVES the mtime is NOT served stale" {
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings("1", firstNumberLiteral(g.entry()).?);
@@ -1865,7 +1865,7 @@ test "discover: a same-size edit that MOVES the mtime is NOT served stale" {
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings(v2, g.entry().source);
@@ -1914,7 +1914,7 @@ test "discover: a touch -r style edit (mtime restored, ctime moved) is NOT serve
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expectEqualStrings("1", firstNumberLiteral(g.entry()).?);
         pack.flush(io, cache_dir);
@@ -1956,7 +1956,7 @@ test "discover: a touch -r style edit (mtime restored, ctime moved) is NOT serve
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings(v2, g.entry().source);
@@ -1988,7 +1988,7 @@ test "discover: a changed file whose mtime moves is re-read (size-changing edit)
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expectEqualStrings("1", firstNumberLiteral(g.entry()).?);
         pack.flush(io, cache_dir);
@@ -1999,7 +1999,7 @@ test "discover: a changed file whose mtime moves is re-read (size-changing edit)
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expectEqualStrings(v2, g.entry().source);
         try testing.expectEqualStrings("22", firstNumberLiteral(g.entry()).?);
@@ -2029,7 +2029,7 @@ test "discover: an unchanged file is served warm (literal preserved across a cle
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings("7", firstNumberLiteral(g.entry()).?);
@@ -2077,7 +2077,7 @@ test "discover: the warm path serves from cache WITHOUT reading the file" {
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings("5", firstNumberLiteral(g.entry()).?);
@@ -2109,7 +2109,7 @@ test "discover: the warm path serves from cache WITHOUT reading the file" {
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         // Served from cache: no parse error despite the garbage on disk, and the GOOD tree.
         try testing.expect(g.err == null);
@@ -2164,7 +2164,7 @@ test "discover: warm path FALLS BACK to a read when the cache blobs are missing"
         defer pack.deinit();
         pack.load(gpa, io, cache_dir);
         const cache = try Cache.initPack(io, cache_dir, &pack);
-        var g = try discover(gpa, io, cache, "native", file, .{});
+        var g = try discover(gpa, io, cache, .aarch64_macos, file, .{});
         defer g.deinit(gpa);
         try testing.expect(g.err == null);
         try testing.expectEqualStrings(src, g.entry().source);
@@ -2335,7 +2335,7 @@ test "discover: a warm rebuild follows a changed -I set and a newly added clashi
             defer pack.deinit();
             pack.load(a, i, cache_dir);
             const cache = try Cache.initPack(i, cache_dir, &pack);
-            const g = try discover(a, i, cache, "native", dir ++ "/src/main.toy", .{ .roots = .{ .include = include } });
+            const g = try discover(a, i, cache, .aarch64_macos, dir ++ "/src/main.toy", .{ .roots = .{ .include = include } });
             pack.flush(i, cache_dir);
             return g;
         }
@@ -2499,7 +2499,7 @@ test "discover: a symlinked folder module resolves under the import's name" {
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/shared/mod.toy", .data = "pub fn v() -> int { return 1 }\n" });
     try Io.Dir.cwd().symLink(io, "shared", dir ++ "/util", .{ .is_directory = true });
 
-    var g = try discover(gpa, io, Cache.disabled, "native", dir ++ "/main.toy", .{});
+    var g = try discover(gpa, io, Cache.disabled, .aarch64_macos, dir ++ "/main.toy", .{});
     defer g.deinit(gpa);
     try testing.expect(g.err == null);
     try testing.expectEqualStrings("util", g.modules[g.entry().imports[0]].path);
@@ -2524,7 +2524,7 @@ test "discover: a warm rebuild follows util.toy replaced by util/mod.toy and bac
             defer pack.deinit();
             pack.load(a, i, cache_dir);
             const cache = try Cache.initPack(i, cache_dir, &pack);
-            const g = try discover(a, i, cache, "native", dir ++ "/main.toy", .{});
+            const g = try discover(a, i, cache, .aarch64_macos, dir ++ "/main.toy", .{});
             pack.flush(i, cache_dir);
             return g;
         }

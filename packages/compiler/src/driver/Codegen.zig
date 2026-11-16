@@ -35,6 +35,7 @@ const Abi = @import("../codegen/abi/Abi.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
 const StdNames = @import("../symbols/StdNames.zig");
+const Target = @import("../Target.zig");
 
 /// The mangled name of the erased `(ty, kind)` witness in `tc.erased_units` — a linear
 /// scan matching `(Type.eql, kind)`. Borrowed (the plan holds it by reference); `null`
@@ -526,7 +527,7 @@ pub fn lowerGraphProgram(
     gpa: std.mem.Allocator,
     io: Io,
     cache: Cache,
-    target: []const u8,
+    target: Target,
     graph: *const Graph.Graph,
     res: *const ResolveGraph.GraphResult,
     tc: *const Typecheck.GraphResult,
@@ -583,7 +584,7 @@ pub fn lowerGraphProgram(
         gpa: std.mem.Allocator,
         io: Io,
         engine: Engine,
-        target: []const u8,
+        target: Target,
         plan: *const Plan,
         slots: []Engine.Slot,
         pub fn args(c: @This(), i: usize) std.meta.ArgsTuple(@TypeOf(unitJob)) {
@@ -683,7 +684,7 @@ fn nowNs(io: Io) i128 {
 /// lower path. A callee's cross-module identity and the layouts it touches ride in
 /// through the program-wide `names`/`sigs`/`layouts`, so the fingerprint folds a qualified
 /// callee distinctly.
-fn unitJob(gpa: std.mem.Allocator, io: Io, engine: Engine, target: []const u8, plan: *const Plan, i: usize, slot: *Engine.Slot) void {
+fn unitJob(gpa: std.mem.Allocator, io: Io, engine: Engine, target: Target, plan: *const Plan, i: usize, slot: *Engine.Slot) void {
     const fr = plan.frozenFor(i);
     engine.codegen(gpa, io, target, &fr, i, slot) catch |e| {
         slot.err = e;
@@ -753,14 +754,14 @@ pub fn renderIr(
     return .{ .ok = try aw.toOwnedSlice() };
 }
 
-/// Build the fully signed, runnable Mach-O image for `code`. Thin pass-through to
-/// the single backend boundary (`link.assembleAndSign`), which owns the
-/// order-sensitive assemble → applyDataRelocs → sign-last pipeline. Kept so the
-/// asm path and the byte-identity tests call it on `LinkedProgram` fields.
-/// Caller owns the returned bytes and writes them mode 0o755.
+/// Build the runnable image for `code` in `target`'s object format. Thin pass-through
+/// to the single backend boundary (`link.writeImage`). Kept so the asm path and the
+/// byte-identity tests call it on `LinkedProgram` fields. Caller owns the returned bytes
+/// and writes them mode 0o755.
 pub fn buildImage(
     io: Io,
     gpa: std.mem.Allocator,
+    target: Target,
     identifier: []const u8,
     code: []const u8,
     entry_off: u32,
@@ -769,7 +770,7 @@ pub fn buildImage(
     libs: Dylib.Linking,
     debug: MachO.Debug,
 ) ![]u8 {
-    return link.assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
+    return link.writeImage(io, gpa, target, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
 }
 
 const testing = std.testing;
@@ -815,7 +816,7 @@ const Checked = struct {
             }
         };
         const overlay: Graph.Overlay = .{ .ctx = @ptrCast(&src), .getFn = Lookup.get, .disk = false };
-        self.g = try Graph.discover(gpa, io, Cache.disabled, "aarch64-macos", "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay });
+        self.g = try Graph.discover(gpa, io, Cache.disabled, .aarch64_macos, "/ws/main.toy", .{ .roots = .{ .root = "/ws" }, .overlay = overlay });
         errdefer self.g.deinit(gpa);
         self.res = try ResolveGraph.resolveGraph(gpa, &self.g);
         errdefer self.res.deinit(gpa);
@@ -964,7 +965,7 @@ test "the build lowers and links every unit of the plan" {
     for ([_]Profile{ .debug, .release }) |profile| {
         var plan = try ck.plan(gpa, profile);
         defer plan.deinit(gpa);
-        var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, "aarch64-macos", &ck.g, &ck.res, &ck.tc, .verify, profile, true, null, null, 1);
+        var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, .aarch64_macos, &ck.g, &ck.res, &ck.tc, .verify, profile, true, null, null, 1);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .ok);
         try testing.expectEqual(plan.units.len, out.ok.codegen_compiled);
@@ -1111,7 +1112,7 @@ fn unitKeys(gpa: std.mem.Allocator, io: ?std.Io, src: []const u8, profile: Profi
             if (std.mem.eql(u8, plan.symOf(u).name, name)) break k;
         } else return error.NoSuchUnit;
         const fr = plan.frozenFor(i);
-        o.* = (try Engine.unitKey(gpa, "aarch64-macos", &fr)).digest();
+        o.* = (try Engine.unitKey(gpa, .aarch64_macos, &fr)).digest();
     }
 }
 
@@ -1308,7 +1309,7 @@ test "an owner's fingerprint is walked once for all its lambdas' keys" {
         const fr = plan.frozenFor(i);
         const owner = try Engine.sourceFp(gpa, &fr, fr.body.lambda.owner, fr.body.lambda.owner_sig);
         try testing.expectEqual(owner, try plan.inline_cache.ownerFp(gpa, &fr, fr.body.lambda));
-        _ = try Engine.unitKey(gpa, "aarch64-macos", &fr);
+        _ = try Engine.unitKey(gpa, .aarch64_macos, &fr);
         lambdas += 1;
     };
     try testing.expectEqual(@as(usize, 3), lambdas);

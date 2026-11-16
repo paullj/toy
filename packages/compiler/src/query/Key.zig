@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const Cache = @import("Cache.zig");
+const Target = @import("../Target.zig");
 const Profile = @import("../driver/Profile.zig");
 const Link = @import("../link/Link.zig");
 
@@ -27,19 +28,19 @@ pub const Phase = Cache.Phase;
 pub const Key = Cache.Key;
 
 /// lex query: keyed by source-hash, target-independent.
-pub fn lex(target: []const u8, source: []const u8) Key {
+pub fn lex(target: Target, source: []const u8) Key {
     return Cache.Key.fromSource(.lex, target, source);
 }
 
 /// parse query: keyed by source-hash, target-independent.
-pub fn parse(target: []const u8, source: []const u8) Key {
+pub fn parse(target: Target, source: []const u8) Key {
     return Cache.Key.fromSource(.parse, target, source);
 }
 
 /// codegen query: keyed by the content fingerprint xor'd with the build profile and
 /// the fn's own emitted symbol name, target-sensitive. This is the ONE place the
 /// `fp ^ profileMix(profile) ^ symMix(sym)` fold lives (was duplicated in Driver).
-pub fn codegen(target: []const u8, fp: u64, profile: Profile, sym: Link.SymName) Key {
+pub fn codegen(target: Target, fp: u64, profile: Profile, sym: Link.SymName) Key {
     return Cache.Key.fromFingerprint(.codegen, target, fp ^ profileMix(profile) ^ symMix(sym));
 }
 
