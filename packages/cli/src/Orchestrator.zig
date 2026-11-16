@@ -82,7 +82,7 @@ pub const Orchestrator = struct {
     gpa: std.mem.Allocator,
     io: Io,
     cache: toyc.Cache,
-    target: []const u8,
+    target: toyc.Target,
     entry: []const u8,
     tail: Tail,
     /// The single DISCOVER-barrier contributor (the entry-path digest), borrowed from

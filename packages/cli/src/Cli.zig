@@ -55,7 +55,7 @@ const release_opt: Spec.Option = .{ .long = "release", .action = .set_true, .con
 const profile_opt: Spec.Option = .{ .long = "profile", .value = .{ .@"enum" = std.meta.fieldNames(toyc.Profile.Name) }, .value_name = "NAME", .help = "Build profile: debug runs no IR passes, release runs them all (default debug)" };
 
 /// `--target`, shared by every command that takes it, so `check` validates it too.
-const target_opt: Spec.Option = .{ .long = "target", .value = .{ .@"enum" = &toyc.Driver.targets }, .value_name = "TARGET", .help = "Compilation target (default: " ++ toyc.Driver.default_target ++ ")" };
+const target_opt: Spec.Option = .{ .long = "target", .value = .{ .@"enum" = &toyc.Target.spellings }, .value_name = "TARGET", .help = "Compilation target (default: native, the host)" };
 
 const pass_names = std.meta.fieldNames(toyc.Opt.Pass);
 
@@ -100,8 +100,8 @@ const sev_opts: []const Spec.Option = &.{
 /// The option set shared verbatim by root, `build`, and `run` (defined once so
 /// they can't drift). `--emit` sits between `pre_emit` and `post_emit` and is present
 /// only when `dev_inspect` is true (Debug builds + test binaries); a release build
-/// drops it entirely. `--target` is not defaulted in-spec; the driver applies
-/// `Driver.default_target` when it is absent.
+/// drops it entirely. `--target` is not defaulted in-spec; the driver resolves `native`
+/// when it is absent.
 const shared_opts: []const Spec.Option = pre_emit ++ emit_opt ++ dev_core_opt ++ post_emit;
 
 /// The variadic input-file positional, shared by root/build/run.

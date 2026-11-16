@@ -94,7 +94,7 @@ test "MISS then HIT: a cold key computes once; the warm key serves cached withou
     defer h.deinit();
     const engine = h.engine(.normal);
 
-    const key = Key.codegen("native", 0xC0FFEE, .{}, .{ .kind = .user_fn, .name = "f" });
+    const key = Key.codegen(.aarch64_macos, 0xC0FFEE, .{}, .{ .kind = .user_fn, .name = "f" });
     var runs: usize = 0;
 
     // MISS: cold key -> compute runs, value stored.
@@ -124,7 +124,7 @@ test "FORCE: .force-equivalent re-derivation ignores the primed cache (re-lower,
     defer h.deinit();
     const engine = h.engine(.normal);
 
-    const key = Key.codegen("native", 0xF0F0, .{}, .{ .kind = .user_fn, .name = "g" });
+    const key = Key.codegen(.aarch64_macos, 0xF0F0, .{}, .{ .kind = .user_fn, .name = "g" });
     var runs: usize = 0;
 
     // Prime the cache.
@@ -167,8 +167,8 @@ test "VERIFY: re-deriving identical inputs is byte-identical (the determinism ba
     try testing.expectEqual(fp1, fp2); // deterministic fingerprint
 
     const sym: Link.SymName = .{ .kind = .user_fn, .name = "add" };
-    const k1 = Key.codegen("aarch64-macos", fp1, .{}, sym);
-    const k2 = Key.codegen("aarch64-macos", fp2, .{}, sym);
+    const k1 = Key.codegen(.aarch64_macos, fp1, .{}, sym);
+    const k2 = Key.codegen(.aarch64_macos, fp2, .{}, sym);
     try testing.expectEqual(k1.digest(), k2.digest()); // same key => same slot
 
     // Round-trip the blob through the cache byte-identically (verify compares
@@ -213,7 +213,7 @@ fn build(gpa: std.mem.Allocator, source: []const u8) !Built {
 /// folds at the codegen seam.
 fn cgKey(b: *const Built, fn_idx: usize, sym_name: []const u8, callees: []const Sig, touched: []const TouchedType) Key.Key {
     const fp = Fingerprint.fingerprint(b.tree, b.tokens, b.source, b.fnDecl(fn_idx), callees, touched, &.{}, &.{});
-    return Key.codegen("aarch64-macos", fp, .{}, .{ .kind = .user_fn, .name = sym_name });
+    return Key.codegen(.aarch64_macos, fp, .{}, .{ .kind = .user_fn, .name = sym_name });
 }
 
 test "INVALIDATION: a struct field edit flips the codegen key of a fn that TOUCHES it" {
@@ -278,12 +278,12 @@ test "lex query: miss computes then hit serves from cache" {
 
     const src = "fn main() {}";
 
-    const miss = try engine.lex(gpa, h.io, "native", src, 0, false);
+    const miss = try engine.lex(gpa, h.io, .aarch64_macos, src, 0, false);
     defer gpa.free(miss.value);
     try testing.expect(!miss.cached);
     try testing.expect(miss.value.len > 0);
 
-    const hit = try engine.lex(gpa, h.io, "native", src, 0, false);
+    const hit = try engine.lex(gpa, h.io, .aarch64_macos, src, 0, false);
     defer gpa.free(hit.value);
     try testing.expect(hit.cached);
     try testing.expectEqual(miss.value.len, hit.value.len);
@@ -300,14 +300,14 @@ test "parse query: miss parses+stores; hit serves a validated cached tree" {
     const tokens = try Lexer.tokenize(gpa, src);
     defer gpa.free(tokens);
 
-    const miss = try engine.parse(gpa, h.io, "native", src, tokens, 0, false);
+    const miss = try engine.parse(gpa, h.io, .aarch64_macos, src, tokens, 0, false);
     try testing.expect(!miss.cached);
     // The parser always returns a tree; a clean parse leaves `diags` empty.
     try testing.expectEqual(@as(usize, 0), miss.diags.len);
     gpa.free(@constCast(miss.diags));
     freeTree(gpa, miss.tree);
 
-    const hit = try engine.parse(gpa, h.io, "native", src, tokens, 0, false);
+    const hit = try engine.parse(gpa, h.io, .aarch64_macos, src, tokens, 0, false);
     try testing.expect(hit.cached);
     try testing.expectEqual(@as(usize, 0), hit.diags.len);
     gpa.free(@constCast(hit.diags));
@@ -317,41 +317,41 @@ test "parse query: miss parses+stores; hit serves a validated cached tree" {
 test "codegen key discrimination: profile / opt level / own-symbol / fingerprint each key distinctly" {
     // The uniform `Key.codegen` must not alias across profile, O-level, emitted symbol, or
     // fingerprint — the invariants the consolidated key preserves.
-    const base = Key.codegen("native", 0x1111, .{}, .{ .kind = .user_fn, .name = "add" });
+    const base = Key.codegen(.aarch64_macos, 0x1111, .{}, .{ .kind = .user_fn, .name = "add" });
 
     const sym: toyc.Link.SymName = .{ .kind = .user_fn, .name = "add" };
     const profiles = [_]toyc.Profile{ .debug, .release, .{ .name = .debug, .opt = .O1 }, .{ .name = .release, .opt = .O0 } };
     for (profiles, 0..) |a, i| for (profiles[i + 1 ..]) |b|
-        try testing.expect(Key.codegen("native", 0x1111, a, sym).digest() != Key.codegen("native", 0x1111, b, sym).digest());
-    try testing.expectEqual(base.digest(), Key.codegen("native", 0x1111, .debug, sym).digest());
+        try testing.expect(Key.codegen(.aarch64_macos, 0x1111, a, sym).digest() != Key.codegen(.aarch64_macos, 0x1111, b, sym).digest());
+    try testing.expectEqual(base.digest(), Key.codegen(.aarch64_macos, 0x1111, .debug, sym).digest());
 
-    const diff_fp = Key.codegen("native", 0x2222, .{}, .{ .kind = .user_fn, .name = "add" });
+    const diff_fp = Key.codegen(.aarch64_macos, 0x2222, .{}, .{ .kind = .user_fn, .name = "add" });
     try testing.expect(base.digest() != diff_fp.digest());
 
-    const diff_sym = Key.codegen("native", 0x1111, .{}, .{ .kind = .user_fn, .name = "m.add" });
+    const diff_sym = Key.codegen(.aarch64_macos, 0x1111, .{}, .{ .kind = .user_fn, .name = "m.add" });
     try testing.expect(base.digest() != diff_sym.digest());
 
     // A lex key and a codegen key with the SAME u64 input cannot alias — the phase
     // byte is folded first (no cross-shape collision).
-    const lex_key = Key.lex("native", "add");
-    try testing.expect(lex_key.digest() != Key.codegen("native", lex_key.input, .{}, .{ .kind = .user_fn, .name = "add" }).digest());
+    const lex_key = Key.lex(.aarch64_macos, "add");
+    try testing.expect(lex_key.digest() != Key.codegen(.aarch64_macos, lex_key.input, .{}, .{ .kind = .user_fn, .name = "add" }).digest());
 }
 
 test "phase discrimination: lex and parse of the same source land in distinct slots" {
     // lex/parse share `input = Wyhash(source)` but differ by the phase byte folded
     // FIRST in digest(), so the two front-end queries never collide.
     const src = "fn main() {}";
-    try testing.expect(Key.lex("native", src).digest() != Key.parse("native", src).digest());
+    try testing.expect(Key.lex(.aarch64_macos, src).digest() != Key.parse(.aarch64_macos, src).digest());
 }
 
 test "target sensitivity: codegen keys differ across targets; lex keys do NOT" {
     // codegen blobs are target-specific machine code and must not alias across
     // targets; lex/parse are target-independent and intentionally share a slot.
-    const cg_a = Key.codegen("aarch64-macos", 0x99, .{}, .{ .kind = .user_fn, .name = "f" });
-    const cg_b = Key.codegen("x86_64-linux", 0x99, .{}, .{ .kind = .user_fn, .name = "f" });
+    const cg_a = Key.codegen(.aarch64_macos, 0x99, .{}, .{ .kind = .user_fn, .name = "f" });
+    const cg_b = Key.codegen(.x86_64_linux, 0x99, .{}, .{ .kind = .user_fn, .name = "f" });
     try testing.expect(cg_a.digest() != cg_b.digest());
 
-    const lex_a = Key.lex("aarch64-macos", "fn f(){}");
-    const lex_b = Key.lex("x86_64-linux", "fn f(){}");
+    const lex_a = Key.lex(.aarch64_macos, "fn f(){}");
+    const lex_b = Key.lex(.x86_64_linux, "fn f(){}");
     try testing.expectEqual(lex_a.digest(), lex_b.digest());
 }

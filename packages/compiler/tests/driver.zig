@@ -53,7 +53,7 @@ fn lowerSingleFile(
     gpa: std.mem.Allocator,
     io: Io,
     cache: Cache,
-    target: []const u8,
+    target: toyc.Target,
     r: *const FileResult,
     mode: Engine.Mode,
     profile: toyc.Profile,
@@ -3207,10 +3207,10 @@ test "codegen reports missing main and lowers a simple main" {
         const path = dir_name ++ "/nomain.toy";
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 0);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .normal, .debug);
         switch (lowered) {
             .err => |e| try testing.expect(e.span == null),
             .ok => |*lp| {
@@ -3227,10 +3227,10 @@ test "codegen reports missing main and lowers a simple main" {
         const path = dir_name ++ "/main.toy";
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 1);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .normal, .debug);
         switch (lowered) {
             .err => return error.TestUnexpectedResult,
             .ok => |*lp| {
@@ -3268,7 +3268,7 @@ test "a syntax-error file is tainted, reported, and never reaches check/codegen"
     const path = dir_name ++ "/bad.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
     var r: FileResult = .{ .path = path };
-    try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 0);
+    try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
     defer r.deinit(gpa);
 
     // Reported as a parse error, tainted, with at least one diagnostic surfaced.
@@ -3753,11 +3753,11 @@ test "integration: emitted binary runs with the right exit code" {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = c.src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .normal, if (c.wraps) .{ .name = .release, .opt = .O0 } else .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .normal, if (c.wraps) .{ .name = .release, .opt = .O0 } else .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3765,7 +3765,7 @@ test "integration: emitted binary runs with the right exit code" {
         defer lp.deinit(gpa);
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
 
-        const image = try buildImage(io, gpa, c.name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, .aarch64_macos, c.name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
 
         const out_path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_name, c.name }) catch unreachable;
@@ -3827,7 +3827,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 0);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
@@ -3839,7 +3839,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expect(!std.mem.eql(u8, insts[0].name.?, insts[1].name.?));
 
         // Force a fresh lowering: main + 2 instances = exactly 3 codegen units.
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3848,7 +3848,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
         try testing.expectEqual(@as(usize, 3), lp.codegen_compiled);
 
-        const image = try buildImage(io, gpa, "idexp", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, .aarch64_macos, "idexp", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
         const out_path = std.fmt.allocPrint(gpa, "{s}/idexp", .{dir_name}) catch unreachable;
         defer gpa.free(out_path);
@@ -3875,12 +3875,12 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 1);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.instances.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3920,7 +3920,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 0);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
@@ -3929,7 +3929,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expectEqual(@as(usize, 1), derives.len);
         try testing.expectEqualStrings("Eq$eq$s0", derives[0].name.?);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3938,7 +3938,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
         try testing.expectEqual(@as(usize, 2), lp.codegen_compiled); // main + Eq$eq$s0
 
-        const image = try buildImage(io, gpa, "deq", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, .aarch64_macos, "deq", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
         const out_path = std.fmt.allocPrint(gpa, "{s}/deq", .{dir_name}) catch unreachable;
         defer gpa.free(out_path);
@@ -3965,12 +3965,12 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, 1);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.derives.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -4050,9 +4050,9 @@ fn checkAndLower(
 ) !LinkedProgram {
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
     r_out.* = .{ .path = path };
-    try pipeline(gpa, io, cache, .check, "aarch64-macos", r_out, 0);
+    try pipeline(gpa, io, cache, .check, .aarch64_macos, r_out, 0);
     try testing.expect(r_out.err == null);
-    const lowered = try lowerSingleFile(gpa, io, cache, "aarch64-macos", r_out, mode, .debug);
+    const lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, r_out, mode, .debug);
     return switch (lowered) {
         .ok => |ok| ok,
         .err => error.TestUnexpectedResult,
@@ -4588,7 +4588,7 @@ test "errors: non-exhaustive/unknown variant/arity/type; recursive enum; uninfer
         defer gpa.free(path);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expectEqual(@as(?anyerror, error.TypeError), r.err);
         try testing.expect(r.typecheck != null);
@@ -4626,7 +4626,7 @@ test "errors: non-exhaustive int/bool; guarded-only/partial-nested variant; inco
         defer gpa.free(path);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expectEqual(@as(?anyerror, error.TypeError), r.err);
         try testing.expect(r.typecheck != null);
@@ -4725,7 +4725,7 @@ test "errors: missing/unknown/mismatched fields; positional construction; recurs
         defer gpa.free(path);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expectEqual(@as(?anyerror, error.TypeError), r.err);
         try testing.expect(r.typecheck != null);
@@ -4774,7 +4774,7 @@ test "errors: undefined/duplicate labels (Resolve); continue-block & value-break
         defer gpa.free(path);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = c.src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expectEqual(@as(?anyerror, c.want), r.err);
         if (c.want == error.ResolveError) {
@@ -4815,7 +4815,7 @@ test "error: break/continue outside a loop and break-value in while/for are reje
         defer gpa.free(path);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
         var r: FileResult = .{ .path = path };
-        try pipeline(gpa, io, cache, .check, "aarch64-macos", &r, i);
+        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
         defer r.deinit(gpa);
         try testing.expectEqual(@as(?anyerror, error.TypeError), r.err);
         try testing.expect(r.typecheck != null);
@@ -4853,7 +4853,7 @@ test "byte-identical: a warm build equals a from-scratch (.force) build" {
     var warm = try checkAndLower(gpa, io, cache, path, src, .normal, &rw);
     defer rw.deinit(gpa);
     defer warm.deinit(gpa);
-    const warm_img = try buildImage(io, gpa, "p", warm.text, warm.entry_off, warm.cstrings, warm.data_relocs, .{}, warm.debug);
+    const warm_img = try buildImage(io, gpa, .aarch64_macos, "p", warm.text, warm.entry_off, warm.cstrings, warm.data_relocs, .{}, warm.debug);
     defer gpa.free(warm_img);
 
     // From scratch (ignore the cache).
@@ -4861,7 +4861,7 @@ test "byte-identical: a warm build equals a from-scratch (.force) build" {
     var fresh = try checkAndLower(gpa, io, cache, path, src, .force, &rf);
     defer rf.deinit(gpa);
     defer fresh.deinit(gpa);
-    const fresh_img = try buildImage(io, gpa, "p", fresh.text, fresh.entry_off, fresh.cstrings, fresh.data_relocs, .{}, fresh.debug);
+    const fresh_img = try buildImage(io, gpa, .aarch64_macos, "p", fresh.text, fresh.entry_off, fresh.cstrings, fresh.data_relocs, .{}, fresh.debug);
     defer gpa.free(fresh_img);
 
     try testing.expectEqualSlices(u8, fresh_img, warm_img);
@@ -4905,7 +4905,7 @@ test "reorder: swapping fn order is all cache hits and keeps correct linkage" {
     // The reordered binary still links correctly (call resolves by name): build
     // it and run it — must exit 7. (macOS/aarch64 only.)
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return;
-    const image = try buildImage(io, gpa, "p", lpb.text, lpb.entry_off, lpb.cstrings, lpb.data_relocs, .{}, lpb.debug);
+    const image = try buildImage(io, gpa, .aarch64_macos, "p", lpb.text, lpb.entry_off, lpb.cstrings, lpb.data_relocs, .{}, lpb.debug);
     defer gpa.free(image);
     const out_path = std.fmt.allocPrint(gpa, "{s}/p", .{src_dir}) catch unreachable;
     defer gpa.free(out_path);
@@ -5409,8 +5409,9 @@ test "every enum or range flag lists its valid values, on build, run and check (
     const path = dir_name ++ "/main.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fn main() -> int {\n    return 0\n}\n" });
 
-    const bad_target = "error: invalid value 'bogus' for --target (one of: native|aarch64-macos)\n";
-    const near_target = "error: invalid value 'aarch64-mac' for --target (one of: native|aarch64-macos)\ndid you mean 'aarch64-macos'?\n";
+    const targets = "(one of: native|aarch64-macos|aarch64-linux|aarch64-linux-gnu|x86_64-linux|x86_64-linux-gnu)\n";
+    const bad_target = "error: invalid value 'bogus' for --target " ++ targets;
+    const near_target = "error: invalid value 'aarch64-mac' for --target " ++ targets ++ "did you mean 'aarch64-macos'?\n";
     const passes = "(one of: fold|branch|forward|dce|inline|mem2reg)\n";
     const runs = [_]struct { argv: []const []const u8, line: []const u8 }{
         .{ .argv = &.{ "build", "--target", "bogus", path }, .line = bad_target },
@@ -5453,6 +5454,136 @@ test "every enum or range flag lists its valid values, on build, run and check (
         defer gpa.free(res.err);
         try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
         try testing.expectEqualStrings("", res.err);
+    }
+}
+
+test "`toy check --target` checks for that target's os, and a build for one toy cannot emit is R0021 (#422)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir_name = ".toy-test-driver-target-check";
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    const src = "import core/target_selftest\nfn main() -> int {\n    when target_selftest.on_linux { compile_error(\"checked for linux\") }\n    return 0\n}\n";
+    const Case = struct { args: []const []const u8, linux: bool };
+    const cases = [_]Case{
+        .{ .args = &.{ "check", harness.dev_core_imports, "--target", "aarch64-macos" }, .linux = false },
+        .{ .args = &.{ "check", harness.dev_core_imports, "--target", "aarch64-linux" }, .linux = true },
+        .{ .args = &.{ "check", harness.dev_core_imports, "--target", "aarch64-linux-gnu" }, .linux = true },
+        .{ .args = &.{ "check", harness.dev_core_imports, "--target", "x86_64-linux" }, .linux = true },
+    };
+    for (cases) |c| {
+        const res = try runToyOnFixture(gpa, io, dir_name, src, c.args);
+        defer gpa.free(res.out);
+        errdefer std.debug.print("{s}\n", .{res.out});
+        try testing.expectEqual(c.linux, std.mem.indexOf(u8, res.out, "error[T0086]: checked for linux") != null);
+        try testing.expectEqual(std.process.Child.Term{ .exited = if (c.linux) 1 else 0 }, res.term);
+    }
+
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    const path = dir_name ++ "/main.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fn main() -> int {\n    return 0\n}\n" });
+    for ([_][]const u8{ "aarch64-linux", "aarch64-linux-gnu", "x86_64-linux", "x86_64-linux-gnu" }) |t| {
+        const res = try spawnToyBoth(gpa, io, &.{ "build", "--target", t, "-o", dir_name ++ "/never", path });
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        const name = t[0 .. std.mem.indexOf(u8, t, "-gnu") orelse t.len];
+        const want = try std.fmt.allocPrint(gpa, "error[R0021]: code emission for {s} is not supported yet\n  = help: 'toy check --target {s}' checks the program for it\n", .{ name, name });
+        defer gpa.free(want);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 2 }, res.term);
+        try testing.expectEqualStrings("", res.out);
+        try testing.expectEqualStrings(want, res.err);
+        try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, dir_name ++ "/never", .{}));
+    }
+}
+
+test "`toy check` for a target whose libraries toy cannot read says it skips the library checks (#422)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir_name = ".toy-test-driver-target-libs";
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    const plain = dir_name ++ "/plain.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = plain, .data = "fn main() -> int {\n    return 0\n}\n" });
+    const ext = dir_name ++ "/ext.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = ext, .data = "extern \"toyz\" { fn labs(x: int) -> int }\nfn main() -> int {\n    return 0\n}\n" });
+    const note = "note: library and extern symbol checks are skipped for aarch64-linux: toy cannot read its shared libraries yet\n";
+    const Case = struct { args: []const []const u8, err: []const u8 };
+    const cases = [_]Case{
+        .{ .args = &.{ "check", "--target", "aarch64-linux", plain }, .err = "" },
+        .{ .args = &.{ "check", "--target", "aarch64-linux", ext }, .err = note },
+        .{ .args = &.{ "check", "--target", "aarch64-linux", "-l", "nosuchlibxyz", plain }, .err = note },
+    };
+    for (cases) |c| {
+        const res = try spawnToyBoth(gpa, io, c.args);
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        errdefer std.debug.print("{s}\n{s}\n", .{ res.out, res.err });
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+        try testing.expectEqualStrings("", res.out);
+        try testing.expectEqualStrings(c.err, res.err);
+    }
+}
+
+test "`toy run` takes only the host target, with a hint to build (#422)" {
+    const host = toyc.Target.host orelse return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir_name = ".toy-test-driver-cross-run";
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    const path = dir_name ++ "/main.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fn main() -> int {\n    return 0\n}\n" });
+    for ([_]toyc.Target{ .aarch64_macos, .aarch64_linux, .x86_64_linux }) |t| {
+        if (t.eql(host)) continue;
+        const res = try spawnToyBoth(gpa, io, &.{ "run", "--target", t.name(), path });
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        // The hint names a command that works for the target: a build, or a check where toy cannot emit.
+        const help = if (toyc.link.canEmit(t))
+            try std.fmt.allocPrint(gpa, "build it with 'toy build --target {s}' and run the binary on a machine of that target", .{t.name()})
+        else
+            try std.fmt.allocPrint(gpa, "'toy check --target {s}' checks the program for it", .{t.name()});
+        defer gpa.free(help);
+        const want = try std.fmt.allocPrint(gpa, "error: toy run runs only programs built for this host ({s}), not for {s}\n  = help: {s}\n", .{ host.name(), t.name(), help });
+        defer gpa.free(want);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 2 }, res.term);
+        try testing.expectEqualStrings(want, res.err);
+    }
+}
+
+test "`native` and the host's triple share the codegen cache (#422)" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try harness.skipUnlessBackend(io);
+    const dir_name = ".toy-test-driver-native-cache";
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir_name ++ "/main.toy", .data = "fn main() -> int {\n    return 0\n}\n" });
+    const cwd = try Io.Dir.cwd().realPathFileAlloc(io, dir_name, gpa);
+    defer gpa.free(cwd);
+    // A fresh cwd is a fresh `.toy` cache: the first build compiles every unit.
+    const builds = [_]struct { target: []const u8, out: []const u8, cold: bool }{
+        .{ .target = "--target=native", .out = "a", .cold = true },
+        .{ .target = "--target=aarch64-macos", .out = "b", .cold = false },
+        .{ .target = "--target=native", .out = "c", .cold = false },
+    };
+    for (builds) |b| {
+        const res = (try harness.runTool(gpa, io, cwd, &.{ harness.toy_exe, "build", "--codegen-stats", b.target, "-o", b.out, "main.toy" })).?;
+        defer res.deinit(gpa);
+        errdefer std.debug.print("{s}{s}\n", .{ res.out, res.err });
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+        try testing.expectEqual(b.cold, std.mem.indexOf(u8, res.out, "codegen: compiled=0 ") == null);
     }
 }
 

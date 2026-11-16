@@ -36,6 +36,7 @@ const Dylib = @import("Dylib.zig");
 const runtime = @import("../codegen/runtime/runtime.zig");
 const sym = @import("../symbols/Sym.zig");
 const Engine = @import("../query/Engine.zig");
+const Target = @import("../Target.zig");
 
 /// Emission options. `identifier` is the code-signing identity (the output
 /// basename) and is byte-load-bearing (it enters both the signature and the
@@ -43,9 +44,7 @@ const Engine = @import("../query/Engine.zig");
 /// reloc targets (dedup + stable-sort by name), not a caller input.
 pub const Options = struct {
     identifier: []const u8,
-    /// Informational today; the only supported target is aarch64-macos and it is
-    /// not threaded into the emitted bytes.
-    target: []const u8 = "aarch64-macos",
+    target: Target = .aarch64_macos,
     /// The per-type descriptor table to embed, in canonical order. Empty (the default)
     /// leaves the image byte-identical to a descriptor-free build.
     descriptors: []const Link.DescEntry = &.{},
@@ -491,6 +490,33 @@ pub fn assembleAndSign(
     return layout.image;
 }
 
+/// Whether toy emits code for `target`: the back-end lowers to aarch64 and writes Mach-O
+/// only, so any other target stops at `toy check`.
+pub fn canEmit(target: Target) bool {
+    return target.arch == .aarch64 and target.objectFormat() == .macho;
+}
+
+/// The runnable image for `target`, in its object format. The driver rejects a target
+/// `canEmit` refuses before it lowers, so `error.UnsupportedTarget` is a caller bug.
+pub fn writeImage(
+    io: Io,
+    gpa: std.mem.Allocator,
+    target: Target,
+    identifier: []const u8,
+    code: []const u8,
+    entry_off: u32,
+    cstrings: []const u8,
+    data_relocs: []const Link.Reloc,
+    libs: Dylib.Linking,
+    debug: MachO.Debug,
+) ![]u8 {
+    if (!canEmit(target)) return error.UnsupportedTarget;
+    return switch (target.objectFormat()) {
+        .macho => assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, debug),
+        .elf => unreachable,
+    };
+}
+
 /// THE SINGLE PUBLIC BOUNDARY: lowered `FnCode`s -> a signed, runnable Mach-O
 /// image. CONSUMES `fns`. Fuses `linkProgram` + `assembleAndSign`; the step order
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
@@ -507,7 +533,7 @@ pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry:
         };
         gpa.free(lk.data_relocs);
     }
-    return assembleAndSign(io, gpa, opts.identifier, lk.text, lk.entry_off, lk.cstrings, lk.data_relocs, .{}, lk.debug);
+    return writeImage(io, gpa, opts.target, opts.identifier, lk.text, lk.entry_off, lk.cstrings, lk.data_relocs, .{}, lk.debug);
 }
 
 test "link.emitExecutable: hand-built main returns 42 (no front-end)" {

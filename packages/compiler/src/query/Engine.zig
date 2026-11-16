@@ -21,6 +21,7 @@ const Token = @import("../ast/Token.zig").Token;
 const Lexer = @import("../lex.zig");
 const Cache = @import("Cache.zig");
 const Key = @import("Key.zig");
+const Target = @import("../Target.zig");
 const CodegenMir = @import("../codegen/CodegenMir.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const FrameLayout = @import("../codegen/frame/FrameLayout.zig");
@@ -142,7 +143,7 @@ pub fn lex(
     self: Engine,
     gpa: std.mem.Allocator,
     io: Io,
-    target: []const u8,
+    target: Target,
     source: []const u8,
     tmp_tag: usize,
     comptime swallow_get: bool,
@@ -187,7 +188,7 @@ pub fn parse(
     self: Engine,
     gpa: std.mem.Allocator,
     io: Io,
-    target: []const u8,
+    target: Target,
     source: []const u8,
     tokens: []const Token,
     tmp_tag: usize,
@@ -629,7 +630,7 @@ pub fn codegen(
     self: Engine,
     gpa: std.mem.Allocator,
     io: Io,
-    target: []const u8,
+    target: Target,
     fr: *const Frozen,
     tmp_tag: usize,
     slot: *Slot,
@@ -640,7 +641,7 @@ pub fn codegen(
 /// A unit's key: its own content (`unitFp`) and that of every callee the inliner can
 /// splice into it (`InlineUnits.Reach`), xor'd with the profile and the unit's OWN emitted
 /// symbol (`Key.codegen` is the one place that fold lives).
-pub fn unitKey(gpa: std.mem.Allocator, target: []const u8, fr: *const Frozen) !Cache.Key {
+pub fn unitKey(gpa: std.mem.Allocator, target: Target, fr: *const Frozen) !Cache.Key {
     var fp = try unitFp(gpa, fr);
     var reach = try InlineUnits.Reach.init(gpa, fr);
     defer reach.deinit();

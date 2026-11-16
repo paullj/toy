@@ -224,7 +224,7 @@ const Fixture = struct {
         var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
         const entry_path = try std.fmt.bufPrint(&entry_buf, "{s}/{s}", .{ dir_name, entry });
 
-        var graph = try Graph.discover(gpa, io, cache, "native", entry_path, .{});
+        var graph = try Graph.discover(gpa, io, cache, .aarch64_macos, entry_path, .{});
         errdefer graph.deinit(gpa);
         try testing.expect(graph.err == null);
         return .{ .graph = graph, .res = try ResolveGraph.resolveGraph(gpa, &graph) };

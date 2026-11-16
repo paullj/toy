@@ -22,17 +22,14 @@ const ResolveGraph = @import("../resolve_graph.zig");
 const TypecheckGraph = @import("../types_graph.zig");
 const Decide = @import("Decide.zig");
 const version = @import("../version.zig");
+const Target = @import("../Target.zig");
 
 pub const cache_root = ".toy";
 
-/// The target a build names when `--target` is not given. Codegen cache keys fold the
-/// target name, so an in-process build that stands in for `toy build` (the corpus
-/// harness, the LSP) passes this same name rather than a spelling of the host triple.
-pub const default_target = "native";
-
-/// Every `--target` spelling the CLI takes. Code emission is aarch64-macos only, so
-/// `native` names the same target on the one supported host.
-pub const targets = [_][:0]const u8{ default_target, "aarch64-macos" };
+/// The target when none is named (the CLI without `--target`, the test harnesses, the
+/// LSP): the host, so their cache entries are shared. A host toy cannot build for falls
+/// back to aarch64-macos, so the front-end still checks there.
+pub const default_target: Target = Target.host orelse .aarch64_macos;
 
 /// The buffer size the cache `dir_buf` needs: `.toy/<stamp>/cache`.
 pub const cache_dir_buf_len = cache_root.len + 1 + version.stamp_max + "/cache".len;
@@ -137,7 +134,7 @@ pub const FileResult = struct {
 /// `FileResult` per input (same order); per-file failures are reported in
 /// `FileResult.err`, not as a hard error. Caller owns the slice and must
 /// `deinit` each result.
-pub fn run(gpa: std.mem.Allocator, io: Io, emit: Emit, target: []const u8, paths: []const []const u8) ![]FileResult {
+pub fn run(gpa: std.mem.Allocator, io: Io, emit: Emit, target: Target, paths: []const []const u8) ![]FileResult {
     // Cache is namespaced by compiler identity: .toy/<stamp>/cache/. The buffer
     // lives on this stack frame, which outlives every job (we await below).
     var dir_buf: [cache_root.len + 1 + version.stamp_max + "/cache".len]u8 = undefined;
@@ -153,7 +150,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, emit: Emit, target: []const u8, paths
         io: Io,
         cache: Cache,
         emit: Emit,
-        target: []const u8,
+        target: Target,
         results: []FileResult,
         pub fn args(c: @This(), i: usize) std.meta.ArgsTuple(@TypeOf(job)) {
             return .{ c.gpa, c.io, c.cache, c.emit, c.target, &c.results[i], i };
@@ -171,13 +168,13 @@ pub fn run(gpa: std.mem.Allocator, io: Io, emit: Emit, target: []const u8, paths
     return results;
 }
 
-pub fn job(gpa: std.mem.Allocator, io: Io, cache: Cache, emit: Emit, target: []const u8, result: *FileResult, index: usize) void {
+pub fn job(gpa: std.mem.Allocator, io: Io, cache: Cache, emit: Emit, target: Target, result: *FileResult, index: usize) void {
     pipeline(gpa, io, cache, emit, target, result, index) catch |err| {
         result.err = err;
     };
 }
 
-pub fn pipeline(gpa: std.mem.Allocator, io: Io, cache: Cache, emit: Emit, target: []const u8, result: *FileResult, index: usize) !void {
+pub fn pipeline(gpa: std.mem.Allocator, io: Io, cache: Cache, emit: Emit, target: Target, result: *FileResult, index: usize) !void {
     const cache_phase = emit.cachePhase();
     result.source = try Io.Dir.cwd().readFileAlloc(io, result.path, gpa, .unlimited);
 

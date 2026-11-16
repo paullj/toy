@@ -20,3 +20,7 @@ pub fn selftest() -> int {
     if os_if != os { return 0 }
     return os * 100 + arch * 10 + profile
 }
+
+# For the `toy check --target` test, which sees only diagnostics: a user module reads it
+# in a `when`, so the arm `check` takes shows the os it checked for.
+pub on_linux: bool =: target.os == .linux
