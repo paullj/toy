@@ -22,7 +22,7 @@
 const std = @import("std");
 const Mir = @import("../Mir.zig");
 const Inst = @import("Inst.zig");
-const Aarch64 = @import("../../Aarch64.zig");
+const Aarch64 = @import("encode.zig");
 
 const Reg = Mir.Reg;
 const Mem = Mir.Mem;

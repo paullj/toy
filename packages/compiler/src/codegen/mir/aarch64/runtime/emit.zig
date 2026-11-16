@@ -6,9 +6,10 @@
 //! backpatch primitives the bodies share.
 
 const std = @import("std");
-const Aarch64 = @import("../Aarch64.zig");
-const Link = @import("../../link/Link.zig");
-const StdNames = @import("../../symbols/StdNames.zig");
+const Aarch64 = @import("../encode.zig");
+const Link = @import("../../../../link/Link.zig");
+const Reloc = @import("../reloc.zig");
+const StdNames = @import("../../../../symbols/StdNames.zig");
 const testing = std.testing;
 
 /// Append one little-endian AArch64 instruction word to a builtin's code buffer.
@@ -46,13 +47,13 @@ pub fn emitImportPreamble(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.
     {
         const nm = try gpa.dupe(u8, name);
         errdefer gpa.free(nm);
-        try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .import = .{ .kind = .import, .name = nm } }, .kind = .adrp_page });
+        try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .import = .{ .kind = .import, .name = nm } }, .kind = Reloc.of(.adrp_page) });
     }
     try emitWord(code, gpa, Aarch64.adrp(16, 0));
     {
         const nm = try gpa.dupe(u8, name);
         errdefer gpa.free(nm);
-        try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .import = .{ .kind = .import, .name = nm } }, .kind = .ldr_lo12 });
+        try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .import = .{ .kind = .import, .name = nm } }, .kind = Reloc.of(.ldr_lo12) });
     }
     try emitWord(code, gpa, Aarch64.ldrRegUoff(rd, 16, 0));
 }
@@ -90,10 +91,10 @@ pub fn emitTextBase(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc)
     const adr_pos: u32 = @intCast(code.items.len);
     try emit(code, gpa, A.adr(9, 0)); // x9 = text_base + adr_off
     var site: u32 = @intCast(code.items.len);
-    try relocs.append(gpa, .{ .site = site, .target = .none, .kind = .movw_g0, .addend = @as(i64, adr_pos) - @as(i64, site) });
+    try relocs.append(gpa, .{ .site = site, .target = .none, .kind = Reloc.of(.movw_g0), .addend = @as(i64, adr_pos) - @as(i64, site) });
     try emit(code, gpa, A.movz(10, 0, 0)); // x10 = adr_off (lo)
     site = @intCast(code.items.len);
-    try relocs.append(gpa, .{ .site = site, .target = .none, .kind = .movw_g1, .addend = @as(i64, adr_pos) - @as(i64, site) });
+    try relocs.append(gpa, .{ .site = site, .target = .none, .kind = Reloc.of(.movw_g1), .addend = @as(i64, adr_pos) - @as(i64, site) });
     try emit(code, gpa, A.movk(10, 0, 1)); // x10 |= adr_off (hi)
     try emit(code, gpa, A.subReg(dst_reg, 9, 10)); // dst = text_base
 }
@@ -182,7 +183,7 @@ pub fn emitFpWalk(
 pub fn emitRuntimeCall(code: *std.ArrayList(u8), relocs: *std.ArrayList(Link.Reloc), gpa: std.mem.Allocator, f: StdNames.RuntimeFn) error{OutOfMemory}!void {
     const nm = try gpa.dupe(u8, f.name());
     errdefer gpa.free(nm);
-    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .func = .{ .kind = .user_fn, .name = nm } }, .kind = .call26 });
+    try relocs.append(gpa, .{ .site = @intCast(code.items.len), .target = .{ .func = .{ .kind = .user_fn, .name = nm } }, .kind = Reloc.of(.call26) });
     try emitWord(code, gpa, Aarch64.bl(0));
 }
 

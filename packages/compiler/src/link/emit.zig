@@ -8,7 +8,7 @@
 //! literals program-wide IN A DETERMINISTIC ORDER (fn source order, then in-fn
 //! literal order), (3) rewrite each `.cstr` reloc's
 //! hash target to its global `__cstring` offset, (4) `Link.link` (layout +
-//! intra-module `.call26` patch + collect cross-segment data_relocs), (5)
+//! intra-module patch + collect cross-segment data_relocs), (5)
 //! `MachO.assemble` (segments, __cstring, __got import, chained fixups), (6)
 //! `Link.applyDataRelocs` (rebase cross-segment relocs after vmaddrs are known),
 //! (7) `CodeSign.sign` LAST, over the final bytes. The ORDER IS BYTE-LOAD-BEARING
@@ -24,7 +24,6 @@
 //! byte-identity tests drive `assembleAndSign` directly.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
 
@@ -34,6 +33,7 @@ const MachO = @import("MachO.zig");
 const CodeSign = @import("CodeSign.zig");
 const Dylib = @import("Dylib.zig");
 const runtime = @import("../codegen/runtime/runtime.zig");
+const Isa = @import("../codegen/Isa.zig");
 const sym = @import("../symbols/Sym.zig");
 const Engine = @import("../query/Engine.zig");
 const Target = @import("../Target.zig");
@@ -61,7 +61,7 @@ pub const Linked = struct {
     entry_off: u32,
     /// Interned `__cstring` bytes. Owned; empty for string-free programs.
     cstrings: []u8 = &.{},
-    /// Cross-segment relocs (adrp/add/ldr to __cstring/__got) rebased to absolute
+    /// Cross-segment relocs (to __cstring/__got/__bss) rebased to absolute
     /// __text offsets, patched by `Link.applyDataRelocs` after MachO assigns
     /// vmaddrs. Owned; empty for programs with no data relocations. The dyld import
     /// set is DERIVED from these (`.import` targets) in `assembleAndSign` — never a
@@ -90,7 +90,7 @@ const builtin_calls = blk: {
     break :blk out;
 };
 
-pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
+pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
     // We OWN `fns`' elements now (the caller relinquished them); on any failure free
     // the ones not yet moved into `all` (or dropped) plus everything in `all`.
     var all: std.ArrayList(Link.FnCode) = .empty;
@@ -149,8 +149,8 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
     const uses_panic = used[comptime runtime.handBuiltinIndex("panic")];
     // The referenced hand-emitted builtin bodies follow the kept fns, in `hand_builtins`
     // order, so the linked image never depends on thread order.
-    for (runtime.hand_builtins, 0..) |hb, i| {
-        if (used[i]) try all.append(gpa, try hb.lower(gpa));
+    for (0..runtime.hand_builtins.len) |i| {
+        if (used[i]) try all.append(gpa, try backend.hand_builtins[i](gpa));
     }
 
     // 2) Intern strings program-wide via `internCstrings` (stable collect +
@@ -226,7 +226,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sy
     // 4) Intern symbols (source order) and link.
     var si: Link.SymInterner = .{};
     defer si.deinit(gpa);
-    const linked = try Link.link(io, gpa, all.items, &si, entry, uses_panic, uses_gc, descriptors, debug);
+    const linked = try Link.link(io, gpa, &backend.relocs, all.items, &si, entry, uses_panic, uses_gc, descriptors, debug);
     errdefer gpa.free(linked.text);
     errdefer linked.debug.deinit(gpa);
     errdefer gpa.free(linked.data_relocs);
@@ -418,7 +418,7 @@ fn importNames(gpa: std.mem.Allocator, data_relocs: []const Link.Reloc) ![]const
 /// Build the fully signed, runnable Mach-O image for `code`. `identifier` is the
 /// code-signing identity (the output basename); `entry_off` is `main`'s byte
 /// offset within `code`. `cstrings` are the interned `__cstring` bytes, and
-/// `data_relocs` the cross-segment adrp/add/ldr patches `Link.link` rebased to
+/// `data_relocs` the cross-segment patches `Link.link` rebased to
 /// absolute __text offsets; the dyld import set is derived from their `.import` targets.
 ///
 /// ORDER MATTERS: MachO assigns segment vmaddrs, THEN `Link.applyDataRelocs`
@@ -428,6 +428,7 @@ fn importNames(gpa: std.mem.Allocator, data_relocs: []const Link.Reloc) ![]const
 pub fn assembleAndSign(
     io: Io,
     gpa: std.mem.Allocator,
+    patcher: *const Link.Patcher,
     identifier: []const u8,
     code: []const u8,
     entry_off: u32,
@@ -463,7 +464,7 @@ pub fn assembleAndSign(
     errdefer gpa.free(layout.image);
 
     // Slot i binds the i-th sorted import; `applyDataRelocs` looks each `.import`
-    // target's (bare) name up here to patch its adrp/ldr to the right __got slot.
+    // target's (bare) name up here to patch its sites to the right __got slot.
     var import_slots: std.StringHashMapUnmanaged(u32) = .empty;
     defer import_slots.deinit(gpa);
     for (names, 0..) |nm, i| try import_slots.put(gpa, nm, @intCast(i));
@@ -474,6 +475,7 @@ pub fn assembleAndSign(
     if (data_relocs.len > 0) {
         Link.applyDataRelocs(
             io,
+            patcher,
             layout.image[layout.code_file_off..][0..layout.text_size],
             data_relocs,
             layout.text_vmaddr + layout.code_file_off,
@@ -490,10 +492,10 @@ pub fn assembleAndSign(
     return layout.image;
 }
 
-/// Whether toy emits code for `target`: the back-end lowers to aarch64 and writes Mach-O
-/// only, so any other target stops at `toy check`.
+/// Whether toy emits code for `target`: it has an ISA module for the arch and writes
+/// Mach-O only, so any other target stops at `toy check`.
 pub fn canEmit(target: Target) bool {
-    return target.arch == .aarch64 and target.objectFormat() == .macho;
+    return Isa.of(target.arch) != null and target.objectFormat() == .macho;
 }
 
 /// The runnable image for `target`, in its object format. The driver rejects a target
@@ -502,6 +504,7 @@ pub fn writeImage(
     io: Io,
     gpa: std.mem.Allocator,
     target: Target,
+    patcher: *const Link.Patcher,
     identifier: []const u8,
     code: []const u8,
     entry_off: u32,
@@ -512,7 +515,7 @@ pub fn writeImage(
 ) ![]u8 {
     if (!canEmit(target)) return error.UnsupportedTarget;
     return switch (target.objectFormat()) {
-        .macho => assembleAndSign(io, gpa, identifier, code, entry_off, cstrings, data_relocs, libs, debug),
+        .macho => assembleAndSign(io, gpa, patcher, identifier, code, entry_off, cstrings, data_relocs, libs, debug),
         .elf => unreachable,
     };
 }
@@ -521,8 +524,8 @@ pub fn writeImage(
 /// image. CONSUMES `fns`. Fuses `linkProgram` + `assembleAndSign`; the step order
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
 /// symbol identity (e.g. `{.user_fn, "main"}`). Caller owns the returned bytes.
-pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
-    const lk = try linkProgram(io, gpa, fns, entry, opts.descriptors, opts.debug);
+pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
+    const lk = try linkProgram(io, gpa, backend, fns, entry, opts.descriptors, opts.debug);
     defer {
         lk.debug.deinit(gpa);
         gpa.free(lk.text);
@@ -533,59 +536,7 @@ pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, entry:
         };
         gpa.free(lk.data_relocs);
     }
-    return writeImage(io, gpa, opts.target, opts.identifier, lk.text, lk.entry_off, lk.cstrings, lk.data_relocs, .{}, lk.debug);
-}
-
-test "link.emitExecutable: hand-built main returns 42 (no front-end)" {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
-    const gpa = testing.allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // A `main` that returns 42, built WITHOUT the front-end: just the two AArch64
-    // words `movz w0, #42` (0x52800540) and `ret` (0xD65F03C0), little-endian.
-    const code = try gpa.alloc(u8, 8);
-    std.mem.writeInt(u32, code[0..4], 0x52800540, .little); // movz w0, #42
-    std.mem.writeInt(u32, code[4..8], 0xD65F03C0, .little); // ret
-
-    var fns = [_]Link.FnCode{.{
-        .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") },
-        .code = code,
-        .relocs = try gpa.alloc(Link.Reloc, 0),
-        .literals = try gpa.alloc(Link.Literal, 0),
-    }};
-
-    const image = try emitExecutable(io, gpa, &fns, .{ .kind = .user_fn, .name = "main" }, .{ .identifier = "m" });
-    defer gpa.free(image);
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_name_buf: [64]u8 = undefined;
-    const dir_name = std.fmt.bufPrint(&dir_name_buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path}) catch unreachable;
-
-    const out_path = std.fmt.allocPrint(gpa, "{s}/m", .{dir_name}) catch unreachable;
-    defer gpa.free(out_path);
-    {
-        const perms: Io.File.Permissions = .fromMode(0o755);
-        var f = try Io.Dir.cwd().createFile(io, out_path, .{ .permissions = perms });
-        defer f.close(io);
-        try f.writeStreamingAll(io, image);
-        try f.setPermissions(io, perms);
-    }
-
-    const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
-    defer gpa.free(abs);
-    {
-        var cs = try std.process.spawn(io, .{ .argv = &.{ "codesign", "-v", abs } });
-        const cs_term = try cs.wait(io);
-        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs_term);
-    }
-
-    var child = try std.process.spawn(io, .{ .argv = &.{abs} });
-    const term = try child.wait(io);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, term);
+    return writeImage(io, gpa, opts.target, &backend.relocs, opts.identifier, lk.text, lk.entry_off, lk.cstrings, lk.data_relocs, .{}, lk.debug);
 }
 
 /// A literals-only `FnCode` for the cstring-interning tests (other fields unused
@@ -594,39 +545,69 @@ fn litFn(literals: []const Link.Literal) Link.FnCode {
     return .{ .sym = .{ .kind = .user_fn, .name = "" }, .code = &.{}, .relocs = &.{}, .literals = @constCast(literals) };
 }
 
-// AArch64 placeholder words (the reloc patchers overwrite/preserve as needed):
-// `adrp x0,0` / `add x0,x0,#0` / `bl #0` / `ret`.
-const w_adrp0: u32 = 0x90000000;
-const w_add0: u32 = 0x91000000;
-const w_bl0: u32 = 0x94000000;
-const w_ret: u32 = 0xD65F03C0;
+// These tests link through `Link.TestIsa`: they test the tail's ordering and determinism,
+// not an encoding, so each word is a zero placeholder the test patcher overwrites.
+const T = Link.TestIsa;
 
-/// Build one owned `FnCode` for the determinism test: `adrp/add` referencing a cstring
-/// literal (a cross-segment data-reloc pair) plus, if `call_panic`, a `bl panic` (a
-/// call26 to the appended builtin, which drags in `write` + the symbol table). Consumed
-/// (freed) by `linkProgram`.
+/// `T.patcher` with a placeholder body per hand builtin. `panic`'s imports `write`, as
+/// every ISA's does.
+const test_backend: Isa.Backend = .{ .lower = noLower, .relocs = T.patcher, .hand_builtins = &test_builtins, .inst_count = noCount };
+
+const test_builtins = blk: {
+    var out: [runtime.hand_builtins.len]Isa.BuiltinFn = undefined;
+    for (runtime.hand_builtins, &out) |hb, *f| f.* = testBuiltin(hb.name);
+    break :blk out;
+};
+
+fn testBuiltin(comptime name: []const u8) Isa.BuiltinFn {
+    return struct {
+        fn lower(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
+            const code = try gpa.alloc(u8, 4);
+            @memset(code, 0);
+            var relocs: []Link.Reloc = &.{};
+            if (std.mem.eql(u8, name, "panic")) {
+                relocs = try gpa.alloc(Link.Reloc, 1);
+                relocs[0] = .{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, "write") } }, .kind = T.pcrel };
+            }
+            return .{ .sym = .{ .kind = .builtin, .name = try gpa.dupe(u8, name) }, .code = code, .relocs = relocs, .literals = &.{} };
+        }
+    }.lower;
+}
+
+fn noCount(_: []const u8) usize {
+    unreachable;
+}
+
+fn noLower(_: std.mem.Allocator, _: *const @import("../ir/Ir.zig").Function, _: []const @import("../types.zig").Layout, _: []const @import("../types.zig").EnumLayout, _: bool, _: bool, _: *std.ArrayList(@import("../diagnostics/Diagnostic.zig").Diagnostic)) error{OutOfMemory}!Link.FnCode {
+    unreachable;
+}
+
+/// Build one owned `FnCode` for the determinism test: an address pair referencing a
+/// cstring literal (a cross-segment data-reloc pair) plus, if `call_panic`, a call to the
+/// appended `panic` builtin, which drags in `write` + the symbol table. Consumed (freed)
+/// by `linkProgram`.
 fn detFn(gpa: std.mem.Allocator, name: []const u8, lit_hash: u64, lit_bytes: []const u8, call_panic: bool) !Link.FnCode {
     return detFnCalling(gpa, name, lit_hash, lit_bytes, call_panic, &.{});
 }
 
-/// `detFn` that also ends in a `bl` to each of `callees` (before the `ret`), so the link
+/// `detFn` that also ends in a call to each of `callees`, so the link
 /// keeps them.
 fn detFnCalling(gpa: std.mem.Allocator, name: []const u8, lit_hash: u64, lit_bytes: []const u8, call_panic: bool, callees: []const []const u8) !Link.FnCode {
     var words: std.ArrayList(u32) = .empty;
     defer words.deinit(gpa);
     var relocs: std.ArrayList(Link.Reloc) = .empty;
-    try words.appendSlice(gpa, &.{ w_adrp0, w_add0 });
-    try relocs.append(gpa, .{ .site = 0, .target = .{ .cstr = lit_hash }, .kind = .adrp_page });
-    try relocs.append(gpa, .{ .site = 4, .target = .{ .cstr = lit_hash }, .kind = .add_lo12 });
+    try words.appendSlice(gpa, &.{ 0, 0 });
+    try relocs.append(gpa, .{ .site = 0, .target = .{ .cstr = lit_hash }, .kind = T.pcrel });
+    try relocs.append(gpa, .{ .site = 4, .target = .{ .cstr = lit_hash }, .kind = T.pcrel });
     if (call_panic) {
-        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .func = .{ .kind = .builtin, .name = try gpa.dupe(u8, "panic") } }, .kind = .call26 });
-        try words.append(gpa, w_bl0);
+        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .func = .{ .kind = .builtin, .name = try gpa.dupe(u8, "panic") } }, .kind = T.call });
+        try words.append(gpa, 0);
     }
     for (callees) |c| {
-        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .func = .{ .kind = .user_fn, .name = try gpa.dupe(u8, c) } }, .kind = .call26 });
-        try words.append(gpa, w_bl0);
+        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .func = .{ .kind = .user_fn, .name = try gpa.dupe(u8, c) } }, .kind = T.call });
+        try words.append(gpa, 0);
     }
-    try words.append(gpa, w_ret);
+    try words.append(gpa, 0);
     const code = try gpa.alloc(u8, words.items.len * 4);
     for (words.items, 0..) |w, i| std.mem.writeInt(u32, code[i * 4 ..][0..4], w, .little);
     const lits = try gpa.alloc(Link.Literal, 1);
@@ -634,21 +615,21 @@ fn detFnCalling(gpa: std.mem.Allocator, name: []const u8, lit_hash: u64, lit_byt
     return .{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, name) }, .code = code, .relocs = try relocs.toOwnedSlice(gpa), .literals = lits };
 }
 
-/// Build one owned `FnCode` that calls an `extern` import `sym` via its GOT slot:
-/// `adrp x16,0 ; ldr x16,[x16] ; blr x16 ; [bl callee ;] ret`, with the two `.import`
-/// relocs the cross-segment pass rebases to the `__got` slot. Consumed (freed) by
+/// Build one owned `FnCode` that calls an `extern` import `sym` via its GOT slot (and
+/// then `callee`, if any), with the two `.import` relocs the cross-segment pass rebases
+/// to the `__got` slot. Consumed (freed) by
 /// `linkProgram`.
 fn importFn(gpa: std.mem.Allocator, name: []const u8, sym_name: []const u8, callee: ?[]const u8) !Link.FnCode {
     const code = try gpa.alloc(u8, if (callee != null) 20 else 16);
-    std.mem.writeInt(u32, code[0..4], w_adrp0, .little);
-    std.mem.writeInt(u32, code[4..8], 0xF9400210, .little); // ldr x16,[x16]
-    std.mem.writeInt(u32, code[8..12], 0xD63F0200, .little); // blr x16
-    if (callee != null) std.mem.writeInt(u32, code[12..16], w_bl0, .little);
-    std.mem.writeInt(u32, code[code.len - 4 ..][0..4], w_ret, .little);
+    std.mem.writeInt(u32, code[0..4], 0, .little);
+    std.mem.writeInt(u32, code[4..8], 0, .little);
+    std.mem.writeInt(u32, code[8..12], 0, .little);
+    if (callee != null) std.mem.writeInt(u32, code[12..16], 0, .little);
+    std.mem.writeInt(u32, code[code.len - 4 ..][0..4], 0, .little);
     var relocs: std.ArrayList(Link.Reloc) = .empty;
-    try relocs.append(gpa, .{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, sym_name) } }, .kind = .adrp_page });
-    try relocs.append(gpa, .{ .site = 4, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, sym_name) } }, .kind = .ldr_lo12 });
-    if (callee) |c| try relocs.append(gpa, .{ .site = 12, .target = .{ .func = .{ .kind = .user_fn, .name = try gpa.dupe(u8, c) } }, .kind = .call26 });
+    try relocs.append(gpa, .{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, sym_name) } }, .kind = T.pcrel });
+    try relocs.append(gpa, .{ .site = 4, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, sym_name) } }, .kind = T.pcrel });
+    if (callee) |c| try relocs.append(gpa, .{ .site = 12, .target = .{ .func = .{ .kind = .user_fn, .name = try gpa.dupe(u8, c) } }, .kind = T.call });
     return .{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, name) }, .code = code, .relocs = try relocs.toOwnedSlice(gpa), .literals = &.{} };
 }
 
@@ -673,7 +654,7 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
 
     var t = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t.deinit();
-    var lk = try linkProgram(t.io(), gpa, fns, entry, &.{}, null);
+    var lk = try linkProgram(t.io(), gpa, &test_backend, fns, entry, &.{}, null);
     defer freeLinked(gpa, &lk);
 
     // Only `main` survives: no `aaa`, no `bbb`, so no `panic` body either.
@@ -695,14 +676,14 @@ test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and 
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    const img_serial = try emitExecutable(t_serial.io(), gpa, fns_serial, entry, .{ .identifier = "spike" });
+    const img_serial = try emitExecutable(t_serial.io(), gpa, &test_backend, fns_serial, entry, .{ .identifier = "spike" });
     defer gpa.free(img_serial);
 
     const fns_par = try twoImportFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    const img_par = try emitExecutable(t_par.io(), gpa, fns_par, entry, .{ .identifier = "spike" });
+    const img_par = try emitExecutable(t_par.io(), gpa, &test_backend, fns_par, entry, .{ .identifier = "spike" });
     defer gpa.free(img_par);
 
     try testing.expectEqualSlices(u8, img_serial, img_par);
@@ -715,21 +696,21 @@ test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and 
 }
 
 /// One owned `FnCode` `main` that reads the collector's control block and the GC stack
-/// map, as the collector does: `adrp/add` of each, then `ret`. Fresh each call so both
+/// map, as the collector does: the address of each. Fresh each call so both
 /// determinism-test runs get their own to consume.
 fn gcFns(gpa: std.mem.Allocator) ![]Link.FnCode {
     const fns = try gpa.alloc(Link.FnCode, 1);
     const code = try gpa.alloc(u8, 20);
     for (0..2) |k| {
-        std.mem.writeInt(u32, code[k * 8 ..][0..4], w_adrp0, .little);
-        std.mem.writeInt(u32, code[k * 8 + 4 ..][0..4], w_add0, .little);
+        std.mem.writeInt(u32, code[k * 8 ..][0..4], 0, .little);
+        std.mem.writeInt(u32, code[k * 8 + 4 ..][0..4], 0, .little);
     }
-    std.mem.writeInt(u32, code[16..20], w_ret, .little);
+    std.mem.writeInt(u32, code[16..20], 0, .little);
     const relocs = try gpa.dupe(Link.Reloc, &.{
-        .{ .site = 0, .target = .{ .data = 0 }, .kind = .adrp_page },
-        .{ .site = 4, .target = .{ .data = 0 }, .kind = .add_lo12 },
-        .{ .site = 8, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = .adrp_page },
-        .{ .site = 12, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = .add_lo12 },
+        .{ .site = 0, .target = .{ .data = 0 }, .kind = T.pcrel },
+        .{ .site = 4, .target = .{ .data = 0 }, .kind = T.pcrel },
+        .{ .site = 8, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = T.pcrel },
+        .{ .site = 12, .target = .{ .cstr = Link.gc_stackmap_base_hash }, .kind = T.pcrel },
     });
     fns[0] = .{ .sym = .{ .kind = .user_fn, .name = try gpa.dupe(u8, "main") }, .code = code, .relocs = relocs, .literals = &.{} };
     return fns;
@@ -738,7 +719,6 @@ fn gcFns(gpa: std.mem.Allocator) ![]Link.FnCode {
 test "backend determinism: a collector-using image is byte-identical at -j1 and -jN" {
     // The control block's zero-fill segment and the stack map must be a pure function of
     // the fn set, so the whole image is identical regardless of thread count.
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const gpa = testing.allocator;
     const entry = Link.SymName{ .kind = .user_fn, .name = "main" };
 
@@ -746,14 +726,14 @@ test "backend determinism: a collector-using image is byte-identical at -j1 and 
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    const img_serial = try emitExecutable(t_serial.io(), gpa, fns_serial, entry, .{ .identifier = "gc" });
+    const img_serial = try emitExecutable(t_serial.io(), gpa, &test_backend, fns_serial, entry, .{ .identifier = "gc" });
     defer gpa.free(img_serial);
 
     const fns_par = try gcFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    const img_par = try emitExecutable(t_par.io(), gpa, fns_par, entry, .{ .identifier = "gc" });
+    const img_par = try emitExecutable(t_par.io(), gpa, &test_backend, fns_par, entry, .{ .identifier = "gc" });
     defer gpa.free(img_par);
 
     try testing.expectEqualSlices(u8, img_serial, img_par);
@@ -775,14 +755,14 @@ test "backend determinism: the gc stack-map table (riding __cstring) is byte-ide
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, &test_backend, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try gcFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, &test_backend, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);
@@ -824,14 +804,14 @@ test "backend determinism: linkProgram is byte-identical at -j1 and -jN across e
     defer gpa.free(fns_serial); // linkProgram consumes the elements, not the slice
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, &test_backend, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try detFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, &test_backend, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);

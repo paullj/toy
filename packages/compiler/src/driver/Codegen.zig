@@ -29,6 +29,7 @@ const Walk = @import("../ast/Walk.zig");
 const Fingerprint = @import("../query/Fingerprint.zig");
 const Link = @import("../link/Link.zig");
 const link = @import("../link/emit.zig");
+const Isa = @import("../codegen/Isa.zig");
 const Dylib = @import("../link/Dylib.zig");
 const MachO = @import("../link/MachO.zig");
 const Abi = @import("../codegen/abi/Abi.zig");
@@ -70,8 +71,8 @@ pub const LinkedProgram = struct {
     owned_msgs: [][]u8,
     /// Interned `__cstring` bytes. Owned; empty for string-free programs.
     cstrings: []u8 = &.{},
-    /// Cross-segment relocs (adrp/add/ldr to __cstring/__got) rebased to absolute
-    /// __text offsets, patched by `Link.applyDataRelocs` after MachO assigns
+    /// Cross-segment relocs (the Patcher's cross kinds, to __cstring/__got) rebased to
+    /// absolute __text offsets, patched by `Link.applyDataRelocs` after MachO assigns
     /// vmaddrs. Owned; empty for reloc-free programs. The dyld import set is DERIVED
     /// from these (`.import` targets) in `assembleAndSign`.
     data_relocs: []Link.Reloc = &.{},
@@ -82,9 +83,9 @@ pub const LinkedProgram = struct {
     codegen_compiled: usize = 0,
     codegen_cached: usize = 0,
     /// dual-metric: summed opt counters over freshly-lowered fns, the total
-    /// IR instruction count after opt, and the emitted aarch64 instruction count
-    /// (text.len/4). No owned slices → deinit unchanged. Cached fns contribute 0
-    /// to opt_stats/ir_instrs (their opt ran on a prior build), so honest
+    /// IR instruction count after opt, and the emitted machine instruction count
+    /// (the ISA's `instCount` over `text`). No owned slices → deinit unchanged.
+    /// Cached fns contribute 0 to opt_stats/ir_instrs (their opt ran on a prior build), so honest
     /// `--opt-stats` numbers require `--no-cache`.
     opt_stats: Opt.Stats = .{},
     ir_instrs: usize = 0,
@@ -137,6 +138,7 @@ pub const IrResult = union(enum) {
 fn relink(
     io: Io,
     gpa: std.mem.Allocator,
+    backend: *const Isa.Backend,
     slots: []Engine.Slot,
     names: []const Link.SymName,
     entry_fn: u32,
@@ -157,7 +159,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, backend, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -168,9 +170,7 @@ fn relink(
     lp.codegen_cached = cached_n;
     lp.opt_stats = opt_stats;
     lp.ir_instrs = ir_instrs;
-    // Dual-metric machine-code count: aarch64 is fixed-width 4-byte instrs, so
-    // the emitted instruction count is the linked __text length / 4.
-    lp.emitted_instrs = lp.text.len / 4;
+    lp.emitted_instrs = backend.inst_count(lp.text);
     return .{ .ok = lp };
 }
 
@@ -178,8 +178,8 @@ fn relink(
 /// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
 /// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, fns, names[entry_fn], desc_plan, debug);
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, backend, fns, names[entry_fn], desc_plan, debug);
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -668,7 +668,7 @@ pub fn lowerGraphProgram(
     const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "", .fixed_files = graph.seeded_from } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
+    const out = relink(io, gpa, Isa.of(target.arch) orelse return error.UnsupportedTarget, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -770,7 +770,8 @@ pub fn buildImage(
     libs: Dylib.Linking,
     debug: MachO.Debug,
 ) ![]u8 {
-    return link.writeImage(io, gpa, target, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
+    const backend = Isa.of(target.arch) orelse return error.UnsupportedTarget;
+    return link.writeImage(io, gpa, target, &backend.relocs, identifier, code, entry_off, cstrings, data_relocs, libs, debug);
 }
 
 const testing = std.testing;
@@ -1090,7 +1091,7 @@ test "--verify names a reloc target the unit's key does not fold" {
         .{ .target = .{ .kind = .user_fn, .name = "mainly" }, .uncovered = true },
     };
     for (cases) |case| {
-        var relocs = [_]Link.Reloc{.{ .site = 0, .target = .{ .func = case.target }, .kind = .call26 }};
+        var relocs = [_]Link.Reloc{.{ .site = 0, .target = .{ .func = case.target }, .kind = Link.TestIsa.call }};
         const fc: Link.FnCode = .{ .sym = fr.sym, .code = &.{}, .relocs = &relocs, .literals = &.{} };
         const got = try Engine.uncoveredReloc(gpa, &fr, &fc);
         errdefer std.debug.print("case: {s}\n", .{case.target.name});

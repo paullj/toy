@@ -22,7 +22,7 @@ const Lexer = @import("../lex.zig");
 const Cache = @import("Cache.zig");
 const Key = @import("Key.zig");
 const Target = @import("../Target.zig");
-const CodegenMir = @import("../codegen/CodegenMir.zig");
+const Isa = @import("../codegen/Isa.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const FrameLayout = @import("../codegen/frame/FrameLayout.zig");
 const Ast = @import("../ast/Ast.zig");
@@ -267,7 +267,7 @@ pub const Chunk = struct {
     /// (~1-5ms cold; a warm cache hit is ~0.02ms = back to tiny, so still chunk). 8
     /// ranges/cpu because a warm/cold MIX makes per-unit cost highly uneven.
     pub const codegen = .{ .threshold = 64, .chunks_per_cpu = 8 };
-    /// Per-fn link copy+call26 patch (`Link.link`): ~0.01-0.1ms/fn, one memcpy + a few
+    /// Per-fn link copy+intra patch (`Link.link`): ~0.01-0.1ms/fn, one memcpy + a few
     /// reloc patches. 4 ranges/cpu — units are uniform (no cache mix) so coarse is fine.
     pub const fn_link = .{ .threshold = 128, .chunks_per_cpu = 4 };
     /// Per-fn cstring-reloc rewrite (`emit.rewriteCstr`): ~0.001-0.01ms/fn, by-key map
@@ -596,7 +596,7 @@ pub fn lowerUnit(gpa: std.mem.Allocator, fr: *const Frozen, diags: *std.ArrayLis
 /// Lower one unit to machine code (Ast→Ir→OPT→FnCode) with a throwaway diag sink (a
 /// diagnostic fails the build at relink, surfaced via `error.CodegenDiagnostic`). The IR
 /// is built and freed here and never escapes, keeping the codegen cache ONE-TIER [C8].
-fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, opt_out: ?*OptOut) !Link.FnCode {
+fn lowerCode(gpa: std.mem.Allocator, backend: *const Isa.Backend, fr: *const Frozen, opt_out: ?*OptOut) !Link.FnCode {
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
     var opt_st: Opt.Stats = .{};
@@ -609,7 +609,7 @@ fn lowerCode(gpa: std.mem.Allocator, fr: *const Frozen, opt_out: ?*OptOut) !Link
         .source => |s| s,
         else => .{ .decl = Ast.none },
     };
-    var fc = try CodegenMir.lowerMir(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, src.is_entry, src.guard_stack, &diags);
+    var fc = try backend.lower(gpa, &irf, fr.in.layouts, fr.in.enum_layouts, src.is_entry, src.guard_stack, &diags);
     errdefer fc.deinit(gpa);
     // A codegen diagnostic means an unsupported construct slipped past the front-end; the
     // build fails cleanly rather than emitting a half-lowered function.
@@ -635,7 +635,8 @@ pub fn codegen(
     tmp_tag: usize,
     slot: *Slot,
 ) !void {
-    return self.serve(gpa, io, try unitKey(gpa, target, fr), tmp_tag, slot, fr);
+    const backend = Isa.of(target.arch) orelse return error.UnsupportedTarget;
+    return self.serve(gpa, io, backend, try unitKey(gpa, target, fr), tmp_tag, slot, fr);
 }
 
 /// A unit's key: its own content (`unitFp`) and that of every callee the inliner can
@@ -855,6 +856,7 @@ fn serve(
     self: Engine,
     gpa: std.mem.Allocator,
     io: Io,
+    backend: *const Isa.Backend,
     key: Cache.Key,
     tmp_tag: usize,
     slot: *Slot,
@@ -865,7 +867,7 @@ fn serve(
 
     if (mode == .verify) {
         var opt_out: OptOut = .{};
-        var fresh = lowerCode(gpa, fr, &opt_out) catch |e| {
+        var fresh = lowerCode(gpa, backend, fr, &opt_out) catch |e| {
             slot.diag = opt_out.diag;
             return e;
         };
@@ -880,7 +882,7 @@ fn serve(
             if (!std.mem.eql(u8, fb, blob)) return error.VerifyCacheMismatch;
             was_cached = true;
         } else {
-            var fresh2 = try lowerCode(gpa, fr, null);
+            var fresh2 = try lowerCode(gpa, backend, fr, null);
             defer fresh2.deinit(gpa);
             const fb2 = try Link.pack(gpa, fresh2);
             defer gpa.free(fb2);
@@ -899,7 +901,7 @@ fn serve(
         if (self.probe) |p| StageProbe.lap(io, &p.get_ns, get_t0);
         if (got) |blob| {
             defer gpa.free(blob);
-            if (Link.unpack(gpa, blob) catch null) |fc| {
+            if (Link.unpack(gpa, &backend.relocs, blob) catch null) |fc| {
                 slot.* = .{ .fc = fc, .cached = true };
                 return;
             }
@@ -908,7 +910,7 @@ fn serve(
 
     var opt_out: OptOut = .{};
     const comp_t0: i128 = if (self.probe != null) StageProbe.now(io) else 0;
-    var fc = lowerCode(gpa, fr, &opt_out) catch |e| {
+    var fc = lowerCode(gpa, backend, fr, &opt_out) catch |e| {
         slot.diag = opt_out.diag;
         return e;
     };
