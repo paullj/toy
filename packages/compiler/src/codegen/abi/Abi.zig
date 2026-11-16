@@ -214,6 +214,9 @@ fn walkAbi(
                     out_locs[i] = .{ .gpr_ptr = @intCast(ngrn) };
                     ngrn += 1;
                 } else {
+                    // Apple packs a narrow stack arg at its own size, so the slot before a
+                    // pointer may end off an 8-byte boundary.
+                    nsaa = std.mem.alignForward(u32, nsaa, 8);
                     out_locs[i] = .{ .stack_ptr = nsaa };
                     nsaa += 8;
                 }
@@ -252,6 +255,7 @@ fn walkAbi(
                     out_locs[i] = .{ .gpr_ptr = @intCast(ngrn) };
                     ngrn += 1;
                 } else {
+                    nsaa = std.mem.alignForward(u32, nsaa, 8);
                     out_locs[i] = .{ .stack_ptr = nsaa };
                     nsaa += 8;
                 }
@@ -264,6 +268,7 @@ fn walkAbi(
                 } else {
                     // AAPCS no-split: the whole aggregate goes to the stack and
                     // NGRN is exhausted (no later backfill of the leftover GPRs).
+                    nsaa = std.mem.alignForward(u32, nsaa, 8);
                     out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = ebs * 8 } };
                     nsaa += ebs * 8;
                     ngrn = num_gpr_args;
@@ -830,6 +835,23 @@ test "aapcs64_apple: a C callback's params arrive as a C call places them; its s
     defer toy.deinit(gpa);
     try testing.expect(toy.sret_in_x8);
     try testing.expectEqual(@as(u32, 8), toy.locs[8].stack.bytes);
+}
+
+test "aapcs64_apple: a pointer to a C struct over 16 bytes on the stack is 8-aligned after a packed arg" {
+    const gpa = testing.allocator;
+    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
+    const ls = [_]Layout{cStruct("Big", &big)};
+    const el: []const EnumLayout = &.{};
+    const i = Type.int;
+    const args = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
+    var call = try planCallConv(gpa, apple, &args, args.len, Type.int, &ls, el);
+    defer call.deinit(gpa);
+    try testing.expectEqual(@as(u32, 0), call.locs[8].stack.nsaa_off);
+    try testing.expectEqual(@as(u32, 8), call.locs[9].stack_ptr);
+    try testing.expectEqual(@as(u32, 16), call.nsaa_bytes);
+    var params = try planParamsConv(gpa, apple, &args, Type.int, &ls, el);
+    defer params.deinit(gpa);
+    try testing.expectEqual(@as(u32, 8), params.locs[9].stack_ptr);
 }
 
 test "planCall: AAPCS no-split — reg-pair that doesn't fit goes wholly to stack and forbids backfill" {

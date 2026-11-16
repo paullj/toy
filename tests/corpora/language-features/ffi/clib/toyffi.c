@@ -138,6 +138,13 @@ long toyffi_big_sum(struct toyffi_big b) {
     return s;
 }
 
+// Eight longs fill x0-x7, so x and the pointer to b's copy go on the stack: x packed in
+// one byte, the pointer at the next 8-byte boundary.
+long toyffi_big_after_narrow(long a, long b, long c, long d, long e, long f, long g, long h,
+                             int8_t x, struct toyffi_big bg) {
+    return x * 1000 + a + b + c + d + e + f + g + h + bg.a + bg.b + bg.c + bg.d;
+}
+
 struct toyffi_vec2f toyffi_vec2f_add(struct toyffi_vec2f a, struct toyffi_vec2f b) {
     struct toyffi_vec2f r = {a.x + b.x, a.y + b.y};
     return r;
