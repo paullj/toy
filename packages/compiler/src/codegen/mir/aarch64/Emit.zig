@@ -23,6 +23,7 @@ const Reloc = @import("reloc.zig");
 const StdNames = @import("../../../symbols/StdNames.zig");
 const Mir = @import("../Mir.zig");
 const Inst = @import("Inst.zig");
+const abi = @import("abi.zig");
 
 const Reg = Mir.Reg;
 const Func = Mir.Function(Inst);
@@ -95,7 +96,7 @@ const E = struct {
         return switch (m.base) {
             .reg => |r| .{ .base = r.hw(), .off = m.off },
             .frame => |f| switch (f) {
-                .incoming => .{ .base = Aarch64.FP, .off = 16 + m.off },
+                .incoming => .{ .base = Aarch64.FP, .off = abi.saved_area + m.off },
                 else => .{ .base = Aarch64.SP, .off = e.frame.spOffset(f) + m.off },
             },
         };
@@ -556,7 +557,7 @@ test "encode: prologue, a frame load past the scaled immediate goes through x12,
 
     var slot_off = [_]u32{40000};
     var value_off = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 40016, .out_base = 0, .sret_save_off = 0, .slot_off = &slot_off, .value_off = &value_off } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 40016, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &slot_off, .value_off = &value_off } };
     var out: Out = .{};
     defer out.deinit(gpa);
     try encode(gpa, &f, &frame, 2, false, &out);
@@ -582,7 +583,7 @@ test "encode: main calls the stack guard before it opens its frame" {
     defer f.deinit(gpa);
     try f.blocks[0].insts.append(gpa, .{ .op = .ret });
     var none = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 1 << 20, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 1 << 20, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     for ([_]bool{ false, true }) |guard_stack| {
         var out: Out = .{};
         defer out.deinit(gpa);
@@ -614,7 +615,7 @@ test "encode: a backward cbnz resolves to its block, float32 moves use the singl
     try f.blocks[1].insts.append(gpa, .{ .op = .{ .b = 2 } });
     try f.blocks[2].insts.append(gpa, .{ .op = .ret });
     var none = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
     try encode(gpa, &f, &frame, Ir.no_line, false, &out);
@@ -634,7 +635,7 @@ test "encode: callee-saved registers are paired below x29 and reloaded before th
     try f.blocks[0].insts.append(gpa, .{ .op = .{ .call = .{ .callee = sym, .safepoint = false } } });
     try f.blocks[0].insts.append(gpa, .{ .op = .ret });
     var none = [_]u32{};
-    var frame: Mir.Frame = .{ .layout = .{ .frame = 16, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    var frame: Mir.Frame = .{ .layout = .{ .frame = 16, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     frame.saved = Mir.regBit(Reg.gp(19)) | Mir.regBit(Reg.gp(20)) | Mir.regBit(Reg.gp(21)) | Mir.regBit(Reg.fp(8));
     try testing.expectEqual(@as(u64, 16 + 32), frame.size());
     var out: Out = .{};
@@ -664,7 +665,7 @@ test "encode: a branch to a block that only holds a b lands on that b's target" 
     try f.blocks[3].insts.append(gpa, .{ .op = .{ .b = 4 } });
     try f.blocks[4].insts.append(gpa, .{ .op = .{ .b = 3 } });
     var none = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
     try encode(gpa, &f, &frame, Ir.no_line, false, &out);
@@ -692,7 +693,7 @@ test "encode: a conditional branch to the next block and a b become one inverted
     try f.blocks[2].insts.append(gpa, .{ .op = .{ .b = 1 } });
     try f.blocks[3].insts.append(gpa, .{ .op = .ret });
     var none = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
     try encode(gpa, &f, &frame, Ir.no_line, false, &out);
@@ -717,7 +718,7 @@ test "encode: a branch skips a block whose only code is its b, past instructions
     try f.blocks[2].insts.append(gpa, .{ .op = .{ .b = 1 } });
     try f.blocks[3].insts.append(gpa, .{ .op = .ret });
     var none = [_]u32{};
-    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
     var out: Out = .{};
     defer out.deinit(gpa);
     try encode(gpa, &f, &frame, Ir.no_line, false, &out);

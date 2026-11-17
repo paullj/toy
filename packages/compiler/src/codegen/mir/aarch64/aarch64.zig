@@ -14,6 +14,7 @@ pub const Inst = @import("Inst.zig");
 pub const Isel = @import("Isel.zig");
 pub const Emit = @import("Emit.zig");
 pub const Peephole = @import("Peephole.zig");
+pub const abi = @import("abi.zig");
 const reloc = @import("reloc.zig");
 const panic = @import("runtime/panic.zig");
 const str = @import("runtime/str.zig");
@@ -185,7 +186,7 @@ test "mir: a fn lowers through MIR with the x29 frame, its int params kept in th
     const gpa = testing.allocator;
     var func = try addFn(gpa);
     defer func.deinit(gpa);
-    var fl = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try FrameLayout.compute(gpa, &func, abi.facts(.aapcs64_apple), &.{}, &.{});
     defer fl.deinit(gpa);
 
     var fc = try lowerOk(gpa, &func);
@@ -400,7 +401,7 @@ test "mir: a frame that one value nearly fills says so, not too many locals" {
     const gpa = testing.allocator;
     const Case = struct { sizes: []const u32, message: []const u8 };
     const cases = [_]Case{
-        .{ .sizes = &.{ FrameLayout.MAX_FRAME, 8 }, .message = "function frame too large for codegen (one value nearly fills the 16 MiB frame; hold large data in a Vec)" },
+        .{ .sizes = &.{ abi.max_frame, 8 }, .message = "function frame too large for codegen (one value nearly fills the 16 MiB frame; hold large data in a Vec)" },
         .{ .sizes = &.{ 14 << 20, 14 << 20 }, .message = "function frame too large for codegen (too many locals)" },
     };
     for (cases) |k| {
@@ -441,13 +442,13 @@ test "mir: a back edge carries the safepoint placeholder and emits no poll" {
     };
     defer func.deinit(gpa);
 
-    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{}) };
+    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, abi.facts(.aapcs64_apple), &.{}, &.{}) };
     defer frame.deinit(gpa);
     var mf = try Isel.newFunc(gpa, &func);
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .c_abi = .aapcs64_apple, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .facts = &comptime abi.facts(.aapcs64_apple), .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;
@@ -480,13 +481,13 @@ test "mir: a loop closed by a cond_br polls too" {
     };
     defer func.deinit(gpa);
 
-    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, .aapcs64_apple, &.{}, &.{}) };
+    var frame: Mir.Frame = .{ .layout = try FrameLayout.compute(gpa, &func, abi.facts(.aapcs64_apple), &.{}, &.{}) };
     defer frame.deinit(gpa);
     var mf = try Isel.newFunc(gpa, &func);
     defer mf.deinit(gpa);
     var literals: std.ArrayList(Link.Literal) = .empty;
     defer literals.deinit(gpa);
-    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .c_abi = .aapcs64_apple, .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
+    try Isel.select(gpa, .{ .ir = &func, .layouts = &.{}, .enum_layouts = &.{}, .facts = &comptime abi.facts(.aapcs64_apple), .is_entry = false, .fl = &frame.layout, .roots = &.{} }, &mf, &literals);
     var polls: usize = 0;
     for (mf.blocks, 0..) |b, bi| for (b.insts.items) |i| if (i.op == .safepoint_poll) {
         polls += 1;

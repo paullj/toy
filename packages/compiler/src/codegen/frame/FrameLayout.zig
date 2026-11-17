@@ -3,40 +3,42 @@
 //! IR value (a merge of a str/struct/enum) gets its own cell, laid sequentially,
 //! type-sized and 8-byte aligned. Scalar values get no cell: the register allocator keeps
 //! them in registers and adds its spill slots above this layout (`mir/Mir.zig`, `Frame`).
+//! It is target-neutral: what it needs of the ISA and its conventions comes in as `Facts`
+//! (the ISA's `abi`, see `codegen/Isa.zig`).
 //!
-//! LAYOUT (deterministic, in IR index order):
-//!   [ saved x29/x30 ]  <- handled by the prologue (stp ..., #-16!); NOT part of
-//!                         this frame (offsets here are sp-relative, above the
-//!                         `sub sp` adjustment).
+//! LAYOUT (deterministic, in IR index order), offsets from the bottom of the frame:
 //!   [ out_base       ]  outgoing stack-arg region (offsets 0..out_base). Every
 //!                       slot/value offset is shifted up by this so a call's
-//!                       stack args at [sp,#0..] never collide with a live slot.
-//!                       out_base = roundUp16(max over call sites of the call's
-//!                       NSAA bytes, from Abi.planCall), 0 if the fn makes no
-//!                       calls.
+//!                       stack args at the bottom never collide with a live slot.
+//!                       out_base = the widest call's stack-arg bytes (from
+//!                       `Abi.planCall`) rounded to the stack alignment, 0 if the
+//!                       fn makes no calls.
 //!   [ slot region    ]  each Ir.Slot: roundUp8(running) then its 8-min-aligned
 //!                       size (str 16, struct/enum roundUp8(layout size),
 //!                       scalar 8).
 //!   [ value region   ]  each aggregate Ir.ValueDef: one cell, roundUp8(size).
-//!   [ sret save slot ]  one 8-byte cell IF the return is a >16B aggregate (the
-//!                       incoming x8 is spilled here once; the body's calls
-//!                       clobber x8).
+//!   [ sret save slot ]  one 8-byte cell IF the result goes through a caller's
+//!                       buffer (the incoming sret register is saved here once;
+//!                       the body's calls clobber it).
 //!   [ C scratch      ]  the C images of the extern call that needs the most.
-//!   frame = roundUp16(out_base + slots + values + maybe-sret + C scratch).
+//!   frame = (out_base + slots + values + maybe-sret + C scratch) rounded to the
+//!   stack alignment.
+//! Above the frame, the allocator's spills and callee-saved registers (`Mir.Frame`), then
+//! the ISA's saved-register area (`Facts.saved_area`, a frame link and return address),
+//! then the caller's stack arguments (the incoming area). The model names no register: a
+//! native ISA addresses the incoming area from its frame pointer, and a target with no
+//! machine frame (wasm32) can give it a saved area of 0 and its own frame base.
 //!
 //! DETERMINISM: pure, slice-indexed, no hashmaps / pointer iteration / globals.
 //! Same IR + layouts => same offsets => same bytes. This underpins the VERIFY
 //! byte-identity re-lower.
 //!
 //! GUARDS (surfaced as errors so codegen can emit the SAME diagnostic strings):
-//!   * frame > MAX_FRAME     -> error.FrameTooLarge        ("function frame too
+//!   * frame > `Facts.max_frame` -> error.FrameTooLarge ("function frame too
 //!                              large for codegen (..)", which names one value
 //!                              that nearly fills the frame by itself)
-//!   * an incoming stack-arg scaled offset > 4095*8 -> error.ParamOffsetTooLarge
+//!   * an incoming stack arg past `Facts.max_incoming_off` -> error.ParamOffsetTooLarge
 //!                              ("too many parameters for codegen ...")
-//! Codegen reaches an offset past an instruction's immediate through a base it builds
-//! from the 4 KiB-page part (`add xN, sp, #pages, lsl #12`), so the cap is where the
-//! page count leaves the imm12: 16 MiB, twice macOS's default 8 MiB stack.
 
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");
@@ -52,17 +54,40 @@ pub const VariantLayout = types.VariantLayout;
 
 const FrameLayout = @This();
 
-/// The widest scalable ldr/str immediate offset (imm12 * 8). An incoming stack arg is
-/// read at its fp offset directly, so one past this cannot be encoded.
-const MAX_SCALED_OFFSET: u32 = 4095 * 8;
+/// What one backend tells the layout: its ISA's frame rules and the two conventions its
+/// calls follow. An ISA module supplies one per C convention (`abi.facts`).
+pub const Facts = struct {
+    /// Toy's own convention on the ISA.
+    toy: Abi.Desc,
+    /// The target's C convention, for extern calls and C callback adapters.
+    c: Abi.Desc,
+    /// The bytes between the top of a frame and its caller's stack arguments.
+    saved_area: u32,
+    /// The alignment of the stack pointer at a call, a power of two.
+    stack_align: u32,
+    /// The largest frame the encoder addresses.
+    max_frame: u32,
+    /// The largest offset, from the base of the saved-register area, at which the last
+    /// word of an incoming stack argument is read.
+    max_incoming_off: u32,
 
-/// The largest frame codegen addresses: every offset below it splits into a 4 KiB page
-/// count and a remainder that each fit an imm12. The checker caps every struct and enum
-/// at it too (T0077), since any value of one has to fit in a frame.
-pub const MAX_FRAME: u32 = (4095 << 12) | 0xFF0;
+    /// The convention `func` is called in: C for a C callback adapter.
+    pub fn convOf(f: *const Facts, func: *const Ir.Function) Abi.Desc {
+        return if (func.c_abi) f.c else f.toy;
+    }
 
-/// `sret_save_off == NO_SRET` means the function does not return a >16B
-/// aggregate (no x8 buffer to save).
+    /// The convention a call to `callee` follows.
+    pub fn callConv(f: *const Facts, callee: Ir.SymName) Abi.Desc {
+        return if (isCCall(callee)) f.c else f.toy;
+    }
+
+    /// Whether a call to `callee` is a C call: under the C convention, with C images.
+    pub fn isCCall(callee: Ir.SymName) bool {
+        return callee.kind == .import;
+    }
+};
+
+/// `sret_save_off == NO_SRET` means the result does not go through a caller's buffer.
 pub const NO_SRET: u32 = std.math.maxInt(u32);
 
 /// `value_off[v] == NO_CELL`: scalar value `v` has no cell, because the register
@@ -71,13 +96,16 @@ pub const NO_CELL: u32 = std.math.maxInt(u32);
 
 pub const Error = error{ OutOfMemory, FrameTooLarge, ParamOffsetTooLarge };
 
-/// Total frame bytes the prologue opens with `sub sp, sp, #frame` (16-aligned,
-/// > 0 only when the fn needs locals/values/outgoing args).
+/// Total fixed frame bytes, a multiple of `stack_align` (> 0 only when the fn needs
+/// locals/values/outgoing args).
 frame: u32,
 /// Outgoing stack-arg region size at the bottom of the frame (sp-relative
-/// 0..out_base). 16-aligned. 0 if the fn makes no calls.
+/// 0..out_base), a multiple of `stack_align`. 0 if the fn makes no calls.
 out_base: u32,
-/// sp-relative offset of the saved incoming x8 (sret buffer ptr), or `NO_SRET`.
+/// The ISA's stack alignment (`Facts.stack_align`), which the rest of the frame keeps.
+stack_align: u32,
+/// sp-relative offset of the saved incoming sret register (the result buffer), or
+/// `NO_SRET`.
 sret_save_off: u32,
 /// sp-relative byte offset of the region an extern call builds its C images in (see
 /// `cScratchBytes`); meaningful only when some call has one.
@@ -104,10 +132,10 @@ pub fn roundUp16(n: u32) u32 {
 
 /// Lay the next `size`-byte cell at the 8-aligned end of `running` and return
 /// its offset. The bound is checked per cell in u64 because a fn's cells can sum
-/// past 4 GiB; a u32 total would wrap back under `MAX_FRAME` and pass the guard.
-fn place(running: *u32, out_base: u32, size: u32) error{FrameTooLarge}!u32 {
+/// past 4 GiB; a u32 total would wrap back under `max_frame` and pass the guard.
+fn place(running: *u32, out_base: u32, size: u32, max_frame: u32) error{FrameTooLarge}!u32 {
     const off = roundUp8(running.*);
-    if (@as(u64, out_base) + off + size > MAX_FRAME) return error.FrameTooLarge;
+    if (@as(u64, out_base) + off + size > max_frame) return error.FrameTooLarge;
     running.* = off + size;
     return out_base + off;
 }
@@ -134,20 +162,21 @@ fn slotSize(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout)
     };
 }
 
-/// Compute the fixed frame for `func`. Pure over the IR + read-only layout tables;
-/// allocates only the two offset slices (owned by the caller).
+/// Compute the fixed frame for `func` under `facts`. Pure over the IR + read-only layout
+/// tables; allocates only the two offset slices (owned by the caller).
 pub fn compute(
     gpa: std.mem.Allocator,
     func: *const Ir.Function,
-    c_abi: Abi.CAbi,
+    comptime facts: Facts,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) Error!FrameLayout {
+    comptime std.debug.assert(std.math.isPowerOfTwo(facts.stack_align));
     // (1) out_base: the widest outgoing stack-arg region over all call sites.
     // For each `call` instr, plan its outbound args (Abi.planCall) and take the
-    // max NSAA bytes; round the running max to 16 so the slot region above it
-    // stays 16-aligned. The arg TYPES come from each operand's slot/value type.
-    var max_nsaa: u32 = 0;
+    // max stack bytes, rounded to the stack alignment so the slot region above it
+    // stays aligned. The arg TYPES come from each operand's slot/value type.
+    var max_stack: u32 = 0;
     {
         // A reusable scratch buffer for arg types, grown as needed.
         var arg_types: std.ArrayList(Type) = .empty;
@@ -159,18 +188,16 @@ pub fn compute(
                         arg_types.clearRetainingCapacity();
                         try arg_types.ensureTotalCapacity(gpa, c.args.len);
                         for (0..c.args.len) |i| arg_types.appendAssumeCapacity(func.argType(c.args, c.params, c.by_ptr, i));
-                        // The callee's return type drives sret (x8), which does
-                        // NOT consume NSAA — but planCall needs a ret type. Use
-                        // the call's own ret_slot type if present, else unit
-                        // (scalar/unit results never affect NSAA either).
+                        // The callee's return type drives sret, which can take a
+                        // GPR argument. Use the call's own ret_slot type if
+                        // present, else unit (a scalar/unit result is never sret).
                         const ret_ty: Type = if (c.ret_slot != Ir.none_slot)
                             func.slots[c.ret_slot].type
                         else
                             Type.unit;
-                        const conv: Abi.Conv = if (c.callee.kind == .import) .{ .c = c_abi } else .toy;
-                        var plan = try Abi.planCallConv(gpa, conv, arg_types.items, c.fixedArgs(), ret_ty, layouts, enum_layouts);
+                        var plan = try Abi.planCall(gpa, facts.callConv(c.callee), arg_types.items, c.fixedArgs(), ret_ty, layouts, enum_layouts);
                         defer plan.deinit(gpa);
-                        if (plan.nsaa_bytes > max_nsaa) max_nsaa = plan.nsaa_bytes;
+                        if (plan.stack_bytes > max_stack) max_stack = plan.stack_bytes;
                     },
                     .call_indirect => |c| {
                         arg_types.clearRetainingCapacity();
@@ -182,16 +209,16 @@ pub fn compute(
                             func.slots[c.ret_slot].type
                         else
                             Type.unit;
-                        var plan = try Abi.planCall(gpa, arg_types.items, ret_ty, layouts, enum_layouts);
+                        var plan = try Abi.planCall(gpa, facts.toy, arg_types.items, arg_types.items.len, ret_ty, layouts, enum_layouts);
                         defer plan.deinit(gpa);
-                        if (plan.nsaa_bytes > max_nsaa) max_nsaa = plan.nsaa_bytes;
+                        if (plan.stack_bytes > max_stack) max_stack = plan.stack_bytes;
                     },
                     else => {},
                 }
             }
         }
     }
-    const out_base: u32 = roundUp16(max_nsaa);
+    const out_base: u32 = std.mem.alignForward(u32, max_stack, facts.stack_align);
 
     // (2) slot region: each Ir.Slot laid sequentially, 8-aligned, shifted by
     // out_base.
@@ -199,7 +226,7 @@ pub fn compute(
     errdefer gpa.free(slot_off);
     var running: u32 = 0;
     for (func.slots, 0..) |slot, i| {
-        slot_off[i] = try place(&running, out_base, slotSize(slot.type, layouts, enum_layouts));
+        slot_off[i] = try place(&running, out_base, slotSize(slot.type, layouts, enum_layouts), facts.max_frame);
     }
 
     // (3) value region: each aggregate value its own cell, 8-aligned.
@@ -210,13 +237,13 @@ pub fn compute(
             value_off[i] = NO_CELL;
             continue;
         }
-        value_off[i] = try place(&running, out_base, slotSize(vdef.type, layouts, enum_layouts));
+        value_off[i] = try place(&running, out_base, slotSize(vdef.type, layouts, enum_layouts), facts.max_frame);
     }
 
-    // (4) sret save slot (8 bytes) when the return is a >16B aggregate.
+    // (4) sret save slot (8 bytes) when the result goes through a caller's buffer.
     var sret_save_off: u32 = NO_SRET;
-    if (Abi.retIsSret(convOf(func, c_abi), func.ret_type, layouts, enum_layouts)) {
-        sret_save_off = try place(&running, out_base, 8);
+    if (Abi.retIsSret(facts.convOf(func), func.ret_type, layouts, enum_layouts)) {
+        sret_save_off = try place(&running, out_base, 8, facts.max_frame);
     }
 
     // (4b) the C image region, sized for the extern call that needs the most.
@@ -228,38 +255,34 @@ pub fn compute(
             else => {},
         };
         if (func.c_abi) most = @max(most, cAbiScratchBytes(func, layouts));
-        if (most > 0) c_scratch_off = try place(&running, out_base, most);
+        if (most > 0) c_scratch_off = try place(&running, out_base, most, facts.max_frame);
     }
 
-    // (5) frame = 16-aligned total. Assert the layout invariants.
-    const frame: u32 = roundUp16(out_base + running);
-    std.debug.assert(frame % 16 == 0);
-    std.debug.assert(out_base % 16 == 0);
+    // (5) frame = the aligned total.
+    const frame: u32 = std.mem.alignForward(u32, out_base + running, facts.stack_align);
 
-    // GUARD: codegen splits every offset below the frame into a page count and a
-    // remainder, each an imm12 (see `MAX_FRAME`).
-    if (frame > MAX_FRAME) {
+    if (frame > facts.max_frame) {
         // errdefer (registered above for both offset slices) frees them.
         return error.FrameTooLarge;
     }
 
-    // GUARD: incoming stack args (params 9+) are read at [x29,#16+nsaa],
+    // GUARD: incoming stack args are read above the saved-register area,
     // INDEPENDENT of frame. Plan the incoming params; any stack/stack_ptr loc
-    // whose top scaled offset exceeds the imm12 range is unencodable.
+    // whose last word lies past the ISA's reach is unencodable.
     {
         var param_types: std.ArrayList(Type) = .empty;
         defer param_types.deinit(gpa);
         try param_types.ensureTotalCapacity(gpa, func.params.len);
         for (func.params) |sid| param_types.appendAssumeCapacity(func.slots[sid].type);
-        var pplan = try Abi.planParamsConv(gpa, convOf(func, c_abi), param_types.items, func.ret_type, layouts, enum_layouts);
+        var pplan = try Abi.planParams(gpa, facts.convOf(func), param_types.items, func.ret_type, layouts, enum_layouts);
         defer pplan.deinit(gpa);
         for (pplan.locs) |loc| {
             const top_in: u32 = switch (loc) {
-                .stack => |s| 16 + s.nsaa_off + (s.bytes -| 8),
-                .stack_ptr => |off| 16 + off,
+                .stack => |s| facts.saved_area + s.off + (s.bytes -| 8),
+                .stack_ptr => |off| facts.saved_area + off,
                 else => 0,
             };
-            if (top_in > MAX_SCALED_OFFSET) {
+            if (top_in > facts.max_incoming_off) {
                 // errdefer (registered above) frees both offset slices.
                 return error.ParamOffsetTooLarge;
             }
@@ -269,6 +292,7 @@ pub fn compute(
     return .{
         .frame = frame,
         .out_base = out_base,
+        .stack_align = facts.stack_align,
         .sret_save_off = sret_save_off,
         .c_scratch_off = c_scratch_off,
         .slot_off = slot_off,
@@ -276,17 +300,17 @@ pub fn compute(
     };
 }
 
-/// Whether `func`'s fixed frame under `c_abi` fits codegen's budget. Only `FrameTooLarge`
+/// Whether `func`'s fixed frame under `facts` fits codegen's budget. Only `FrameTooLarge`
 /// says no: any other layout error is codegen's to report, whatever the caller does about
 /// the frame.
 pub fn fits(
     gpa: std.mem.Allocator,
     func: *const Ir.Function,
-    c_abi: Abi.CAbi,
+    comptime facts: Facts,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) error{OutOfMemory}!bool {
-    var fl = compute(gpa, func, c_abi, layouts, enum_layouts) catch |e| switch (e) {
+    var fl = compute(gpa, func, facts, layouts, enum_layouts) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FrameTooLarge => return false,
         error.ParamOffsetTooLarge => return true,
@@ -298,26 +322,23 @@ pub fn fits(
 /// The C image an extern call passes argument `i` through: its extern struct type, or null
 /// for any other argument.
 pub fn cImageType(c: Ir.Call, i: usize, layouts: []const Layout) ?Type {
-    if (c.callee.kind != .import or i >= c.params.len) return null;
+    if (!Facts.isCCall(c.callee) or i >= c.params.len) return null;
     return if (Abi.isCStruct(c.params[i], layouts)) c.params[i] else null;
 }
 
 /// The bytes an extern call's C images take: one per extern struct argument (by value or
 /// as a `mut` param) and one for an extern struct result, in that order, each padded to
-/// 16 so a two-word register load or store stays inside it.
+/// 16. 16 is neutral, not an AArch64 rule: no target's stack alignment is wider, and it
+/// keeps any ISA's two-word register load or store (an ldp, a 16-byte vector move)
+/// inside the image.
 pub fn cScratchBytes(func: *const Ir.Function, c: Ir.Call, layouts: []const Layout) u32 {
     var n: u32 = 0;
     for (0..c.args.len) |i| if (cImageType(c, i, layouts)) |t| {
         n += roundUp16(Abi.cLayout(t, layouts).size);
     };
-    if (c.callee.kind == .import and c.ret_slot != Ir.none_slot and Abi.isCStruct(func.slots[c.ret_slot].type, layouts))
+    if (Facts.isCCall(c.callee) and c.ret_slot != Ir.none_slot and Abi.isCStruct(func.slots[c.ret_slot].type, layouts))
         n += roundUp16(Abi.cLayout(func.slots[c.ret_slot].type, layouts).size);
     return n;
-}
-
-/// The convention `func` is called in: the target's C one for a C callback adapter.
-pub fn convOf(func: *const Ir.Function, c_abi: Abi.CAbi) Abi.Conv {
-    return if (func.c_abi) .{ .c = c_abi } else .toy;
 }
 
 /// The C image a C callback adapter receives an extern struct param or returns its result
@@ -425,6 +446,16 @@ pub fn encodeRoots(gpa: std.mem.Allocator, roots: []const Root) error{OutOfMemor
 
 const testing = std.testing;
 
+/// A target with 8 argument registers per class, the shape these tests assume.
+const tf: Facts = .{
+    .toy = .{ .gprs = 8, .fprs = 8 },
+    .c = .{ .gprs = 8, .fprs = 8, .c_structs = true, .hfa = true, .stack_slots = .@"packed", .varargs = .stack },
+    .saved_area = 16,
+    .stack_align = 16,
+    .max_frame = 1 << 24,
+    .max_incoming_off = 1 << 15,
+};
+
 // A small builder for hand-rolled IR functions. All slices are heap-allocated
 // so `Function.deinit` frees them cleanly.
 const TestFn = struct {
@@ -498,7 +529,7 @@ test "frame: empty fn (no slots, no values, no calls) -> frame 0" {
     var func = try buildSimple(gpa, &.{}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
 
     try testing.expectEqual(@as(u32, 0), fl.frame);
@@ -520,7 +551,7 @@ test "frame: slots and aggregate values lay out sequentially, 8-aligned, 16-alig
     );
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
 
     // out_base 0; slots at 0,8; the str value at 16; running=32; frame 32.
@@ -541,7 +572,7 @@ test "frame: a unit slot is 0 bytes and shares the next slot's offset" {
     var func = try buildSimple(gpa, &.{ Type.int, Type.unit, Type.int }, &.{}, 0, Type.int);
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
 
     try testing.expectEqual(@as(u32, 0), fl.slot_off[0]);
@@ -563,7 +594,7 @@ test "frame: str slot occupies 16 bytes and keeps following slots 8-aligned" {
     );
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
 
     try testing.expectEqual(@as(u32, 0), fl.slot_off[0]);
@@ -588,7 +619,7 @@ test "frame: aggregate slot uses roundUp8 of its layout size" {
     );
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, ls, &.{});
+    var fl = try compute(gpa, &func, tf, ls, &.{});
     defer fl.deinit(gpa);
 
     // struct0 (24) at 0; struct1 (12 -> roundUp8 16) at 24; int at 40.
@@ -607,7 +638,7 @@ test "frame: many aggregate merge values each get their own cell" {
     var func = try buildSimple(gpa, &.{}, &vtypes, 0, Type.int);
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
 
     // 20 values * 16 = 320; each at i*16.
@@ -622,8 +653,8 @@ test "frame: out_base reserves the widest outgoing stack-arg region over call si
     const ls: []const Layout = &.{};
     const el: []const EnumLayout = &.{};
 
-    // Build a fn with two call instrs: one with 8 int args (0 NSAA), one with
-    // 10 int args (2 stack words -> 16 NSAA). out_base = roundUp16(16) = 16.
+    // Build a fn with two call instrs: one with 8 int args (no stack bytes), one with
+    // 10 int args (2 stack words, 16 bytes). out_base = 16.
     const slots = try allocSlots(gpa, &.{Type.int}); // one local slot (a result)
     // 10 value defs to serve as scalar args.
     var vtypes: [10]Type = undefined;
@@ -666,7 +697,7 @@ test "frame: out_base reserves the widest outgoing stack-arg region over call si
     };
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, ls, el);
+    var fl = try compute(gpa, &func, tf, ls, el);
     defer fl.deinit(gpa);
 
     // out_base = 16; slots shifted up by it.
@@ -684,13 +715,66 @@ test "frame: sret return reserves an 8-byte save slot atop the frame" {
     var func = try buildSimple(gpa, &.{Type.int}, &.{}, 0, Type.structT(0));
     defer func.deinit(gpa);
 
-    var fl = try compute(gpa, &func, .aapcs64_apple, ls, &.{});
+    var fl = try compute(gpa, &func, tf, ls, &.{});
     defer fl.deinit(gpa);
 
     // slot at 0 (8 bytes); sret save at 8; running 16; frame 16.
     try testing.expectEqual(@as(u32, 0), fl.slot_off[0]);
     try testing.expectEqual(@as(u32, 8), fl.sret_save_off);
     try testing.expectEqual(@as(u32, 16), fl.frame);
+}
+
+test "frame: a target with no saved area and an 8-aligned stack (an x86-64 or wasm32 shape)" {
+    const gpa = testing.allocator;
+    const nf: Facts = .{
+        .toy = .{ .gprs = 6, .fprs = 8, .sret_uses_gpr = true, .spill_exhausts = false },
+        .c = .{ .gprs = 6, .fprs = 8, .sret_uses_gpr = true, .spill_exhausts = false, .c_structs = true },
+        .saved_area = 0,
+        .stack_align = 8,
+        .max_frame = 1 << 24,
+        .max_incoming_off = 8,
+    };
+    const ls = try mkLayouts(gpa, &.{24}, &.{8});
+    defer gpa.free(ls);
+
+    // A call with 7 int args puts one word on the stack: out_base 8, not 16.
+    const values = try allocValues(gpa, &([_]Type{Type.int} ** 7));
+    const args = try gpa.alloc(Ir.Operand, 7);
+    for (0..7) |i| args[i] = .{ .value = @intCast(i) };
+    const instrs = try gpa.alloc(Ir.Instr, 1);
+    instrs[0] = .{ .result = Ir.none_value, .op = .{ .call = .{ .callee = .{ .kind = .user_fn, .name = "g" }, .args = args, .ret_slot = Ir.none_slot } } };
+    const blocks = try gpa.alloc(Ir.Block, 1);
+    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = instrs, .term = .{ .ret = .none } };
+    // 7 int params: the walk gives the sret buffer GPR 0, so params 5 and 6 go on the
+    // stack at 0 and 8; with no saved area the last is read at 8, the limit.
+    const params = try gpa.alloc(Ir.SlotId, 7);
+    for (0..7) |i| params[i] = @intCast(i);
+    var func = Ir.Function{
+        .name = .{ .kind = .user_fn, .name = "f" },
+        .params = params,
+        .ret_type = Type.structT(0),
+        .slots = try allocSlots(gpa, &([_]Type{Type.int} ** 8)),
+        .values = values,
+        .blocks = blocks,
+        .entry = 0,
+        .exit = 0,
+    };
+    defer func.deinit(gpa);
+
+    var fl = try compute(gpa, &func, nf, ls, &.{});
+    defer fl.deinit(gpa);
+    try testing.expectEqual(@as(u32, 8), fl.out_base);
+    try testing.expectEqual(@as(u32, 8), fl.slot_off[0]);
+    // 8 slots, then the sret save slot: 8 + 64 + 8, a multiple of 8, not rounded to 16.
+    try testing.expectEqual(@as(u32, 72), fl.sret_save_off);
+    try testing.expectEqual(@as(u32, 80), fl.frame);
+
+    const more = comptime blk: {
+        var m = nf;
+        m.max_incoming_off = 7;
+        break :blk m;
+    };
+    try testing.expectError(error.ParamOffsetTooLarge, compute(gpa, &func, more, ls, &.{}));
 }
 
 test "frame: a C callback adapter sizes sret and its C image by the C layout" {
@@ -700,81 +784,47 @@ test "frame: a C callback adapter sizes sret and its C image by the C layout" {
     const ls = [_]Layout{.{ .name = "Three", .field_names = &.{}, .field_types = @constCast(&three), .offsets = &.{}, .size = 24, .@"align" = 8, .is_extern = true }};
     var func = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 1, Type.structT(0));
     defer func.deinit(gpa);
-    var toy = try compute(gpa, &func, .aapcs64_apple, &ls, &.{});
+    var toy = try compute(gpa, &func, tf, &ls, &.{});
     defer toy.deinit(gpa);
     try testing.expect(toy.sret_save_off != NO_SRET);
     func.c_abi = true;
-    var c = try compute(gpa, &func, .aapcs64_apple, &ls, &.{});
+    var c = try compute(gpa, &func, tf, &ls, &.{});
     defer c.deinit(gpa);
     try testing.expectEqual(NO_SRET, c.sret_save_off);
     try testing.expectEqual(@as(u32, 24), c.c_scratch_off);
     try testing.expectEqual(@as(u32, 48), c.frame);
 }
 
-test "frame: a frame past 4095 bytes lays out; FrameTooLarge only past MAX_FRAME" {
+test "frame: a frame past 4 KiB lays out; FrameTooLarge only past max_frame" {
     const gpa = testing.allocator;
-    // 300 str values * 16 = 4800, past the old imm12 budget (#32).
+    // 300 str values * 16 = 4800 (#32).
     var vtypes: [300]Type = undefined;
     for (&vtypes) |*v| v.* = Type.str;
     var func = try buildSimple(gpa, &.{}, &vtypes, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     try testing.expectEqual(@as(u32, 4800), fl.frame);
     try testing.expectEqual(@as(u32, 4784), fl.value_off[299]);
 
     var slot = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 0, Type.unit);
     defer slot.deinit(gpa);
-    const at_cap_layout = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME - 8, .@"align" = 8 }};
-    var at_cap = try compute(gpa, &slot, .aapcs64_apple, &at_cap_layout, &.{});
+    const at_cap_layout = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = tf.max_frame - 8, .@"align" = 8 }};
+    var at_cap = try compute(gpa, &slot, tf, &at_cap_layout, &.{});
     defer at_cap.deinit(gpa);
-    try testing.expectEqual(MAX_FRAME, at_cap.frame);
-    const over = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME + 1, .@"align" = 8 }};
-    try testing.expectError(error.FrameTooLarge, compute(gpa, &slot, .aapcs64_apple, &over, &.{}));
+    try testing.expectEqual(tf.max_frame, at_cap.frame);
+    const over = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = tf.max_frame + 1, .@"align" = 8 }};
+    try testing.expectError(error.FrameTooLarge, compute(gpa, &slot, tf, &over, &.{}));
 }
 
-test "frame: fits is false only past MAX_FRAME" {
+test "frame: fits is false only past max_frame" {
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
     const small = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = 4096, .@"align" = 8 }};
-    const big = [_]Layout{.{ .name = "B", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME + 1, .@"align" = 8 }};
-    try testing.expect(try fits(gpa, &func, .aapcs64_apple, &small, &.{}));
-    try testing.expect(!try fits(gpa, &func, .aapcs64_apple, &big, &.{}));
-}
-
-test "frame: an extern call's stack args can fit Apple's frame but not aapcs64's; every backend is checked" {
-    const gpa = testing.allocator;
-    // Eight ints fill x0-x7; four int8s go to the stack: 4 packed bytes on Apple (out_base
-    // 16), four 8-byte slots on aapcs64 (out_base 32).
-    var vtypes: [12]Type = undefined;
-    for (vtypes[0..8]) |*v| v.* = Type.int;
-    for (vtypes[8..]) |*v| v.* = Type.int8;
-    const args = try gpa.alloc(Ir.Operand, 12);
-    for (args, 0..) |*a, i| a.* = .{ .value = @intCast(i) };
-    const instrs = try gpa.alloc(Ir.Instr, 1);
-    instrs[0] = .{ .result = Ir.none_value, .op = .{ .call = .{
-        .callee = .{ .kind = .import, .name = "c" },
-        .args = args,
-        .ret_slot = Ir.none_slot,
-    } } };
-    const blocks = try gpa.alloc(Ir.Block, 1);
-    blocks[0] = .{ .params = try gpa.alloc(Ir.ValueId, 0), .instrs = instrs, .term = .{ .ret = .none } };
-    var func = Ir.Function{
-        .name = .{ .kind = .user_fn, .name = "caller" },
-        .params = try gpa.alloc(Ir.SlotId, 0),
-        .ret_type = Type.unit,
-        .slots = try allocSlots(gpa, &.{Type.structT(0)}),
-        .values = try allocValues(gpa, &vtypes),
-        .blocks = blocks,
-        .entry = 0,
-        .exit = 0,
-    };
-    defer func.deinit(gpa);
-    const ls = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME - 16, .@"align" = 8 }};
-    try testing.expect(try fits(gpa, &func, .aapcs64_apple, &ls, &.{}));
-    try testing.expect(!try fits(gpa, &func, .aapcs64, &ls, &.{}));
-    try testing.expect(!try @import("../Isa.zig").fitsEveryBackend(gpa, &func, &ls, &.{}));
+    const big = [_]Layout{.{ .name = "B", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = tf.max_frame + 1, .@"align" = 8 }};
+    try testing.expect(try fits(gpa, &func, tf, &small, &.{}));
+    try testing.expect(!try fits(gpa, &func, tf, &big, &.{}));
 }
 
 test "frame: slots summing past 4 GiB give FrameTooLarge, not a wrapped total" {
@@ -783,24 +833,8 @@ test "frame: slots summing past 4 GiB give FrameTooLarge, not a wrapped total" {
     for (&slot_types) |*t| t.* = Type.structT(0);
     var func = try buildSimple(gpa, &slot_types, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    const max = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = MAX_FRAME - 8, .@"align" = 8 }};
-    try testing.expectError(error.FrameTooLarge, compute(gpa, &func, .aapcs64_apple, &max, &.{}));
-}
-
-test "frame: ParamOffsetTooLarge when an incoming stack-arg offset exceeds imm12" {
-    const gpa = testing.allocator;
-    // Need a param whose incoming stack offset 16+nsaa > 4095*8 = 32760. Each
-    // overflow param is 8 bytes, starting after 8 GPR params. nsaa for param k
-    // (k>=8) is (k-8)*8. Solve 16 + (k-8)*8 > 32760 -> k-8 > 4093 -> k >= 4102.
-    // Use 4110 int params (well past the threshold). All ints (scalar) so the
-    // frame itself stays tiny (no slots/values besides params).
-    const n = 4110;
-    var ptypes: [n]Type = undefined;
-    for (&ptypes) |*p| p.* = Type.int;
-    var func = try buildSimple(gpa, &ptypes, &.{}, n, Type.unit);
-    defer func.deinit(gpa);
-
-    try testing.expectError(error.ParamOffsetTooLarge, compute(gpa, &func, .aapcs64_apple, &.{}, &.{}));
+    const max = [_]Layout{.{ .name = "S", .field_names = &.{}, .field_types = &.{}, .offsets = &.{}, .size = tf.max_frame - 8, .@"align" = 8 }};
+    try testing.expectError(error.FrameTooLarge, compute(gpa, &func, tf, &max, &.{}));
 }
 
 // A `Layout` with the given fields (owned arrays freed by the caller).
@@ -822,7 +856,7 @@ test "roots: scalar-only fn yields [u32 0]" {
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{ Type.int, Type.bool }, &.{Type.int}, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &.{}, &.{});
     defer gpa.free(bm);
@@ -837,7 +871,7 @@ test "roots: a str VALUE is projected at its value cell" {
     // one int slot (off 0), one str value (off 8): its pointer half is the root.
     var func = try buildSimple(gpa, &.{Type.int}, &.{Type.str}, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &.{}, &.{});
     defer gpa.free(bm);
@@ -854,7 +888,7 @@ test "cells: scalar values get no cell and no root; isWordRef names a reference 
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{Type.rawptr}, &.{ Type.rawptr, Type.int, Type.str }, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     try testing.expectEqual(NO_CELL, fl.value_off[0]);
     try testing.expectEqual(NO_CELL, fl.value_off[1]);
@@ -875,7 +909,7 @@ test "roots: a str slot projects the ptr half only (base+0), not the len at +8" 
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{ Type.int, Type.str }, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &.{}, &.{});
     defer gpa.free(bm);
@@ -898,7 +932,7 @@ test "roots: a by-value aggregate recurses to its contained box (Bag{Vec[int], i
 
     var func = try buildSimple(gpa, &.{Type.structT(2)}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &ls, &.{});
+    var fl = try compute(gpa, &func, tf, &ls, &.{});
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &ls, &.{});
     defer gpa.free(bm);
@@ -931,7 +965,7 @@ test "roots: an enum unions its variants' box payload offsets; a () field contri
 
     var func = try buildSimple(gpa, &.{Type.enumT(0)}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &ls, &el);
+    var fl = try compute(gpa, &func, tf, &ls, &el);
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &ls, &el);
     defer gpa.free(bm);
@@ -952,7 +986,7 @@ test "a fn-pair struct slot projects one root at +8" {
     }
     var func = try buildSimple(gpa, &.{Type.structT(0)}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &ls, &.{});
+    var fl = try compute(gpa, &func, tf, &ls, &.{});
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &ls, &.{});
     defer gpa.free(bm);
@@ -990,7 +1024,7 @@ test "roots: an env struct's Vec, str, rawptr, Ref, fn-pair env and Option[Vec] 
 
     var func = try buildSimple(gpa, &.{Type.structT(3)}, &.{}, 0, Type.unit);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &ls, &el);
+    var fl = try compute(gpa, &func, tf, &ls, &el);
     defer fl.deinit(gpa);
     const bm = try collectRoots(gpa, &func, &fl, &ls, &el);
     defer gpa.free(bm);
@@ -1004,7 +1038,7 @@ test "roots: projection is deterministic (two calls byte-identical)" {
     const gpa = testing.allocator;
     var func = try buildSimple(gpa, &.{ Type.int, Type.str }, &.{ Type.rawptr, Type.int }, 0, Type.int);
     defer func.deinit(gpa);
-    var fl = try compute(gpa, &func, .aapcs64_apple, &.{}, &.{});
+    var fl = try compute(gpa, &func, tf, &.{}, &.{});
     defer fl.deinit(gpa);
     const ra = try collectRoots(gpa, &func, &fl, &.{}, &.{});
     defer gpa.free(ra);

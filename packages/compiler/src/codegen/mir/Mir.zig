@@ -42,12 +42,13 @@
 //! A loop back edge carries a `safepoint_poll` placeholder where a concurrent collector's
 //! poll goes (#83). It encodes to nothing now.
 //!
-//! FRAME. The frame keeps the x29 chain in every profile (backtraces, the GC walk and
-//! profilers follow it), and `sp` stays fixed after the prologue, so a callee's `x29 + 16`
-//! is the caller's `sp`, which the collector's frame walk relies on. Its fixed part is
-//! `FrameLayout` (outgoing args, slots, aggregate value cells, sret save, C scratch);
-//! scalar values get no cell. Spill slots follow it, and the callee-saved registers the
-//! allocator used sit at the top, just below the saved x29.
+//! FRAME. A native target keeps the frame-pointer chain in every profile (backtraces, the
+//! GC walk and profilers follow it), and `sp` stays fixed after the prologue, so a
+//! callee's frame pointer plus its saved-register area is the caller's `sp`, which the
+//! collector's frame walk relies on. Its fixed part is `FrameLayout` (outgoing args,
+//! slots, aggregate value cells, sret save, C scratch); scalar values get no cell. Spill
+//! slots follow it, and the callee-saved registers the allocator used sit at the top, just
+//! below the ISA's saved-register area.
 
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");
@@ -120,7 +121,7 @@ pub const FrameRef = union(enum) {
     c_scratch,
     /// The bottom of the frame, where a call's stack arguments go.
     outgoing,
-    /// The caller's stack arguments, above the saved x29/x30.
+    /// The caller's stack arguments, above the ISA's saved-register area.
     incoming,
     /// A word at this offset of the fixed layout: a stack-map word the prologue clears.
     layout: u32,
@@ -294,7 +295,8 @@ pub fn Function(comptime Inst: type) type {
 }
 
 /// The frame: the fixed `FrameLayout` part, then the allocator's spill slots, 8 bytes each,
-/// then, right below the saved x29/x30, the callee-saved registers the fn writes.
+/// then, right below the ISA's saved-register area, the callee-saved registers the fn
+/// writes.
 pub const Frame = struct {
     layout: FrameLayout,
     spills: u32 = 0,
@@ -312,18 +314,19 @@ pub const Frame = struct {
         return .{ .spill = f.spills - 1 };
     }
 
-    /// The bytes the prologue opens, 16-aligned.
+    /// The bytes the prologue opens, a multiple of the stack alignment.
     pub fn size(f: *const Frame) u64 {
-        return (@as(u64, f.layout.frame) + @as(u64, f.spills) * 8 + 15) / 16 * 16 + f.savedBytes();
+        return std.mem.alignForward(u64, @as(u64, f.layout.frame) + @as(u64, f.spills) * 8, f.layout.stack_align) + f.savedBytes();
     }
 
-    /// The callee-save area at the top of the frame, `[x29 - savedBytes, x29)`, 16-aligned.
+    /// The callee-save area at the top of the frame, just below the saved-register area, a
+    /// multiple of the stack alignment.
     pub fn savedBytes(f: *const Frame) u32 {
-        return (@as(u32, @popCount(f.saved)) * 8 + 15) / 16 * 16;
+        return std.mem.alignForward(u32, @as(u32, @popCount(f.saved)) * 8, f.layout.stack_align);
     }
 
-    /// The sp-relative offset of a frame object. `incoming` is x29-relative instead: the
-    /// encoder handles it.
+    /// The sp-relative offset of a frame object. `incoming` is relative to the
+    /// saved-register area instead: the encoder handles it.
     pub fn spOffset(f: *const Frame, ref: FrameRef) u32 {
         return switch (ref) {
             .slot => |s| f.layout.slot_off[s],
@@ -356,7 +359,18 @@ test "Reg: physical and virtual registers keep their file and number" {
 
 test "Frame: the callee-save area holds every saved register, 16-aligned" {
     var frame: Frame = .{ .layout = undefined };
+    frame.layout.stack_align = 16;
     for (19..29) |n| frame.saved |= regBit(Reg.gp(@intCast(n)));
     for (8..16) |n| frame.saved |= regBit(Reg.fp(@intCast(n)));
     try testing.expectEqual(@as(u32, 144), frame.savedBytes());
+}
+
+test "Frame: an 8-aligned stack rounds spills and the callee-save area to 8" {
+    var frame: Frame = .{ .layout = undefined };
+    frame.layout.frame = 8;
+    frame.layout.stack_align = 8;
+    frame.spills = 1;
+    for (19..22) |n| frame.saved |= regBit(Reg.gp(@intCast(n)));
+    try testing.expectEqual(@as(u32, 24), frame.savedBytes());
+    try testing.expectEqual(@as(u64, 40), frame.size());
 }

@@ -1,74 +1,88 @@
-//! AArch64 (AAPCS64) calling-convention decisions — the ONE place that turns
-//! target-independent typed values into physical register/stack assignments.
-//! Sizes and alignments come from the target-neutral `layout/ValueLayout.zig`; this
-//! module only places values. A C call follows the target's `CAbi`.
-//! The IR carries no registers, no frame offsets, no calling
-//! convention; this module decides reg-pair vs indirect, x8 sret, and the
-//! NGRN/NSAA walk, given only a `Type` slice + the read-only layout tables.
+//! Calling-convention placement, target-neutral: the ONE walk that turns typed values
+//! into argument registers and stack offsets, for toy's own convention and every C one.
+//! Sizes and alignments come from `layout/ValueLayout.zig`. The walk reads only a `Desc`,
+//! the facts of one convention on one ISA; the ISA module supplies them (`abi` in
+//! `codegen/Isa.zig`), with the registers each argument index names. A location here is
+//! an index into the ISA's argument registers of a class, or an offset into the stack
+//! argument area, never a register number.
 //!
-//! WHY a dedicated module: the old codegen smeared the SAME NGRN/NSAA walk
-//! across THREE sites that drifted independently — the prologue param
-//! marshalling, `genCallInner`'s outbound args, and `measureOutgoingExpr`'s
-//! stack-byte budget. Any disagreement landed an argument at the wrong offset
-//! (SIGBUS). This module collapses all three into ONE private `walkAbi`, so the
-//! prologue (`planParams`), the call site (`planCall`), and the frame's
-//! `out_base` (`planCall(...).nsaa_bytes`) are guaranteed consistent BY
-//! CONSTRUCTION.
+//! WHY one walk: the prologue (`planParams`), the call site (`planCall`) and the frame's
+//! outgoing area (`planCall(...).stack_bytes`) once had three copies of it that drifted
+//! apart, and a disagreement put an argument at the wrong offset. One walk keeps them
+//! consistent by construction.
 //!
-//! PURITY: every function here is pure over `Type` + `layouts`/`enum_layouts`
-//! (read-only). The plan-producing functions allocate a result slice only; no
-//! IO, no globals, no hashmaps over pointers. This is what keeps the dual-path
-//! VERIFY byte-identity re-lower sound.
+//! PURITY: every function is pure over `Type` + the read-only layout tables; the plans
+//! allocate only their result slice. This keeps the VERIFY byte-identity re-lower sound.
 //!
-//! AAPCS64 RULES reproduced EXACTLY from the old codegen (do NOT change):
-//!   * scalar (int/bool) → 1 GPR if NGRN<8 else 8 stack bytes (NSAA).
-//!   * aggregate <=16B (str / small struct/enum) → a run of `ebs` (1 or 2)
-//!     eightbytes: if NGRN+ebs<=8 it takes regs {NGRN..}, NGRN+=ebs; else it
-//!     goes WHOLLY to the stack (ebs*8 bytes) AND NGRN is set to 8 — the AAPCS
-//!     no-split rule: once an aggregate spills, no later arg may backfill the
-//!     remaining GPRs.
-//!   * aggregate >16B → INDIRECT: the caller passes a POINTER to its copy in 1
-//!     GPR (if NGRN<8) else 8 stack bytes.
-//!   * an indirect (>16B) RESULT uses x8 (the indirect-result register) which is
-//!     SEPARATE from the GPR arg sequence — it does NOT consume an NGRN.
-//!   * a C call (`Conv.c`) follows the target's `CAbi`. Apple's variant passes
-//!     every vararg on the stack in an 8-byte slot and packs a stack argument at
-//!     its C size; standard AAPCS64 places varargs as fixed args and gives every
-//!     stack argument an 8-byte slot.
+//! THE WALK, per argument, with a GPR counter, an FPR counter and a stack offset:
+//!   * a scalar (int/bool/pointer) takes the next GPR, else a stack slot.
+//!   * a bare float takes the next FPR, else a stack slot. The two counters are
+//!     independent.
+//!   * an aggregate of up to 16 bytes takes a run of 1 or 2 GPRs if the whole run fits,
+//!     else goes wholly to the stack; `spill_exhausts` then forbids later arguments the
+//!     GPRs left over.
+//!   * a larger aggregate passes a pointer to a copy, in a GPR or a stack slot.
+//!   * a `()` takes nothing.
+//!   * an indirect result's buffer pointer goes in the ISA's sret register; it takes the
+//!     first GPR argument only when `sret_uses_gpr`.
+//!   * under a C convention (`c_structs`) an extern struct goes by its C layout: a
+//!     homogeneous float aggregate in FPRs (`hfa`), else by its C size; one over 16 bytes
+//!     by pointer or, under `big_c_struct = .memory`, copied whole onto the stack.
+//!   * a stack slot is 8 bytes, or a C scalar's own size under `stack_slots = .packed`;
+//!     varargs go as fixed arguments, or each in an 8-byte stack slot under
+//!     `varargs = .stack`.
+//!
+//! The AArch64 conventions (`aapcs64_apple`, `aapcs64`, toy's) are in
+//! `mir/aarch64/abi.zig`. x86-64's `sysv64` (#60 C3) will supply: 6 GPR arguments
+//! (rdi, rsi, rdx, rcx, r8, r9) and 8 XMM ones; `sret_uses_gpr` (the buffer in rdi);
+//! `big_c_struct = .memory` (MEMORY-class structs are copied onto the stack);
+//! `spill_exhausts = false`; 8-byte stack slots; varargs as fixed arguments, the selector
+//! setting %al to the count of `fpr` locations in the plan; no `hfa`. The one SysV rule
+//! the description does not hold yet is the per-eightbyte INTEGER/SSE class of a small
+//! struct (`{int64, float}` in rdi and xmm0): C3 adds it as a `Desc` rule and a location.
 
 const std = @import("std");
 const Typecheck = @import("../../types.zig");
 const ValueLayout = @import("../../layout/ValueLayout.zig");
-const Target = @import("../../Target.zig");
-
-const Abi = @This();
 
 pub const Type = Typecheck.Type;
 pub const Layout = Typecheck.Layout;
 pub const EnumLayout = Typecheck.EnumLayout;
 
-/// The 8 general-purpose argument registers (x0..x7) and the indirect-result
-/// register x8. There are 8 GPR arg slots; arg 9+ (or a spilled aggregate) goes
-/// on the stack.
-pub const num_gpr_args: u32 = 8;
+/// One calling convention on one ISA, as the placement walk reads it.
+pub const Desc = struct {
+    /// How many argument registers of each class (the ISA's lists have this many).
+    gprs: u8,
+    fprs: u8,
+    /// Whether an indirect result's buffer pointer takes the first GPR argument.
+    sret_uses_gpr: bool = false,
+    /// Whether an aggregate that does not fit the registers left of its class exhausts
+    /// them, so no later argument takes one: the GPRs for a struct, the FPRs for an HFA
+    /// (both AAPCS64 rules; SysV has neither).
+    spill_exhausts: bool = true,
+    stack_slots: enum { word, @"packed" } = .word,
+    varargs: enum { as_fixed, stack } = .as_fixed,
+    /// Whether an extern struct goes in its C layout (`cLayout`), as a C convention does.
+    c_structs: bool = false,
+    /// Whether a homogeneous float aggregate of up to 4 elements goes in FPRs.
+    hfa: bool = false,
+    /// How an extern struct over 16 bytes goes: a pointer to a copy, or the copy itself
+    /// on the stack.
+    big_c_struct: enum { pointer, memory } = .pointer,
+};
 
-/// The 8 SIMD&FP argument registers (v0..v7). A bare float scalar rides the NSRN
-/// sequence over these, INDEPENDENT of the GPR (NGRN) sequence; float arg 9+
-/// spills to the shared NSAA stack pool.
-pub const num_fp_args: u32 = 8;
-
-/// AAPCS64 argument class:
-///   * `scalar`    — an integer/bool: one GPR / 8 stack bytes (NGRN).
-///   * `fp`        — a bare float: one V-register / 8 stack bytes (NSRN).
+/// Argument class:
+///   * `scalar`    — an integer/bool: one GPR / one stack slot.
+///   * `fp`        — a bare float: one FPR / one stack slot.
 ///   * `reg_pair`  — aggregate <=16B: a 1- or 2-eightbyte GPR run.
-///   * `indirect`  — aggregate >16B: passed/returned via a pointer (+ x8 sret).
+///   * `indirect`  — aggregate >16B: passed/returned via a pointer (sret for a result).
 ///   * `zero`      — a zero-sized value (`()`): consumes no register and no stack
 ///                  byte. Gated on `.unit` (never `typeSize==0`, which also matches
 ///                  `never`/`invalid`), so only a genuine unit value is placed here.
 pub const AbiClass = enum { scalar, fp, reg_pair, indirect, zero };
 
 /// Whether a type is a value AGGREGATE (str / struct / enum) — passed in a reg
-/// pair (<=16B) or indirect+x8 (>16B), copied by bytes.
+/// pair (<=16B) or indirect (>16B), copied by bytes.
 pub fn isAggregate(ty: Type) bool {
     return ty.isAggregateValue();
 }
@@ -78,7 +92,7 @@ pub fn eightbytes(size: u32) u32 {
     return (size + 7) / 8;
 }
 
-/// AAPCS64 class for a type: a non-aggregate is `scalar`; an aggregate is
+/// The class of a type: a non-aggregate is `scalar`; an aggregate is
 /// `reg_pair` (<=16B) or `indirect` (>16B). Single source of truth for the
 /// reg-pair vs indirect split.
 pub fn classify(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) AbiClass {
@@ -86,7 +100,7 @@ pub fn classify(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLay
     // `typeSize==0`) so `never`/`invalid` (also size 0) keep their historic
     // `.scalar` placement — the additive-vs-baseline invariant.
     if (ty.kind == .unit) return .zero;
-    // A bare float rides the NSRN (V-register) sequence. Checked BEFORE the
+    // A bare float rides the FPR sequence. Checked BEFORE the
     // aggregate test so a struct-with-float-field (kind `.@"struct"`, never
     // `.float`) correctly stays on the GPR reg-pair/indirect path.
     if (ty.kind == .float) return .fp;
@@ -94,59 +108,55 @@ pub fn classify(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLay
     return if (ValueLayout.typeSize(ty, layouts, enum_layouts) <= 16) .reg_pair else .indirect;
 }
 
-/// Where one parameter (or one outbound call argument) lives per AAPCS64. The
-/// same encoding serves both directions (incoming prologue + outgoing call); the
-/// emitter interprets it as "store incoming reg here" vs "load from here into
-/// reg" accordingly.
+/// Where one parameter (or one outbound call argument) lives. The same encoding serves
+/// both directions (incoming prologue + outgoing call). A register is an index into the
+/// ISA's argument registers of its class; a stack offset is relative to the stack
+/// argument area.
 ///
 ///   * `gpr`       — a scalar OR a reg-pair aggregate occupying `count` (1 or 2)
-///                   consecutive GPRs starting at x`first`.
-///   * `gpr_ptr`   — an INDIRECT (>16B) aggregate whose POINTER is passed in the
-///                   single GPR x`reg` (the bytes live elsewhere).
-///   * `stack`     — a scalar OR a reg-pair aggregate placed WHOLLY on the
-///                   outgoing/incoming stack: `bytes` total at NSAA offset
-///                   `nsaa_off` (relative to the stack-arg base).
-///   * `stack_ptr` — an INDIRECT aggregate whose POINTER (8 bytes) sits on the
-///                   stack at NSAA offset `nsaa_off`.
+///                   consecutive GPR arguments from index `first`.
+///   * `gpr_ptr`   — an INDIRECT (>16B) aggregate whose POINTER is passed in GPR
+///                   argument `reg` (the bytes live elsewhere).
+///   * `stack`     — a value placed WHOLLY on the stack: `bytes` total at `off`.
+///   * `stack_ptr` — an INDIRECT aggregate whose POINTER (8 bytes) sits on the stack at
+///                   this offset.
 pub const ParamLoc = union(enum) {
     gpr: struct { first: u8, count: u8 },
     gpr_ptr: u8,
-    /// A bare float scalar in V-register `fpr` (a D-register, the NSRN sequence).
-    /// A float that overflows v7 does NOT use this — it reuses `.stack` (8 raw
-    /// bytes moved by GPR loads/stores, correct for the f64 bit pattern).
+    /// A bare float scalar in FPR argument `fpr`. A float past the last FPR reuses
+    /// `.stack` (8 raw bytes moved by GPR loads/stores, correct for the f64 bit pattern).
     fpr: u8,
     /// A C homogeneous floating-point aggregate (an extern struct of up to four floats
-    /// or four doubles) in `count` consecutive V-registers from v`first`, one element
+    /// or four doubles) in `count` consecutive FPR arguments from `first`, one element
     /// each; `single` when the elements are float32.
     fpr_run: struct { first: u8, count: u8, single: bool },
-    stack: struct { nsaa_off: u32, bytes: u32 },
+    stack: struct { off: u32, bytes: u32 },
     stack_ptr: u32,
     /// A zero-sized value (`()`): consumes no register and no stack byte; the
     /// emitter stores/loads nothing. Its presence in the union forces every
-    /// `ParamLoc`/`ArgLoc` switch (marshalParams/marshalArgs) to handle it, so a
-    /// unit param/arg can never silently mis-place an adjacent argument.
+    /// `ParamLoc`/`ArgLoc` switch to handle it, so a unit param/arg can never silently
+    /// mis-place an adjacent argument.
     zero,
 };
 
 /// Outbound call arguments use the exact same location encoding as parameters.
 pub const ArgLoc = ParamLoc;
 
-/// Where a function's RESULT lands per AAPCS64:
+/// Where a function's RESULT lands:
 ///   * `none`   — unit (no result register).
-///   * `reg`    — a scalar (1 reg, x0) or a reg-pair aggregate (`regs` = 1 or 2,
-///                in x0/x1).
-///   * `sret`   — an indirect (>16B) aggregate: the CALLER passes a buffer
-///                pointer in x8; the callee writes through it and returns void.
+///   * `reg`    — a scalar (1 reg) or a reg-pair aggregate (`regs` = 1 or 2), in the
+///                ISA's GPR result registers.
+///   * `fp_reg` — a bare float in the first FPR result register.
+///   * `sret`   — an indirect (>16B) aggregate: the CALLER passes a buffer pointer in
+///                the ISA's sret register; the callee writes through it.
 pub const RetLoc = union(enum) {
     none,
     reg: struct { regs: u8 },
-    /// A bare float result in v0 (D0).
     fp_reg,
     sret,
 };
 
-/// Classify a function's return type. A `unit` return is `none`; a scalar or
-/// reg-pair aggregate returns in x0(/x1); a >16B aggregate is `sret` (x8).
+/// Classify a function's return type under toy's convention.
 pub fn classifyRet(ty: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) RetLoc {
     if (ty.kind == .unit) return .none;
     switch (classify(ty, layouts, enum_layouts)) {
@@ -160,166 +170,102 @@ pub fn classifyRet(ty: Type, layouts: []const Layout, enum_layouts: []const Enum
     }
 }
 
-/// The single source of truth for the AAPCS64 argument-placement walk. Both
-/// `planParams` and `planCall` route through here so the three walks
-/// (prologue / genCallInner / measureOutgoingExpr) can never drift again.
-///
-/// Fills `out_locs[i]` for each `types_[i]` and returns the total NSAA byte
-/// count (the running stack total, BEFORE any 16-byte round-up). `out_locs` must
-/// be `types_.len` long. `sret` says whether the result is indirect — it does
-/// NOT consume an NGRN (x8 is separate), so the walk is identical whether or not
-/// sret is set; the flag is threaded only so the caller can record it.
-fn walkAbi(
-    conv: Conv,
+/// The argument-placement walk. Fills `out_locs[i]` for each `types_[i]` (the args from
+/// `fixed` on are C varargs) and returns the stack-argument bytes, before any rounding.
+fn walk(
+    d: Desc,
     types_: []const Type,
     fixed: usize,
+    sret: bool,
     out_locs: []ParamLoc,
     layouts: []const Layout,
     enum_layouts: []const EnumLayout,
 ) u32 {
     std.debug.assert(out_locs.len == types_.len);
-    const rules = rulesOf(conv);
-    var ngrn: u32 = 0;
-    // NSRN is the SIMD&FP arg counter — INDEPENDENT of NGRN. A float consumes
-    // only NSRN; an int/bool/aggregate consumes only NGRN. Structural: the `.fp`
-    // arm never touches ngrn, the others never touch nsrn.
-    var nsrn: u32 = 0;
-    var nsaa: u32 = 0;
+    var w: Walk = .{ .d = d, .ngrn = if (sret and d.sret_uses_gpr) 1 else 0 };
     for (types_, 0..) |ty, i| {
-        // Apple arm64 passes every C vararg on the stack in its own 8-byte slot, never in a
-        // register, whatever registers are left; standard AAPCS64 places them as fixed args.
-        if (i >= fixed and rules == .aapcs64_apple) {
-            nsaa = std.mem.alignForward(u32, nsaa, 8);
-            out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = 8 } };
-            nsaa += 8;
+        if (i >= fixed and d.varargs == .stack) {
+            out_locs[i] = w.stack(8, 8);
             continue;
         }
-        // An extern struct passed to C goes in its C layout (AAPCS64 B.2-B.4, C.2-C.4):
-        // a homogeneous float aggregate in V-registers, else its C size picks a GPR run
-        // or a pointer to a copy. A struct that does not fit whole goes to the stack.
-        if (rules != .toy and isCStruct(ty, layouts)) {
+        if (d.c_structs and isCStruct(ty, layouts)) {
             const size = cLayout(ty, layouts).size;
-            if (hfaOf(ty, layouts)) |h| {
-                if (nsrn + h.count <= num_fp_args) {
-                    out_locs[i] = .{ .fpr_run = .{ .first = @intCast(nsrn), .count = h.count, .single = h.single } };
-                    nsrn += h.count;
+            if (if (d.hfa) hfaOf(ty, layouts) else null) |h| {
+                if (w.nsrn + h.count <= d.fprs) {
+                    out_locs[i] = .{ .fpr_run = .{ .first = @intCast(w.nsrn), .count = h.count, .single = h.single } };
+                    w.nsrn += h.count;
                 } else {
-                    nsrn = num_fp_args;
-                    nsaa = std.mem.alignForward(u32, nsaa, 8);
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = eightbytes(size) * 8 } };
-                    nsaa += eightbytes(size) * 8;
+                    if (d.spill_exhausts) w.nsrn = d.fprs;
+                    out_locs[i] = w.stack(eightbytes(size) * 8, 8);
                 }
             } else if (size > 16) {
-                if (ngrn < num_gpr_args) {
-                    out_locs[i] = .{ .gpr_ptr = @intCast(ngrn) };
-                    ngrn += 1;
-                } else {
-                    // Apple packs a narrow stack arg at its own size, so the slot before a
-                    // pointer may end off an 8-byte boundary.
-                    nsaa = std.mem.alignForward(u32, nsaa, 8);
-                    out_locs[i] = .{ .stack_ptr = nsaa };
-                    nsaa += 8;
-                }
-            } else {
-                const ebs = eightbytes(size);
-                if (ngrn + ebs <= num_gpr_args) {
-                    out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = @intCast(ebs) } };
-                    ngrn += ebs;
-                } else {
-                    ngrn = num_gpr_args;
-                    nsaa = std.mem.alignForward(u32, nsaa, 8);
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = ebs * 8 } };
-                    nsaa += ebs * 8;
-                }
-            }
+                out_locs[i] = switch (d.big_c_struct) {
+                    .pointer => w.pointer(),
+                    .memory => w.stack(eightbytes(size) * 8, 8),
+                };
+            } else out_locs[i] = w.gprRun(eightbytes(size));
             continue;
         }
-        switch (classify(ty, layouts, enum_layouts)) {
-            // A zero-sized value consumes no register and no stack byte, so it does
-            // NOT touch ngrn/nsrn/nsaa — this is what keeps a later real arg at its
-            // correct register/offset (a unit param never shifts its neighbours).
-            .zero => out_locs[i] = .zero,
-            .fp => {
-                if (nsrn < num_fp_args) {
-                    out_locs[i] = .{ .fpr = @intCast(nsrn) };
-                    nsrn += 1;
-                } else {
-                    const bytes = stackBytes(rules, ty);
-                    nsaa = std.mem.alignForward(u32, nsaa, bytes);
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = bytes } };
-                    nsaa += bytes;
-                }
-            },
-            .indirect => {
-                if (ngrn < num_gpr_args) {
-                    out_locs[i] = .{ .gpr_ptr = @intCast(ngrn) };
-                    ngrn += 1;
-                } else {
-                    nsaa = std.mem.alignForward(u32, nsaa, 8);
-                    out_locs[i] = .{ .stack_ptr = nsaa };
-                    nsaa += 8;
-                }
-            },
-            .reg_pair => {
-                const ebs = eightbytes(ValueLayout.typeSize(ty, layouts, enum_layouts));
-                if (ngrn + ebs <= num_gpr_args) {
-                    out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = @intCast(ebs) } };
-                    ngrn += ebs;
-                } else {
-                    // AAPCS no-split: the whole aggregate goes to the stack and
-                    // NGRN is exhausted (no later backfill of the leftover GPRs).
-                    nsaa = std.mem.alignForward(u32, nsaa, 8);
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = ebs * 8 } };
-                    nsaa += ebs * 8;
-                    ngrn = num_gpr_args;
-                }
-            },
-            .scalar => {
-                if (ngrn < num_gpr_args) {
-                    out_locs[i] = .{ .gpr = .{ .first = @intCast(ngrn), .count = 1 } };
-                    ngrn += 1;
-                } else {
-                    const bytes = stackBytes(rules, ty);
-                    nsaa = std.mem.alignForward(u32, nsaa, bytes);
-                    out_locs[i] = .{ .stack = .{ .nsaa_off = nsaa, .bytes = bytes } };
-                    nsaa += bytes;
-                }
-            },
-        }
+        out_locs[i] = switch (classify(ty, layouts, enum_layouts)) {
+            // A zero-sized value touches no counter, so a later real arg keeps its
+            // register/offset (a unit param never shifts its neighbours).
+            .zero => .zero,
+            .fp => w.fpr(ty),
+            .indirect => w.pointer(),
+            .reg_pair => w.gprRun(eightbytes(ValueLayout.typeSize(ty, layouts, enum_layouts))),
+            .scalar => if (w.ngrn < d.gprs) w.gprRun(1) else w.scalarStack(ty),
+        };
     }
-    return nsaa;
+    return w.nsaa;
 }
 
-/// Whose calling convention a call follows: toy's own, or the target's C one. Toy defines
-/// C-callable functions only as the adapters a C callback goes through.
-pub const Conv = union(enum) {
-    toy,
-    c: CAbi,
+/// The walk's counters: the next GPR and FPR argument, and the stack offset.
+const Walk = struct {
+    d: Desc,
+    ngrn: u32 = 0,
+    nsrn: u32 = 0,
+    nsaa: u32 = 0,
+
+    fn stack(w: *Walk, bytes: u32, @"align": u32) ParamLoc {
+        const off = std.mem.alignForward(u32, w.nsaa, @"align");
+        w.nsaa = off + bytes;
+        return .{ .stack = .{ .off = off, .bytes = bytes } };
+    }
+
+    fn fpr(w: *Walk, ty: Type) ParamLoc {
+        if (w.nsrn >= w.d.fprs) return w.scalarStack(ty);
+        w.nsrn += 1;
+        return .{ .fpr = @intCast(w.nsrn - 1) };
+    }
+
+    fn scalarStack(w: *Walk, ty: Type) ParamLoc {
+        const bytes: u32 = if (w.d.stack_slots == .@"packed") cScalarSize(ty) else 8;
+        return w.stack(bytes, bytes);
+    }
+
+    /// A run of `n` GPRs, or the whole value on the stack when the run does not fit.
+    fn gprRun(w: *Walk, n: u32) ParamLoc {
+        if (w.ngrn + n <= w.d.gprs) {
+            const first = w.ngrn;
+            w.ngrn += n;
+            return .{ .gpr = .{ .first = @intCast(first), .count = @intCast(n) } };
+        }
+        if (w.d.spill_exhausts) w.ngrn = w.d.gprs;
+        return w.stack(n * 8, 8);
+    }
+
+    fn pointer(w: *Walk) ParamLoc {
+        if (w.ngrn < w.d.gprs) {
+            w.ngrn += 1;
+            return .{ .gpr_ptr = @intCast(w.ngrn - 1) };
+        }
+        // A packed stack arg before the pointer may leave the offset off an 8-byte
+        // boundary.
+        const off = std.mem.alignForward(u32, w.nsaa, 8);
+        w.nsaa = off + 8;
+        return .{ .stack_ptr = off };
+    }
 };
-
-/// The C calling convention of a target (`Target.cAbi`).
-pub const CAbi = Target.CAbi;
-
-/// The placement rules a convention follows on aarch64.
-const Rules = enum { toy, aapcs64_apple, aapcs64 };
-
-fn rulesOf(conv: Conv) Rules {
-    return switch (conv) {
-        .toy => .toy,
-        .c => |a| switch (a) {
-            .aapcs64_apple => .aapcs64_apple,
-            .aapcs64 => .aapcs64,
-            // x86_64's convention arrives with its ISA (#60 C3); no aarch64 target picks it.
-            .sysv64 => @panic("internal compiler error: the sysv64 C ABI is not implemented"),
-        },
-    };
-}
-
-/// The bytes a scalar argument takes on the stack. Toy and standard AAPCS64 give each its
-/// own 8-byte slot; Apple packs a C argument at its own size and alignment.
-fn stackBytes(rules: Rules, ty: Type) u32 {
-    return if (rules == .aapcs64_apple) cScalarSize(ty) else 8;
-}
 
 /// The bytes a scalar takes as a C argument on the stack or as a C struct field: a narrow
 /// int its width, a `bool` one byte (C `_Bool`), a `float32` four, everything else 8.
@@ -337,13 +283,12 @@ pub fn cScalarSize(ty: Type) u32 {
     };
 }
 
-/// The full incoming-parameter plan for a function: where each param arrives,
-/// plus whether the indirect-result pointer arrives in x8.
+/// The full incoming-parameter plan for a function: where each param arrives, plus
+/// whether an indirect-result buffer pointer arrives in the ISA's sret register.
 pub const ParamPlan = struct {
-    /// True when the return type is a >16B aggregate (sret): the caller hands a
-    /// result-buffer pointer in x8 (the callee must save it before the body
-    /// clobbers x8).
-    sret_in_x8: bool,
+    /// True when the result goes through a caller's buffer: the callee must save the
+    /// sret register before the body clobbers it.
+    sret: bool,
     /// One location per parameter, in declaration order. Owned by the caller;
     /// free with `gpa.free`.
     locs: []ParamLoc,
@@ -354,22 +299,11 @@ pub const ParamPlan = struct {
     }
 };
 
-/// Plan the incoming parameters of a function with signature `params -> ret`.
+/// Plan the incoming parameters of a function with signature `params -> ret` under `d`.
 /// The result `locs` slice is allocated with `gpa`.
 pub fn planParams(
     gpa: std.mem.Allocator,
-    params: []const Type,
-    ret: Type,
-    layouts: []const Layout,
-    enum_layouts: []const EnumLayout,
-) error{OutOfMemory}!ParamPlan {
-    return planParamsConv(gpa, .toy, params, ret, layouts, enum_layouts);
-}
-
-/// `planParams` under convention `conv`; a C callback adapter is `.c`.
-pub fn planParamsConv(
-    gpa: std.mem.Allocator,
-    conv: Conv,
+    d: Desc,
     params: []const Type,
     ret: Type,
     layouts: []const Layout,
@@ -377,32 +311,28 @@ pub fn planParamsConv(
 ) error{OutOfMemory}!ParamPlan {
     const locs = try gpa.alloc(ParamLoc, params.len);
     errdefer gpa.free(locs);
-    _ = walkAbi(conv, params, params.len, locs, layouts, enum_layouts);
-    return .{
-        .sret_in_x8 = retIsSret(conv, ret, layouts, enum_layouts),
-        .locs = locs,
-    };
+    const sret = retIsSret(d, ret, layouts, enum_layouts);
+    _ = walk(d, params, params.len, sret, locs, layouts, enum_layouts);
+    return .{ .sret = sret, .locs = locs };
 }
 
-/// Whether a function returning `ret` under `conv` gets its result buffer in x8.
-pub fn retIsSret(conv: Conv, ret: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) bool {
-    if (rulesOf(conv) != .toy and isCStruct(ret, layouts)) return cRet(ret, layouts) == .sret;
+/// Whether a function returning `ret` under `d` returns through a caller's buffer.
+pub fn retIsSret(d: Desc, ret: Type, layouts: []const Layout, enum_layouts: []const EnumLayout) bool {
+    if (d.c_structs and isCStruct(ret, layouts)) return cRet(d, ret, layouts) == .sret;
     return classifyRet(ret, layouts, enum_layouts) == .sret;
 }
 
-/// The full outbound-argument plan for one call site: where each argument goes,
-/// the total NSAA stack-arg bytes (drives the frame's `out_base`), and whether
-/// the call needs x8 (an indirect result the caller must point at its buffer).
+/// The full outbound-argument plan for one call site.
 pub const CallPlan = struct {
     /// One location per argument, in source order. Owned by the caller; free
     /// with `gpa.free`.
     locs: []ArgLoc,
-    /// Total outgoing stack-arg bytes (NSAA), BEFORE the 16-byte round-up the
-    /// frame applies. `FrameLayout.out_base` is `roundUp16(max over calls)`.
-    nsaa_bytes: u32,
-    /// True when the callee returns a >16B aggregate: the caller must set x8 to
-    /// its result buffer before the `bl`.
-    sret_in_x8: bool,
+    /// Total outgoing stack-argument bytes, before the frame rounds its outgoing area
+    /// (`FrameLayout.out_base`, the max over calls) to the stack alignment.
+    stack_bytes: u32,
+    /// True when the callee returns through a buffer: the caller points the sret
+    /// register at it before the call.
+    sret: bool,
 
     pub fn deinit(self: *CallPlan, gpa: std.mem.Allocator) void {
         gpa.free(self.locs);
@@ -410,25 +340,11 @@ pub const CallPlan = struct {
     }
 };
 
-/// Plan the outbound arguments of a call to a callee with signature
-/// `args -> ret`. The result `locs` slice is allocated with `gpa`, so
-/// `nsaa_bytes` equals the stack bytes the emission writes (matching what the
-/// frame reserves).
+/// Plan the outbound arguments of a call to a callee with signature `args -> ret` under
+/// `d`; the args from `fixed` on are C varargs (`args.len` for a call that has none).
 pub fn planCall(
     gpa: std.mem.Allocator,
-    args: []const Type,
-    ret: Type,
-    layouts: []const Layout,
-    enum_layouts: []const EnumLayout,
-) error{OutOfMemory}!CallPlan {
-    return planCallConv(gpa, .toy, args, args.len, ret, layouts, enum_layouts);
-}
-
-/// `planCall` under convention `conv`; an `extern` callee is `.c`. The args from `fixed`
-/// on are C varargs (`args.len` for a call that has none).
-pub fn planCallConv(
-    gpa: std.mem.Allocator,
-    conv: Conv,
+    d: Desc,
     args: []const Type,
     fixed: usize,
     ret: Type,
@@ -437,12 +353,9 @@ pub fn planCallConv(
 ) error{OutOfMemory}!CallPlan {
     const locs = try gpa.alloc(ArgLoc, args.len);
     errdefer gpa.free(locs);
-    const nsaa = walkAbi(conv, args, fixed, locs, layouts, enum_layouts);
-    return .{
-        .locs = locs,
-        .nsaa_bytes = nsaa,
-        .sret_in_x8 = retIsSret(conv, ret, layouts, enum_layouts),
-    };
+    const sret = retIsSret(d, ret, layouts, enum_layouts);
+    const bytes = walk(d, args, fixed, sret, locs, layouts, enum_layouts);
+    return .{ .locs = locs, .stack_bytes = bytes, .sret = sret };
 }
 
 /// Whether `ty` is an extern struct: toy code holds it in its own layout, and a C call
@@ -505,21 +418,21 @@ fn hfaWalk(ty: Type, layouts: []const Layout, count: *u8, single: *?bool) bool {
     return count.* <= 4;
 }
 
-/// Where a C function returns an extern struct: a homogeneous float aggregate in v0..,
-/// one of up to 16 bytes in x0/x1, a larger one through the buffer the caller points x8 at.
+/// Where a C function returns an extern struct: a homogeneous float aggregate in the FPR
+/// result registers (under `hfa`), one of up to 16 bytes in two GPRs, a larger one
+/// through the buffer the caller points the sret register at.
 pub const CRet = union(enum) { hfa: Hfa, regs: u8, sret };
 
-pub fn cRet(ty: Type, layouts: []const Layout) CRet {
-    if (hfaOf(ty, layouts)) |h| return .{ .hfa = h };
+pub fn cRet(d: Desc, ty: Type, layouts: []const Layout) CRet {
+    if (d.hfa) if (hfaOf(ty, layouts)) |h| return .{ .hfa = h };
     const size = cLayout(ty, layouts).size;
     return if (size <= 16) .{ .regs = @intCast(eightbytes(size)) } else .sret;
 }
 
 const testing = std.testing;
 
-// Build minimal layout tables for tests. Struct id i has size `sizes[i]`,
-// align 8. (The ABI only consults size for aggregates.)
-fn mkLayouts(gpa: std.mem.Allocator, sizes: []const u32) ![]Layout {
+/// Test helpers, shared with each ISA's `abi` tests.
+pub fn mkLayouts(gpa: std.mem.Allocator, sizes: []const u32) ![]Layout {
     const ls = try gpa.alloc(Layout, sizes.len);
     for (sizes, 0..) |s, i| {
         ls[i] = .{
@@ -534,7 +447,7 @@ fn mkLayouts(gpa: std.mem.Allocator, sizes: []const u32) ![]Layout {
     return ls;
 }
 
-fn structOf(id: u32) Type {
+pub fn structOf(id: u32) Type {
     return Type.structT(id);
 }
 
@@ -569,56 +482,10 @@ test "classify: a bare float is fp, a struct-with-float stays an aggregate" {
     try testing.expectEqual(AbiClass.reg_pair, classify(structOf(0), ls, el));
 }
 
-test "classifyRet: a bare float returns in v0 (fp_reg)" {
+test "classifyRet: a bare float returns in an FPR (fp_reg)" {
     const ls: []const Layout = &.{};
     const el: []const EnumLayout = &.{};
     try testing.expectEqual(RetLoc.fp_reg, classifyRet(Type.float, ls, el));
-}
-
-test "planParams: (int,float,int,float) — NSRN independent of NGRN" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    // i→x0 (NGRN), x→v0 (NSRN), j→x1 (NGRN), y→v1 (NSRN): the two sequences
-    // advance independently.
-    const params = [_]Type{ Type.int, Type.float, Type.int, Type.float };
-    var plan = try planParams(gpa, &params, Type.float, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 0), plan.locs[1].fpr);
-    try testing.expectEqual(@as(u8, 1), plan.locs[2].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[3].fpr);
-}
-
-test "planCall: 9 floats — v0..v7 then a stack spill (NSAA)" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{ Type.float, Type.float, Type.float, Type.float, Type.float, Type.float, Type.float, Type.float, Type.float };
-    var plan = try planCall(gpa, &args, Type.float, ls, el);
-    defer plan.deinit(gpa);
-
-    var i: u8 = 0;
-    while (i < 8) : (i += 1) try testing.expectEqual(i, plan.locs[i].fpr);
-    // The 9th float overflows v7 → a shared-NSAA stack slot of 8 bytes.
-    try testing.expectEqual(@as(u32, 0), plan.locs[8].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 8), plan.locs[8].stack.bytes);
-    try testing.expectEqual(@as(u32, 8), plan.nsaa_bytes);
-}
-
-test "planCall: floats do NOT consume GPR slots — 8 ints + a float still place the float in v0" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    // 8 ints exhaust x0..x7; a trailing float rides v0 (NSRN), NOT the stack —
-    // proof the NSRN pool is untouched by the exhausted NGRN pool.
-    const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.float };
-    var plan = try planCall(gpa, &args, Type.unit, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(u8, 0), plan.locs[8].fpr);
-    try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
 }
 
 test "classifyRet: unit / scalar / reg_pair / sret" {
@@ -635,455 +502,39 @@ test "classifyRet: unit / scalar / reg_pair / sret" {
     try testing.expectEqual(RetLoc.sret, classifyRet(structOf(2), ls, el)); // 24B
 }
 
-test "planParams: all-scalar in x0..x7" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const params = [_]Type{ Type.int, Type.bool, Type.int };
-    var plan = try planParams(gpa, &params, Type.int, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expect(!plan.sret_in_x8);
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[0].gpr.count);
-    try testing.expectEqual(@as(u8, 1), plan.locs[1].gpr.first);
-    try testing.expectEqual(@as(u8, 2), plan.locs[2].gpr.first);
+test "classify: unit is zero" {
+    try testing.expectEqual(AbiClass.zero, classify(Type.unit, &.{}, &.{}));
 }
 
-test "planParams: str occupies a 2-reg run (eightbytes pair)" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    // int, str, int: str takes x1,x2; the trailing int gets x3.
-    const params = [_]Type{ Type.int, Type.str, Type.int };
-    var plan = try planParams(gpa, &params, Type.unit, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[1].gpr.first);
-    try testing.expectEqual(@as(u8, 2), plan.locs[1].gpr.count);
-    try testing.expectEqual(@as(u8, 3), plan.locs[2].gpr.first);
-}
-
-test "planParams: <=16B struct reg-pair, >16B struct indirect (gpr_ptr)" {
-    const gpa = testing.allocator;
-    const ls = try mkLayouts(gpa, &.{ 16, 24 });
-    defer gpa.free(ls);
-    const el: []const EnumLayout = &.{};
-    const params = [_]Type{ structOf(0), structOf(1) }; // 16B pair, 24B indirect
-    var plan = try planParams(gpa, &params, Type.unit, ls, el);
-    defer plan.deinit(gpa);
-
-    // 16B struct => 2-reg pair x0,x1.
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 2), plan.locs[0].gpr.count);
-    // 24B struct => indirect pointer in x2.
-    try testing.expectEqual(@as(u8, 2), plan.locs[1].gpr_ptr);
-}
-
-test "planParams: sret return reserves x8 but does NOT consume a GPR" {
-    const gpa = testing.allocator;
-    const ls = try mkLayouts(gpa, &.{24}); // 24B -> sret
-    defer gpa.free(ls);
-    const el: []const EnumLayout = &.{};
-    const params = [_]Type{ Type.int, Type.int };
-    var plan = try planParams(gpa, &params, structOf(0), ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expect(plan.sret_in_x8);
-    // x8 is separate: the two int params STILL start at x0.
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[1].gpr.first);
-}
-
-test "planCall: >=9 scalar args overflow to the stack (NSAA)" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int };
-    var plan = try planCall(gpa, &args, Type.int, ls, el);
-    defer plan.deinit(gpa);
-
-    // First 8 -> x0..x7.
-    var i: u8 = 0;
-    while (i < 8) : (i += 1) {
-        try testing.expectEqual(i, plan.locs[i].gpr.first);
-        try testing.expectEqual(@as(u8, 1), plan.locs[i].gpr.count);
-    }
-    // args 9,10 -> stack at NSAA 0, 8.
-    try testing.expectEqual(@as(u32, 0), plan.locs[8].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 8), plan.locs[8].stack.bytes);
-    try testing.expectEqual(@as(u32, 8), plan.locs[9].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 16), plan.nsaa_bytes);
-    try testing.expect(!plan.sret_in_x8);
-}
-
-test "aapcs64_apple: stack args past x7 pack at their own size and alignment" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const i8_: Type = .{ .kind = .int, .int_desc = .{ .width = .w8 } };
-    const i16_: Type = .{ .kind = .int, .int_desc = .{ .width = .w16 } };
-    const i32_: Type = .{ .kind = .int, .int_desc = .{ .width = .w32 } };
-    const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, i8_, i16_, i8_, i32_, Type.bool, Type.int };
-    var plan = try planCallConv(gpa, apple, &args, args.len, Type.int, ls, el);
-    defer plan.deinit(gpa);
-    const want = [_][2]u32{ .{ 0, 1 }, .{ 2, 2 }, .{ 4, 1 }, .{ 8, 4 }, .{ 12, 1 }, .{ 16, 8 } };
-    for (want, 8..) |w, i| {
-        try testing.expectEqual(w[0], plan.locs[i].stack.nsaa_off);
-        try testing.expectEqual(w[1], plan.locs[i].stack.bytes);
-    }
-    try testing.expectEqual(@as(u32, 24), plan.nsaa_bytes);
-
-    var toy = try planCall(gpa, &args, Type.int, ls, el);
-    defer toy.deinit(gpa);
-    try testing.expectEqual(@as(u32, 48), toy.nsaa_bytes);
-}
-
-test "aapcs64_apple: varargs each take an 8-byte stack slot, ints and floats alike, with registers left" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{ Type.cstr, Type.int, Type.float, Type.cstr, Type.int };
-    var plan = try planCallConv(gpa, apple, &args, 1, Type.int32, ls, el);
-    defer plan.deinit(gpa);
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    for (1..args.len) |i| {
-        try testing.expectEqual(@as(u32, @intCast((i - 1) * 8)), plan.locs[i].stack.nsaa_off);
-        try testing.expectEqual(@as(u32, 8), plan.locs[i].stack.bytes);
-    }
-    try testing.expectEqual(@as(u32, 32), plan.nsaa_bytes);
-
-    var none = try planCallConv(gpa, apple, args[0..1], 1, Type.int32, ls, el);
-    defer none.deinit(gpa);
-    try testing.expectEqual(@as(u32, 0), none.nsaa_bytes);
-}
-
-const apple: Conv = .{ .c = .aapcs64_apple };
-const standard: Conv = .{ .c = .aapcs64 };
+/// The facts x86-64's `sysv64` will supply (#60 C3), to show the description holds them.
+const sysv64_shape: Desc = .{ .gprs = 6, .fprs = 8, .sret_uses_gpr = true, .spill_exhausts = false, .c_structs = true, .big_c_struct = .memory };
 
 fn cStruct(name: []const u8, fields: []const Type) Layout {
     return .{ .name = name, .field_names = &.{}, .field_types = @constCast(fields), .offsets = &.{}, .size = @intCast(fields.len * 8), .@"align" = 8, .is_extern = true };
 }
 
-test "cLayout: C alignment and padding, nested extern structs" {
-    const small = [_]Type{ Type.int32, Type.int8, Type.int16 };
-    const vec2f = [_]Type{ Type.float32, Type.float32 };
-    const rect = [_]Type{ Type.structT(1), Type.structT(1) };
-    const mixed = [_]Type{ Type.uint8, Type.uint8, Type.uint8, Type.float32 };
-    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
-    const ls = [_]Layout{ cStruct("Small", &small), cStruct("Vec2f", &vec2f), cStruct("Rect", &rect), cStruct("Mixed", &mixed), cStruct("Big", &big) };
-    try testing.expectEqual(CLayout{ .size = 8, .@"align" = 4 }, cLayout(Type.structT(0), &ls));
-    try testing.expectEqual(@as(u32, 4), cFieldOffset(Type.structT(0), 1, &ls));
-    try testing.expectEqual(@as(u32, 6), cFieldOffset(Type.structT(0), 2, &ls));
-    try testing.expectEqual(CLayout{ .size = 16, .@"align" = 4 }, cLayout(Type.structT(2), &ls));
-    try testing.expectEqual(@as(u32, 8), cFieldOffset(Type.structT(2), 1, &ls));
-    try testing.expectEqual(@as(u32, 4), cFieldOffset(Type.structT(3), 3, &ls));
-    try testing.expectEqual(CLayout{ .size = 32, .@"align" = 8 }, cLayout(Type.structT(4), &ls));
-
-    try testing.expectEqual(Hfa{ .count = 4, .single = true }, hfaOf(Type.structT(2), &ls).?);
-    try testing.expect(hfaOf(Type.structT(3), &ls) == null);
-    try testing.expectEqual(CRet{ .regs = 1 }, cRet(Type.structT(0), &ls));
-    try testing.expectEqual(CRet.sret, cRet(Type.structT(4), &ls));
-}
-
-test "aapcs64_apple: extern structs by C size, HFAs in V-registers, the rest whole on the stack" {
+test "a sysv64-shaped description: 6 GPRs, sret takes the first, big structs copied onto the stack, no exhaustion" {
     const gpa = testing.allocator;
-    const pair = [_]Type{ Type.int, Type.int32, Type.bool };
-    const vec4d = [_]Type{ Type.float, Type.float, Type.float, Type.float };
-    const vec2f = [_]Type{ Type.float32, Type.float32 };
-    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
-    const ls = [_]Layout{ cStruct("Pair", &pair), cStruct("Vec4d", &vec4d), cStruct("Vec2f", &vec2f), cStruct("Big", &big) };
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const args = [_]Type{ i, i, i, i, i, i, i, Type.structT(0), Type.structT(1), Type.structT(1), Type.structT(2), Type.structT(3) };
-    var plan = try planCallConv(gpa, apple, &args, args.len, Type.structT(3), &ls, el);
-    defer plan.deinit(gpa);
-    try testing.expectEqual(@as(u32, 0), plan.locs[7].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 16), plan.locs[7].stack.bytes);
-    try testing.expectEqual(@as(u8, 0), plan.locs[8].fpr_run.first);
-    try testing.expectEqual(@as(u8, 4), plan.locs[9].fpr_run.first);
-    try testing.expectEqual(@as(u32, 16), plan.locs[10].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 8), plan.locs[10].stack.bytes);
-    // NGRN went to 8 when the pair spilled, so the big struct's pointer is on the stack.
-    try testing.expectEqual(@as(u32, 24), plan.locs[11].stack_ptr);
-    try testing.expect(plan.sret_in_x8);
-
-    const fl = [_]Type{ Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32, Type.float32 };
-    var fp = try planCallConv(gpa, apple, &fl, fl.len, Type.float32, &ls, el);
-    defer fp.deinit(gpa);
-    try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 4), fp.locs[9].stack.bytes);
-}
-
-test "aapcs64_apple: a C callback's params arrive as a C call places them; its sret by C size" {
-    const gpa = testing.allocator;
-    // C size 12 (x registers), toy size 24 (which toy would return through x8).
-    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
-    const ls = [_]Layout{cStruct("Three", &three)};
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
-    var c = try planParamsConv(gpa, apple, &params, Type.structT(0), &ls, el);
-    defer c.deinit(gpa);
-    var call = try planCallConv(gpa, apple, &params, params.len, Type.structT(0), &ls, el);
-    defer call.deinit(gpa);
-    for (c.locs, call.locs) |p, a| try testing.expectEqualDeep(a, p);
-    try testing.expectEqual(@as(u32, 1), c.locs[8].stack.bytes);
-    try testing.expect(!c.sret_in_x8);
-    var toy = try planParams(gpa, &params, Type.structT(0), &ls, el);
-    defer toy.deinit(gpa);
-    try testing.expect(toy.sret_in_x8);
-    try testing.expectEqual(@as(u32, 8), toy.locs[8].stack.bytes);
-}
-
-test "aapcs64_apple: a pointer to a C struct over 16 bytes on the stack is 8-aligned after a packed arg" {
-    const gpa = testing.allocator;
-    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
+    const big = [_]Type{ Type.int, Type.int, Type.int };
     const ls = [_]Layout{cStruct("Big", &big)};
     const el: []const EnumLayout = &.{};
     const i = Type.int;
-    const args = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.structT(0) };
-    var call = try planCallConv(gpa, apple, &args, args.len, Type.int, &ls, el);
-    defer call.deinit(gpa);
-    try testing.expectEqual(@as(u32, 0), call.locs[8].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 8), call.locs[9].stack_ptr);
-    try testing.expectEqual(@as(u32, 16), call.nsaa_bytes);
-    var params = try planParamsConv(gpa, apple, &args, Type.int, &ls, el);
-    defer params.deinit(gpa);
-    try testing.expectEqual(@as(u32, 8), params.locs[9].stack_ptr);
-}
-
-test "planCall: AAPCS no-split — reg-pair that doesn't fit goes wholly to stack and forbids backfill" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    // 7 ints (x0..x6, NGRN=7) then a str (2 eightbytes): 7+2 > 8, so the str
-    // spills WHOLLY to the stack and NGRN becomes 8 — a trailing int must NOT
-    // backfill x7; it spills too.
-    const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.str, Type.int };
-    var plan = try planCall(gpa, &args, Type.unit, ls, el);
+    const args = [_]Type{ i, i, i, i, Type.str, Type.structT(0), i, Type.float };
+    var plan = try planCall(gpa, sysv64_shape, &args, args.len, Type.structT(0), &ls, el);
     defer plan.deinit(gpa);
+    try testing.expect(plan.sret);
+    for (0..4) |k| try testing.expectEqual(ParamLoc{ .gpr = .{ .first = @intCast(k + 1), .count = 1 } }, plan.locs[k]);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .off = 0, .bytes = 16 } }, plan.locs[4]);
+    try testing.expectEqual(ParamLoc{ .stack = .{ .off = 16, .bytes = 24 } }, plan.locs[5]);
+    // The str did not exhaust the GPRs: the int after it takes the last one.
+    try testing.expectEqual(ParamLoc{ .gpr = .{ .first = 5, .count = 1 } }, plan.locs[6]);
+    try testing.expectEqual(ParamLoc{ .fpr = 0 }, plan.locs[7]);
+    try testing.expectEqual(@as(u32, 40), plan.stack_bytes);
 
-    var i: u8 = 0;
-    while (i < 7) : (i += 1) try testing.expectEqual(i, plan.locs[i].gpr.first);
-    // str: wholly on stack (16 bytes) at NSAA 0.
-    try testing.expectEqual(@as(u32, 0), plan.locs[7].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 16), plan.locs[7].stack.bytes);
-    // trailing int: NO backfill into x7 — it lands on the stack at NSAA 16.
-    try testing.expectEqual(@as(u32, 16), plan.locs[8].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 24), plan.nsaa_bytes);
-}
-
-test "planCall: indirect aggregate beyond x7 passes its pointer on the stack (stack_ptr)" {
-    const gpa = testing.allocator;
-    const ls = try mkLayouts(gpa, &.{24}); // 24B indirect
-    defer gpa.free(ls);
-    const el: []const EnumLayout = &.{};
-    // 8 ints fill x0..x7; the 9th arg (a >16B struct) passes its pointer on the
-    // stack (8 bytes), NOT in a GPR.
-    const args = [_]Type{ Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, Type.int, structOf(0) };
-    var plan = try planCall(gpa, &args, Type.unit, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(u32, 0), plan.locs[8].stack_ptr);
-    try testing.expectEqual(@as(u32, 8), plan.nsaa_bytes);
-}
-
-test "planCall: aggregate return sets sret_in_x8" {
-    const gpa = testing.allocator;
-    const ls = try mkLayouts(gpa, &.{24});
-    defer gpa.free(ls);
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{Type.int};
-    var plan = try planCall(gpa, &args, structOf(0), ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expect(plan.sret_in_x8);
-    // the result does not consume a GPR; the int arg is still x0.
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-}
-
-test "classify: unit is zero" {
-    try testing.expectEqual(AbiClass.zero, classify(Type.unit, &.{}, &.{}));
-}
-
-test "walkAbi: a unit param does not shift adjacent ints" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const params = [_]Type{ Type.int, Type.unit, Type.int };
-    var plan = try planParams(gpa, &params, Type.int, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(ParamLoc.zero, plan.locs[1]);
-    // The trailing int backfills x1 — the unit consumed no GPR.
-    try testing.expectEqual(@as(u8, 1), plan.locs[2].gpr.first);
-}
-
-test "planCall: a unit arg consumes 0 GPR / 0 NSAA" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    {
-        const args = [_]Type{Type.unit};
-        var plan = try planCall(gpa, &args, Type.int, ls, el);
-        defer plan.deinit(gpa);
-        try testing.expectEqual(ArgLoc.zero, plan.locs[0]);
-        try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-    }
-    {
-        // A leading unit does not push the int off x0.
-        const args = [_]Type{ Type.unit, Type.int };
-        var plan = try planCall(gpa, &args, Type.int, ls, el);
-        defer plan.deinit(gpa);
-        try testing.expectEqual(ArgLoc.zero, plan.locs[0]);
-        try testing.expectEqual(@as(u8, 0), plan.locs[1].gpr.first);
-    }
-    {
-        // A trailing unit does not add a stack byte.
-        const args = [_]Type{ Type.int, Type.unit };
-        var plan = try planCall(gpa, &args, Type.int, ls, el);
-        defer plan.deinit(gpa);
-        try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-        try testing.expectEqual(ArgLoc.zero, plan.locs[1]);
-        try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-    }
-}
-
-test "planCall: unit does not disturb NSRN" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{ Type.unit, Type.float, Type.unit };
-    var plan = try planCall(gpa, &args, Type.unit, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(ArgLoc.zero, plan.locs[0]);
-    try testing.expectEqual(@as(u8, 0), plan.locs[1].fpr);
-    try testing.expectEqual(ArgLoc.zero, plan.locs[2]);
-    try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-}
-
-test "planCall: no args -> empty locs, zero nsaa" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const args = [_]Type{};
-    var plan = try planCall(gpa, &args, Type.int, ls, el);
-    defer plan.deinit(gpa);
-
-    try testing.expectEqual(@as(usize, 0), plan.locs.len);
-    try testing.expectEqual(@as(u32, 0), plan.nsaa_bytes);
-}
-
-test "aapcs64: varargs take registers like fixed args, then 8-byte stack slots" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const args = [_]Type{ Type.cstr, i, Type.float, Type.cstr, Type.float32, i, i, i, i, i, Type.int8, Type.float };
-    var plan = try planCallConv(gpa, standard, &args, 1, Type.int32, ls, el);
-    defer plan.deinit(gpa);
-    try testing.expectEqual(@as(u8, 0), plan.locs[0].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[1].gpr.first);
-    try testing.expectEqual(@as(u8, 0), plan.locs[2].fpr);
-    try testing.expectEqual(@as(u8, 2), plan.locs[3].gpr.first);
-    try testing.expectEqual(@as(u8, 1), plan.locs[4].fpr);
-    for (5..9, 3..) |k, r| try testing.expectEqual(@as(u8, @intCast(r)), plan.locs[k].gpr.first);
-    try testing.expectEqual(@as(u8, 7), plan.locs[9].gpr.first);
-    try testing.expectEqual(@as(u32, 0), plan.locs[10].stack.nsaa_off);
-    try testing.expectEqual(@as(u32, 8), plan.locs[10].stack.bytes);
-    try testing.expectEqual(@as(u8, 2), plan.locs[11].fpr);
-    try testing.expectEqual(@as(u32, 8), plan.nsaa_bytes);
-}
-
-test "aapcs64: more than 8 int or float args spill to 8-byte stack slots" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const ints = [_]Type{ i, i, i, i, i, i, i, i, Type.int32, i };
-    var ip = try planCallConv(gpa, standard, &ints, ints.len, i, ls, el);
-    defer ip.deinit(gpa);
-    for (0..8) |k| try testing.expectEqual(@as(u8, @intCast(k)), ip.locs[k].gpr.first);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, ip.locs[8]);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 8 } }, ip.locs[9]);
-    try testing.expectEqual(@as(u32, 16), ip.nsaa_bytes);
-
-    const f = Type.float32;
-    const floats = [_]Type{ f, f, f, f, f, f, f, f, f, Type.float };
-    var fp = try planCallConv(gpa, standard, &floats, floats.len, f, ls, el);
-    defer fp.deinit(gpa);
-    for (0..8) |k| try testing.expectEqual(@as(u8, @intCast(k)), fp.locs[k].fpr);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, fp.locs[8]);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 8 } }, fp.locs[9]);
-    try testing.expectEqual(@as(u32, 16), fp.nsaa_bytes);
-}
-
-test "aapcs64: small ints on the stack each take an 8-byte slot" {
-    const gpa = testing.allocator;
-    const ls: []const Layout = &.{};
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const args = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.int16, Type.uint8, Type.int32, Type.bool, i };
-    var plan = try planCallConv(gpa, standard, &args, args.len, i, ls, el);
-    defer plan.deinit(gpa);
-    for (8..args.len) |k| try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = @intCast((k - 8) * 8), .bytes = 8 } }, plan.locs[k]);
-    try testing.expectEqual(@as(u32, 48), plan.nsaa_bytes);
-}
-
-test "aapcs64: HFAs in V-registers, a 16-byte pair in x registers or whole on the stack, larger structs indirect, sret by C size" {
-    const gpa = testing.allocator;
-    const pair = [_]Type{ Type.int, Type.int32, Type.bool };
-    const vec4d = [_]Type{ Type.float, Type.float, Type.float, Type.float };
-    const vec2f = [_]Type{ Type.float32, Type.float32 };
-    const big = [_]Type{ Type.int, Type.int, Type.int, Type.int8 };
-    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
-    const ls = [_]Layout{ cStruct("Pair", &pair), cStruct("Vec4d", &vec4d), cStruct("Vec2f", &vec2f), cStruct("Big", &big), cStruct("Three", &three) };
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const pair_t = Type.structT(0);
-    const big_t = Type.structT(3);
-
-    const fits = [_]Type{ pair_t, big_t, i, i, i, i, Type.structT(1), Type.structT(2) };
-    var a = try planCallConv(gpa, standard, &fits, fits.len, big_t, &ls, el);
-    defer a.deinit(gpa);
-    try testing.expectEqual(ParamLoc{ .gpr = .{ .first = 0, .count = 2 } }, a.locs[0]);
-    try testing.expectEqual(ParamLoc{ .gpr_ptr = 2 }, a.locs[1]);
-    try testing.expectEqual(ParamLoc{ .fpr_run = .{ .first = 0, .count = 4, .single = false } }, a.locs[6]);
-    try testing.expectEqual(ParamLoc{ .fpr_run = .{ .first = 4, .count = 2, .single = true } }, a.locs[7]);
-    try testing.expect(a.sret_in_x8);
-    try testing.expectEqual(@as(u32, 0), a.nsaa_bytes);
-
-    const spills = [_]Type{ i, i, i, i, i, i, i, pair_t, Type.structT(1), Type.structT(1), Type.structT(2), big_t };
-    var b = try planCallConv(gpa, standard, &spills, spills.len, Type.structT(4), &ls, el);
-    defer b.deinit(gpa);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 16 } }, b.locs[7]);
-    try testing.expectEqual(@as(u8, 0), b.locs[8].fpr_run.first);
-    try testing.expectEqual(@as(u8, 4), b.locs[9].fpr_run.first);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 16, .bytes = 8 } }, b.locs[10]);
-    try testing.expectEqual(ParamLoc{ .stack_ptr = 24 }, b.locs[11]);
-    try testing.expectEqual(@as(u32, 32), b.nsaa_bytes);
-    try testing.expect(!b.sret_in_x8);
-}
-
-test "aapcs64: a C callback's params arrive where a C call puts them" {
-    const gpa = testing.allocator;
-    const three = [_]Type{ Type.int32, Type.int32, Type.int32 };
-    const ls = [_]Layout{cStruct("Three", &three)};
-    const el: []const EnumLayout = &.{};
-    const i = Type.int;
-    const params = [_]Type{ i, i, i, i, i, i, i, i, Type.int8, Type.float32, Type.structT(0) };
-    var p = try planParamsConv(gpa, standard, &params, Type.structT(0), &ls, el);
-    defer p.deinit(gpa);
-    var c = try planCallConv(gpa, standard, &params, params.len, Type.structT(0), &ls, el);
-    defer c.deinit(gpa);
-    for (p.locs, c.locs) |x, y| try testing.expectEqualDeep(y, x);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 0, .bytes = 8 } }, p.locs[8]);
-    try testing.expectEqual(@as(u8, 0), p.locs[9].fpr);
-    try testing.expectEqual(ParamLoc{ .stack = .{ .nsaa_off = 8, .bytes = 16 } }, p.locs[10]);
-    try testing.expect(!p.sret_in_x8);
+    const params = [_]Type{ i, Type.float };
+    var pplan = try planParams(gpa, sysv64_shape, &params, Type.structT(0), &ls, el);
+    defer pplan.deinit(gpa);
+    try testing.expect(pplan.sret);
+    try testing.expectEqual(ParamLoc{ .gpr = .{ .first = 1, .count = 1 } }, pplan.locs[0]);
+    try testing.expectEqual(ParamLoc{ .fpr = 0 }, pplan.locs[1]);
 }

@@ -518,7 +518,7 @@ pub const Fitted = union(enum) {
 /// every closure that never outlives its maker as one whose env may live in a frame, and
 /// every local only such closures capture as one that may leave its cell, with no budget,
 /// since only the lowering knows the frame. When the optimized fixed frame of a body that
-/// keeps either in its frame would overflow codegen's cap (`FrameLayout.MAX_FRAME`), the
+/// keeps either in its frame would overflow codegen's cap (`Facts.max_frame`), the
 /// body is lowered again with every env and every box in a GC cell, as at -O0, so frame
 /// storage alone does not fail an -O1 build that builds at -O0. A lambda unit reads its env
 /// the same way wherever it lives, and reads an unboxed local through the address its env
