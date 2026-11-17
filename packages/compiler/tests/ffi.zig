@@ -369,14 +369,15 @@ test "library errors: a bad -l is a coded usage error, a bad extern library a di
     defer gpa.free(w);
 
     inline for (.{ "build", "check" }) |verb| {
-        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-l", "toy-no-such-lib" }, 2, .err, &.{ "error[R0016]: library 'toy-no-such-lib' not found: no libtoy-no-such-lib.dylib in ", "/usr/local/lib, /usr/lib, the dyld shared cache (-l toy-no-such-lib)" });
-        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-lfoo.a" }, 2, .err, &.{"error[R0015]: library 'foo.a' is a static library; toy links only dynamic libraries (.dylib) (-l foo.a)"});
-        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-L", "vendor", "-l", "arc" }, 2, .err, &.{"error[R0015]: library 'arc' is only a static library ('vendor/libarc.a')"});
+        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-l", "toy-no-such-lib" }, 2, .err, &.{ "error[R0016]: library 'toy-no-such-lib' not found in ", "/usr/local/lib, /usr/lib or the system library cache (-l toy-no-such-lib)\nnote: on macOS toy looked for libtoy-no-such-lib.dylib, and the system library cache is the dyld shared cache\n" });
+        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-lfoo.a" }, 2, .err, &.{"error[R0015]: library 'foo.a' is a static library; toy links only shared libraries (-l foo.a)"});
+        try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-L", "vendor", "-l", "arc" }, 2, .err, &.{"error[R0015]: library 'arc' is only a static library ('vendor/libarc.a'); toy links only shared libraries"});
         try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", test_lib_dir, "-L", "vendor", "-l", "bad" }, 2, .err, &.{"error[R0017]: library 'bad' cannot be linked: 'vendor/libbad.dylib': it is not a Mach-O file"});
         try expectToy(gpa, io, w, &.{ verb, "main.toy", "-L", "no-such-dir" }, 2, .err, &.{"invalid value 'no-such-dir' for -L (a directory)"});
-        try expectToy(gpa, io, w, &.{ verb, "missing.toy" }, 1, .out, &.{ "error[R0016]: library 'toy-no-such-lib' not found", "missing.toy:1:8" });
+        try expectToy(gpa, io, w, &.{ verb, "missing.toy" }, 1, .out, &.{ "error[R0016]: library 'toy-no-such-lib' not found", "missing.toy:1:8", "\n  = note: on macOS toy looked for libtoy-no-such-lib.dylib, and the system library cache is the dyld shared cache\n1 error(s)" });
         try expectToy(gpa, io, w, &.{ verb, "main.toy" }, 1, .out, &.{"error[R0016]: library 'toyffi' not found"});
     }
+    try expectToy(gpa, io, w, &.{ "check", "--format", "ndjson", "missing.toy" }, 1, .out, &.{"\"notes\":[\"on macOS toy looked for libtoy-no-such-lib.dylib, and the system library cache is the dyld shared cache\"]}"});
     try expectToy(gpa, io, w, &.{ "check", "main.toy", "-L", test_lib_dir, "-l", "toyffi2" }, 0, .out, &.{});
     try expectToy(gpa, io, w, &.{ "run", "main.toy", "-L", test_lib_dir, "-o", "p0" }, 42, .out, &.{"p0 exited with code 42"});
 }
@@ -428,7 +429,7 @@ test "only the externs lowered code calls are imported, and only those are check
 
     try expectToy(gpa, io, w, &.{ "check", "untaken.toy", "-L", test_lib_dir }, 0, .out, &.{});
     try expectToy(gpa, io, w, &.{ "check", "taken.toy", "-L", test_lib_dir }, 1, .out, &.{
-        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem",
+        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by the system C library; a bare 'extern fn' binds to the system C library",
         "error[R0019]: C symbol 'toyffi_nope' is not exported by library 'toyffi'",
     });
     for ([_][]const u8{ "-O0", "-O1" }) |opt| {
@@ -443,7 +444,7 @@ test "only the externs lowered code calls are imported, and only those are check
     for ([_][]const u8{ "_toy_no_such_symbol", "_toy_never_called", "_toyffi_nope" }) |sym| try std.testing.expect(std.mem.indexOf(u8, image, sym) == null);
 
     try expectToy(gpa, io, w, &.{ "build", "taken.toy", "-L", test_lib_dir, "-o", "t" }, 1, .out, &.{
-        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem",
+        "error[R0019]: C symbol 'toy_no_such_symbol' is not exported by the system C library; a bare 'extern fn' binds to the system C library",
         "error[R0019]: C symbol 'toyffi_nope' is not exported by library 'toyffi'",
         "taken.toy:2:11",
     });

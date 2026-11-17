@@ -316,8 +316,8 @@ pub fn bl(imm26: i26) u32 {
 // 4 KiB-page-relative base, `addImm` adds the in-page byte offset (for a cstring
 // literal address), `ldrRegUoff` loads the GOT slot, and `blr` calls it. The
 // `page_delta`/offset placeholders are 0 at emit time; the post-vmaddr pass
-// (`Link.applyDataRelocs`, via the `patch*` helpers below) rewrites them once
-// MachO assigns the final segment vmaddrs. Each word was assembler-verified on
+// (`Image.patch`, via the `patch*` helpers below) rewrites them once the format
+// writer places the sections. Each word was assembler-verified on
 // this host (see the tests).
 
 /// adrp rd, #(page_delta pages) — form the address of a 4 KiB *page* PC-relative

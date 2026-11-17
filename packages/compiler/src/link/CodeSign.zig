@@ -81,7 +81,7 @@ const BeWriter = struct {
 /// Sign `image` in place: hash `image[0..sig_file_off)` and write the SuperBlob +
 /// CodeDirectory into the reserved region at `sig_file_off`.
 ///
-/// `image` already has the signature region reserved/zeroed by `MachO.assemble`,
+/// `image` already has the signature region reserved/zeroed by `MachO.write`,
 /// and `codeLimit == sig_file_off` so the hashed bytes are final before we touch
 /// the region. `text_size` is the `__text` section size (used for the
 /// exec-segment limit). Hashing streams directly over `image`, so no allocator.
@@ -221,7 +221,7 @@ test "sign writes a parseable SuperBlob + CodeDirectory" {
     const image = try gpa.alloc(u8, sig_off + sig_len);
     defer gpa.free(image);
     // Fill the code region with a recognizable pattern so the hashes are
-    // non-trivial; zero the reserved region (as MachO.assemble does).
+    // non-trivial; zero the reserved region (as MachO.write does).
     for (image[0..sig_off], 0..) |*b, i| b.* = @intCast(i & 0xFF);
     @memset(image[sig_off..], 0);
 

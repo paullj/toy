@@ -63,6 +63,8 @@ pub const angle_args = @import("ast/angle_args.zig");
 pub const Link = @import("link/Link.zig");
 pub const MachO = @import("link/MachO.zig");
 pub const Dylib = @import("link/Dylib.zig");
+pub const Image = @import("link/Image.zig");
+pub const LibResolver = @import("link/LibResolver.zig");
 pub const CodeSign = @import("link/CodeSign.zig");
 pub const link = @import("link/emit.zig");
 pub const version = @import("version.zig");
@@ -133,6 +135,8 @@ test {
     _ = angle_args;
     _ = Link;
     _ = MachO;
+    _ = Image;
+    _ = LibResolver;
     _ = CodeSign;
     _ = link; // discovers emit.zig's boundary test
     _ = term.ansi;

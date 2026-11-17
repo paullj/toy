@@ -3,17 +3,18 @@
 //! WHY: codegen lowers each function INDEPENDENTLY into a `FnCode` artifact
 //! ({ sym, code, relocs }) that names its call targets SYMBOLICALLY (by function
 //! index, never an address). A later serial `link` pass lays the artifacts out
-//! contiguously in __text, assigns each function a text offset, builds the
+//! contiguously in the text, assigns each function a text offset, builds the
 //! symbol→offset map, and patches every relocation in place. Keeping the reloc /
-//! symbol types here (rather than in `MachO`) keeps the Mach-O writer a pure
-//! container and makes this file the seam that incremental/parallel codegen +
-//! relink reuses: re-lower one changed function, then re-`link` the set.
+//! symbol types here (rather than in a format writer) keeps each writer dependent on
+//! the `Image` it is handed and nothing else, and makes this file the seam that
+//! incremental/parallel codegen + relink reuses: re-lower one changed function, then
+//! re-`link` the set.
 //!
 //! A function is named by two relocation shapes: a PC-relative call, and a reference
 //! taking its address (a function value). A call needs NO runtime relocation under
 //! PIE/ASLR: the patched delta is fixed at link time. An address reference is resolved
-//! to its callee's `__text` offset here and patched with the other cross-segment relocs
-//! once vmaddrs are known. The kinds and their encodings are the ISA's: Link patches
+//! to its callee's text offset here and patched with the other cross-section relocs
+//! once the writer has placed the sections. The kinds and their encodings are the ISA's: Link patches
 //! through the `Patcher` it is handed.
 
 const std = @import("std");
@@ -35,7 +36,7 @@ const Type = @import("../layout/Type.zig").Type;
 // so every `Link.Reloc`/`Link.SymbolId`/`Link.RelocKind` callsite keeps compiling; `link`
 // keeps only the orchestration and calls the ISA's `Patcher`.
 const reloc = @import("reloc.zig");
-const MachO = @import("MachO.zig");
+const Image = @import("Image.zig");
 const Dwarf = @import("Dwarf.zig");
 pub const SymbolId = reloc.SymbolId;
 pub const TestIsa = reloc.TestIsa;
@@ -353,13 +354,12 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
     return .{ .fns = keep, .descs = keep_desc };
 }
 
-/// The linker's output: the concatenated __text blob, the entry function's
-/// resolved text offset (threaded into MachO's LC_MAIN entryoff), and the
-/// cross-segment relocations rebased to absolute __text offsets. `link` CANNOT
-/// patch the cross-segment relocs — they need the final vmaddrs of __text (the
-/// site) and __cstring/__got (the target), which only MachO assigns. So `link`
-/// stays a pure intra-module relocator and hands these out for `applyDataRelocs`
-/// to patch after layout. `data_relocs` is heap-owned by the caller.
+/// The linker's output: the concatenated text, the entry function's resolved text
+/// offset, and the cross-section relocations rebased to absolute text offsets. `link`
+/// CANNOT patch the cross-section relocs: they need the final addresses of the text (the
+/// site) and of the read-only strings, GOT or bss (the target), which only the format
+/// writer assigns. So `link` stays a pure intra-module relocator and hands these out,
+/// through the `Image`, for `Image.patch` after layout. `data_relocs` is heap-owned by the caller.
 pub const Linked = struct {
     text: []u8,
     entry_off: u32,
@@ -389,7 +389,7 @@ pub const Linked = struct {
     /// The debug info of a debug build (empty unless `link` was asked for it): the symbol
     /// table, one row per fn by the same names and order as `sym_table`, and the DWARF line
     /// tables. Owned by the caller.
-    debug: MachO.Debug = .{},
+    debug: Image.Debug = .{},
 };
 
 /// `CallTargetTooFar`: a call's displacement does not fit the ISA's call encoding. We
@@ -567,7 +567,7 @@ pub fn link(io: Io, gpa: std.mem.Allocator, patcher: *const Patcher, fns: []cons
     //    a pure function of the fn set.
     const sym_table: []u8 = if (emit_symtab) try buildSymTable(gpa, fns, site_h, offsets, cursor) else &.{};
     errdefer gpa.free(sym_table);
-    const debug_symtab: MachO.Symtab = if (debug != null) try buildDebugSymtab(gpa, fns, site_h, offsets) else .{};
+    const debug_symtab: Image.Symbols = if (debug != null) try buildDebugSymtab(gpa, fns, site_h, offsets) else .{};
     errdefer debug_symtab.deinit(gpa);
     const dwarf: Dwarf.Sections = if (debug) |d| try buildDwarf(gpa, fns, site_h, offsets, cursor, d) else .{};
     errdefer dwarf.deinit(gpa);
@@ -591,7 +591,7 @@ pub fn link(io: Io, gpa: std.mem.Allocator, patcher: *const Patcher, fns: []cons
         .sym_table = sym_table,
         .desc_table = desc_table,
         .stack_map = stack_map,
-        .debug = .{ .symtab = debug_symtab, .dwarf = dwarf },
+        .debug = .{ .symbols = debug_symtab, .dwarf = dwarf },
     };
 }
 
@@ -794,18 +794,18 @@ fn fnSymEnts(fns: []const FnCode, site_h: []const u32, offsets: []const u32, ent
     for (fns, 0..) |f, i| ents[i] = .{ .off = offsets[site_h[i]], .name = f.sym.name };
 }
 
-/// The Mach-O symbol table of a debug build: every fn under the name the backtrace
-/// table prints, in the same (off, name) order, so `nm`, `lldb` and the panic
-/// backtrace agree on every frame.
-fn buildDebugSymtab(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32) !MachO.Symtab {
+/// The symbol table of a debug build: every fn under the name the backtrace table
+/// prints, in the same (off, name) order, so `nm`, `lldb` and the panic backtrace agree
+/// on every frame.
+fn buildDebugSymtab(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32) !Image.Symbols {
     const ents = try gpa.alloc(SymEnt, fns.len);
     defer gpa.free(ents);
     fnSymEnts(fns, site_h, offsets, ents);
     std.mem.sortUnstable(SymEnt, ents, {}, symEntLess);
-    const rows = try gpa.alloc(MachO.Symtab.Entry, ents.len);
+    const rows = try gpa.alloc(Image.Symbol, ents.len);
     defer gpa.free(rows);
     for (ents, rows) |e, *r| r.* = .{ .name = e.name, .text_off = @intCast(e.off) };
-    return MachO.Symtab.build(gpa, rows);
+    return Image.Symbols.build(gpa, rows);
 }
 
 /// The DWARF line tables of a debug build: every fn that carries a line table and a
@@ -913,8 +913,8 @@ fn fnLinkJob(
                     if (slot.err == null) slot.err = e;
                 };
             },
-            // Cross-segment: defer to `applyDataRelocs` (needs vmaddrs), rebased to an
-            // absolute __text site. A function-address target is resolved to its __text
+            // Cross-section: defer to `Image.patch` (needs addresses), rebased to an
+            // absolute text site. A function-address target is resolved to its text
             // offset here, where the handles are known.
             .cross => {
                 const target: SymbolId = if (needsFuncHandle(rl)) blk: {
@@ -933,80 +933,6 @@ fn fnLinkJob(
             },
         }
     }
-}
-
-/// Patch the cross-segment relocations `link` could not resolve, now that MachO
-/// has assigned every segment's vmaddr. `text` is the __text bytes in the final
-/// image; each reloc's `site` is already absolute within __text. `text_vmaddr`
-/// is the runtime address __text loads at; `cstring_vmaddr`/`got_vmaddr`/`bss_vmaddr`
-/// are the __cstring, __got and __bss section base vmaddrs.
-pub fn applyDataRelocs(
-    io: Io,
-    patcher: *const Patcher,
-    text: []u8,
-    data_relocs: []const Reloc,
-    text_vmaddr: u64,
-    cstring_vmaddr: u64,
-    got_vmaddr: u64,
-    bss_vmaddr: u64,
-    import_slots: *const std.StringHashMapUnmanaged(u32),
-) void {
-    // PARALLEL per-reloc PATCH: each reloc patches a UNIQUE disjoint site
-    // (`text[rl.site..]`), so the fan-out is a race-free disjoint-region map.
-    // `import_slots`/`text_vmaddr`/etc. are read-only across workers; the output is
-    // independent of dispatch order because each site is written by exactly one
-    // worker.
-    const Ctx = struct {
-        patcher: *const Patcher,
-        text: []u8,
-        data_relocs: []const Reloc,
-        text_vmaddr: u64,
-        cstring_vmaddr: u64,
-        got_vmaddr: u64,
-        bss_vmaddr: u64,
-        import_slots: *const std.StringHashMapUnmanaged(u32),
-        pub fn args(c: @This(), i: usize) std.meta.ArgsTuple(@TypeOf(dataRelocJob)) {
-            return .{ c.patcher, c.text, c.data_relocs[i], c.text_vmaddr, c.cstring_vmaddr, c.got_vmaddr, c.bss_vmaddr, c.import_slots };
-        }
-    };
-    // chunk the per-reloc patch into ~ncpu ranges. Reloc COUNT is usually
-    // small (not 10K), so the high threshold keeps it serial except on the largest
-    // images; each reloc still owns a unique disjoint 4-byte site, so chunked == serial.
-    Engine.chunkedFanOut(io, data_relocs.len, 0, Engine.Chunk.small_count.threshold, Engine.Chunk.small_count.chunks_per_cpu, dataRelocJob, Ctx{
-        .patcher = patcher,
-        .text = text,
-        .data_relocs = data_relocs,
-        .text_vmaddr = text_vmaddr,
-        .cstring_vmaddr = cstring_vmaddr,
-        .got_vmaddr = got_vmaddr,
-        .bss_vmaddr = bss_vmaddr,
-        .import_slots = import_slots,
-    });
-}
-
-/// Patch ONE cross-segment reloc's site (a `fanOut` job) from its target's vmaddr. Each
-/// job owns a unique disjoint site, so no two jobs touch the same byte.
-fn dataRelocJob(
-    patcher: *const Patcher,
-    text: []u8,
-    rl: Reloc,
-    text_vmaddr: u64,
-    cstring_vmaddr: u64,
-    got_vmaddr: u64,
-    bss_vmaddr: u64,
-    import_slots: *const std.StringHashMapUnmanaged(u32),
-) void {
-    const site_vmaddr: u64 = text_vmaddr + rl.site;
-    const target_vmaddr: u64 = switch (rl.target) {
-        // The relink tail already rewrote the content hash to a blob offset.
-        .cstr => |off| cstring_vmaddr + off,
-        .import => |s| got_vmaddr + @as(u64, import_slots.get(s.name).?) * 8,
-        .data => |off| bss_vmaddr + off,
-        .text_off => |off| text_vmaddr + off,
-        // Only cross-segment targets (`.cstr`/`.import`/`.data`/`.text_off`) reach `applyDataRelocs`.
-        .func, .none => unreachable,
-    };
-    patcher.patchCross(text, rl.kind, rl.site, site_vmaddr, target_vmaddr, rl.addend);
 }
 
 // A lowered `FnCode` is the cache payload. `Reloc.target` is a tagged union
@@ -1376,13 +1302,12 @@ test "the debug symtab names every fn at its text offset, in offset order" {
     defer gpa.free(linked.data_relocs);
     defer linked.debug.deinit(gpa);
 
-    const st = linked.debug.symtab;
-    try testing.expectEqual(@as(usize, 3), st.syms.len);
+    const st = linked.debug.symbols;
+    try testing.expectEqual(@as(usize, 3), st.list.len);
     const want_off = [_]u32{ 0, 12, 16 };
-    for (st.syms, fns, want_off) |s, f, off| {
+    for (st.list, fns, want_off) |s, f, off| {
         try testing.expectEqual(off, s.text_off);
-        try testing.expectEqual(@as(u8, '_'), st.strtab[s.strx]);
-        try testing.expectEqualStrings(f.sym.name, std.mem.sliceTo(st.strtab[s.strx + 1 ..], 0));
+        try testing.expectEqualStrings(f.sym.name, s.name);
     }
 }
 
@@ -1905,9 +1830,8 @@ test "a .func address pair resolves in the cross pass to the callee's text addre
 
     var threaded = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer threaded.deinit();
-    var import_slots: std.StringHashMapUnmanaged(u32) = .empty;
-    const text_vmaddr: u64 = 0x100000460;
-    applyDataRelocs(threaded.io(), &T.patcher, linked.text, linked.data_relocs, text_vmaddr, 0, 0, 0, &import_slots);
+    const img: Image = .{ .arch = .aarch64, .text = linked.text, .entry_off = 0, .relocs = linked.data_relocs, .patcher = &T.patcher };
+    img.patch(threaded.io(), linked.text, .{ .text = 0x100000460 });
     // Each site's delta reaches f1 at __text offset 16.
     try testing.expectEqual(@as(i64, 16 - 4), callDelta(linked.text, 4));
     try testing.expectEqual(@as(i64, 16 - 8), callDelta(linked.text, 8));

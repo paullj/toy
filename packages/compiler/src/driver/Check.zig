@@ -92,11 +92,12 @@ fn writeJsonStr(out: *Io.Writer, s: []const u8) !void {
 /// Serialize ONE diagnostic as a single NDJSON line (trailing '\n') against a prepared
 /// SourceMap for its owning file `file`. `eff` is the already-resolved effective
 /// severity. Key order is FIXED: code, level, byte, line, col, message, file, rendered,
-/// labels. `rendered` is the PLAIN (uncolored, ascii-caret) pretty single-diagnostic
+/// labels, notes. `rendered` is the PLAIN (uncolored, ascii-caret) pretty single-diagnostic
 /// render, JSON-escaped (embedded newlines/control bytes escaped). `labels` is the
 /// diagnostic's secondary labels (empty `[]` when none); a duplicate-definition's
 /// "previously defined here" label carries its own line/col/byte span, `is_primary:false`.
-fn writeNdjsonLine(out: *Io.Writer, gpa: std.mem.Allocator, sm: *const Rr.SourceMap, file: []const u8, d: Diagnostic, eff: model.Severity) !void {
+/// `notes` is the footer notes' text, also drawn in `rendered`.
+fn writeNdjsonLine(out: *Io.Writer, gpa: std.mem.Allocator, sm: *const Rr.SourceMap, file: []const u8, d: Diagnostic, eff: model.Severity, notes: model.Notes) !void {
     const lc = sm.lineCol(d.byte_offset);
     try out.writeAll("{\"code\":");
     if (codes.str(d.code)) |cs| {
@@ -117,7 +118,7 @@ fn writeNdjsonLine(out: *Io.Writer, gpa: std.mem.Allocator, sm: *const Rr.Source
     // captured into a temp buffer then JSON-escaped so embedded newlines/carets survive
     // as a single valid JSON string.
     var sec_buf: [1]Rr.Diagnostic.Label = undefined;
-    const rich = model.richFromPod(d, eff, codes.str(d.code), codes.relatedLabel(d.code), &sec_buf);
+    const rich = model.richFromPod(d, eff, codes.str(d.code), codes.relatedLabel(d.code), &sec_buf, notes);
     var aw: Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     try Rr.Renderer.render(rich, sm, &aw.writer, .{ .color = Style.ColorLevel.none, .unicode = false });
@@ -136,6 +137,13 @@ fn writeNdjsonLine(out: *Io.Writer, gpa: std.mem.Allocator, sm: *const Rr.Source
         try out.writeAll("\",\"file\":\"");
         try writeJsonStr(out, file);
         try out.print("\",\"line\":{d},\"col\":{d},\"byte_start\":{d},\"byte_end\":{d},\"is_primary\":false}}", .{ llc.line, llc.col, lbl.span.start, lbl.span.end });
+    }
+    try out.writeAll("],\"notes\":[");
+    for (rich.notes, 0..) |n, i| {
+        if (i != 0) try out.writeByte(',');
+        try out.writeByte('"');
+        try writeJsonStr(out, n.message);
+        try out.writeByte('"');
     }
     try out.writeAll("]}\n");
 }
@@ -173,7 +181,7 @@ pub fn emitNdjson(out: *Io.Writer, gpa: std.mem.Allocator, results: []const Driv
             counts: *Counts,
             fn emit(c: @This(), d: Diagnostic) anyerror!void {
                 const eff = SevCfg.resolve(d.code, d.severity, c.cfg) orelse return;
-                try writeNdjsonLine(c.out, c.gpa, c.sm, c.file, d, eff);
+                try writeNdjsonLine(c.out, c.gpa, c.sm, c.file, d, eff, .{});
                 switch (eff) {
                     .err => c.counts.errors += 1,
                     .warning => c.counts.warnings += 1,
@@ -256,7 +264,7 @@ pub fn tallyGraph(diags: []const Diagnostic, cfg: SevCfg.SeverityConfig) Counts 
 /// OWNING module's SourceMap (built lazily, one per scope; the slice is pre-sorted by
 /// (scope, offset) so same-scope diagnostics are contiguous and the map is reused).
 /// The `file` field is the owning module's path. Returns the visible tally.
-pub fn emitNdjsonGraph(out: *Io.Writer, gpa: std.mem.Allocator, g: *const Graph.Graph, diags: []const Diagnostic, cfg: SevCfg.SeverityConfig) !Counts {
+pub fn emitNdjsonGraph(out: *Io.Writer, gpa: std.mem.Allocator, g: *const Graph.Graph, diags: []const Diagnostic, cfg: SevCfg.SeverityConfig, notes: model.Notes) !Counts {
     var counts: Counts = .{};
     var cache: Rr.SourceMap.ScopeCache = .{};
     defer cache.deinit(gpa);
@@ -264,7 +272,7 @@ pub fn emitNdjsonGraph(out: *Io.Writer, gpa: std.mem.Allocator, g: *const Graph.
         const eff = SevCfg.resolve(d.code, d.severity, cfg) orelse continue; // --ignore
         const file = moduleFileFor(g, d.scope);
         const sm = try cache.get(gpa, d.scope, file, moduleSrcFor(g, d.scope));
-        try writeNdjsonLine(out, gpa, sm, file, d, eff);
+        try writeNdjsonLine(out, gpa, sm, file, d, eff, notes);
         switch (eff) {
             .err => counts.errors += 1,
             .warning => counts.warnings += 1,
@@ -298,12 +306,12 @@ test "writeNdjsonLine emits fixed key order with 1-based line/col, null code, fi
     defer aw.deinit();
     // offset of the 'x' on line 2: after "fn main() {\n  " == 14
     const off: u32 = 14;
-    try writeNdjsonLine(&aw.writer, testing.allocator, &sm, "t.toy", .{ .byte_offset = off, .end = off, .message = "boom", .code = .none, .severity = .err }, .err);
+    try writeNdjsonLine(&aw.writer, testing.allocator, &sm, "t.toy", .{ .byte_offset = off, .end = off, .message = "boom", .code = .none, .severity = .err }, .err, .{});
     const got = aw.writer.buffered();
     // Prefix through the shared fields is stable and byte-checkable.
     try testing.expect(std.mem.startsWith(u8, got, "{\"code\":null,\"level\":\"error\",\"byte\":14,\"byte_end\":14,\"line\":2,\"col\":3,\"message\":\"boom\",\"file\":\"t.toy\",\"rendered\":\""));
-    // No related location => empty labels array; the line ends with `,"labels":[]}\n`.
-    try testing.expect(std.mem.endsWith(u8, got, ",\"labels\":[]}\n"));
+    // No related location and no note => empty labels and notes arrays.
+    try testing.expect(std.mem.endsWith(u8, got, ",\"labels\":[],\"notes\":[]}\n"));
     // Every embedded newline in the rendered snippet is escaped (no raw '\n' before the
     // trailing terminator), so the whole record stays one NDJSON line.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got, "\n"));
@@ -316,12 +324,29 @@ test "writeNdjsonLine emits a secondary label for a related location (duplicate-
     var aw: Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     // primary at the second `f` (13..14), related at the first `f` (3..4).
-    try writeNdjsonLine(&aw.writer, testing.allocator, &sm, "dup.toy", .{ .byte_offset = 13, .end = 14, .message = "duplicate function 'f'", .code = .R0002, .severity = .err, .related = 3, .related_end = 4 }, .err);
+    try writeNdjsonLine(&aw.writer, testing.allocator, &sm, "dup.toy", .{ .byte_offset = 13, .end = 14, .message = "duplicate function 'f'", .code = .R0002, .severity = .err, .related = 3, .related_end = 4 }, .err, .{});
     const got = aw.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, got, "\"labels\":[{\"message\":\"previously defined here\",\"file\":\"dup.toy\"") != null);
     try testing.expect(std.mem.indexOf(u8, got, "\"is_primary\":false") != null);
     try testing.expect(std.mem.indexOf(u8, got, "\"byte_start\":3") != null);
     // Still exactly one NDJSON line.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got, "\n"));
+}
+
+test "writeNdjsonLine carries a diagnostic's notes in both notes and rendered" {
+    const src = "extern \"q\" { fn f() }\n";
+    var sm = try Rr.SourceMap.init(testing.allocator, "n.toy", src);
+    defer sm.deinit(testing.allocator);
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const msg = "library 'q' not found";
+    var map: model.Notes.Map = .empty;
+    defer map.deinit(testing.allocator);
+    try map.put(testing.allocator, @intFromPtr(msg.ptr), .{ .kind = .note, .message = "on X toy looked for \"libq.so\"" });
+    try writeNdjsonLine(&aw.writer, testing.allocator, &sm, "n.toy", .{ .byte_offset = 7, .end = 10, .message = msg, .code = .R0016, .severity = .err }, .err, .{ .by_message = &map });
+    const got = aw.writer.buffered();
+    try testing.expect(std.mem.endsWith(u8, got, ",\"notes\":[\"on X toy looked for \\\"libq.so\\\"\"]}\n"));
+    try testing.expect(std.mem.indexOf(u8, got, "= note: on X toy looked for") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got, "\n"));
 }
 

@@ -42,10 +42,10 @@ const roots_opts: []const Spec.Option = &.{
     .{ .long = "include", .short = 'I', .value = .string, .action = .append, .value_name = "DIR", .help = "Extra root to look up imports in, after the module root (repeatable)" },
 };
 
-/// The dynamic libraries a program links, shared by every command that compiles so
+/// The shared libraries a program links, shared by every command that compiles so
 /// `check` reports a library that `build` could not find.
 const link_opts: []const Spec.Option = &.{
-    .{ .short = 'l', .value = .string, .action = .append, .value_name = "NAME", .help = "Link the dynamic library lib<NAME>.dylib, or a .dylib path (repeatable)" },
+    .{ .short = 'l', .value = .string, .action = .append, .value_name = "NAME", .help = "Link the shared library lib<NAME>, or a library path (repeatable)" },
     .{ .short = 'L', .value = .string, .action = .append, .value_name = "DIR", .help = "Search DIR for -l and extern \"name\" libraries, before the default folders (repeatable)" },
 };
 

@@ -54,7 +54,7 @@ declares its own externs as `ffi.md` describes.
 
 | module | holds |
 |--------|-------|
-| `core/sys` | the libSystem `write` and `read` externs: `print(s)` to fd 1, `write_fd`, `read_fd_all` and `read_line_fd` |
+| `core/sys` | the system C library's `write` and `read` externs: `print(s)` to fd 1, `write_fd`, `read_fd_all` and `read_line_fd` |
 | `core/ffi` | the libm and `labs` externs and their safe wrappers |
 | `core/os` | the `_NSGetArgc`, `_NSGetArgv`, `getenv`, `strlen`, `exit`, `__error`, `__errno_location`, `clock_gettime_nsec_np`, `nanosleep` and `getentropy` externs: `argc`, `argv(i)`, `env`, `exit_process`, `errno`, `errno_loc` (picks the errno extern with `when target.os`), `monotonic_ns`, `realtime_ns`, `sleep_ns`, `entropy_u64`, and `from_cstr` (copies) / `to_cstr` |
 | `core/fs` | the `open` (two arguments, never `O_CREAT`), `creat`, `close`, `unlink` and `access` externs: `open_read`, `open_append`, `create`, `close_fd`, `remove`, `exists`, `write_all`, `read_some` and `read_all`, each failure as a negated errno |

@@ -217,12 +217,12 @@ fn collectDiags(
             var tc = try TypecheckGraph.checkGraph(gpa, &graph, &res, io, 0);
             defer tc.deinit(gpa);
             try push.go(tc.diags);
-            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{});
+            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, toyc.LibResolver.of(Driver.default_target).?);
             defer libs.deinit();
             try push.go(libs.diags);
             if (countErr(tc.diags) == 0) try push.go(try libs.unexportedCalls(io, &graph, &tc));
         } else {
-            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{});
+            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, toyc.LibResolver.of(Driver.default_target).?);
             defer libs.deinit();
             try push.go(libs.diags);
         }
@@ -713,7 +713,7 @@ fn compileAndRun(
         errdefer gpa.free(dir);
         try libdirs.append(gpa, dir);
     }
-    var libs = try toyc.Libraries.collect(gpa, io, &graph, .{ .dirs = libdirs.items });
+    var libs = try toyc.Libraries.collect(gpa, io, &graph, .{ .dirs = libdirs.items }, toyc.LibResolver.of(Driver.default_target).?);
     defer libs.deinit();
     if (libs.diags.len > 0) return .{ .compile_error = try renderDiags(gpa, libs.diags) };
     const unexported = try libs.unexportedCalls(io, &graph, &tc);

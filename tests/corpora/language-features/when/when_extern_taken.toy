@@ -1,6 +1,6 @@
 # Feature: an extern that the taken when arm calls is imported, so its library must export
 # it.
-# expect: compile-error "[R0019]: C symbol 'toy_no_such_symbol' is not exported by libSystem"
+# expect: compile-error "[R0019]: C symbol 'toy_no_such_symbol' is not exported by the system C library"
 extern fn labs(x: int) -> int
 extern fn toy_no_such_symbol(x: int) -> int
 

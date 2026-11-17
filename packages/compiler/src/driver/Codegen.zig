@@ -1,10 +1,10 @@
 //! Whole-graph codegen + link tail: turns a resolved+typechecked module graph into
-//! a linked Mach-O image (or rendered IR text). One `Plan` lists every unit to lower; the
+//! a linked image in the target's object format (or rendered IR text). One `Plan` lists every unit to lower; the
 //! per-unit fan-out lowers each against its single-unit `Engine.Frozen` view (thread-safe,
 //! program-wide tables + its owner's arrays), and `--emit ir` lowers the same units through
 //! the same path. Then the SERIAL relink tail interns strings,
-//! rebases cross-segment relocs, links, and signs — the order-sensitive
-//! assemble → applyDataRelocs → sign-last pipeline. Distinct from the per-file
+//! rebases cross-section relocs, links, and hands the `Image` to the format's writer —
+//! the order-sensitive write (lay out + patch) → sign-last pipeline. Distinct from the per-file
 //! front-end (`Driver.run`/`pipeline`, discover → lex/parse/check).
 const std = @import("std");
 const Span = @import("../diagnostics/model.zig").Span;
@@ -30,8 +30,8 @@ const Fingerprint = @import("../query/Fingerprint.zig");
 const Link = @import("../link/Link.zig");
 const link = @import("../link/emit.zig");
 const Isa = @import("../codegen/Isa.zig");
-const Dylib = @import("../link/Dylib.zig");
-const MachO = @import("../link/MachO.zig");
+const Image = @import("../link/Image.zig");
+const LibResolver = @import("../link/LibResolver.zig");
 const ValueLayout = @import("../layout/ValueLayout.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
@@ -72,12 +72,12 @@ pub const LinkedProgram = struct {
     /// Interned `__cstring` bytes. Owned; empty for string-free programs.
     cstrings: []u8 = &.{},
     /// Cross-segment relocs (the Patcher's cross kinds, to __cstring/__got) rebased to
-    /// absolute __text offsets, patched by `Link.applyDataRelocs` after MachO assigns
-    /// vmaddrs. Owned; empty for reloc-free programs. The dyld import set is DERIVED
-    /// from these (`.import` targets) in `assembleAndSign`.
+    /// absolute __text offsets, patched by the format writer once it has placed the
+    /// sections. Owned; empty for reloc-free programs. The import set is DERIVED
+    /// from these (`.import` targets) in `link.writeImage`.
     data_relocs: []Link.Reloc = &.{},
     /// The debug info, empty unless the profile asks for it. Owned.
-    debug: MachO.Debug = .{},
+    debug: Image.Debug = .{},
     /// Incremental counters: how many functions were freshly lowered vs served
     /// from the codegen cache this build. Surfaced via `--codegen-stats`.
     codegen_compiled: usize = 0,
@@ -767,8 +767,8 @@ pub fn buildImage(
     entry_off: u32,
     cstrings: []const u8,
     data_relocs: []const Link.Reloc,
-    libs: Dylib.Linking,
-    debug: MachO.Debug,
+    libs: LibResolver.Linking,
+    debug: Image.Debug,
 ) ![]u8 {
     const backend = Isa.of(target) orelse return error.UnsupportedTarget;
     return link.writeImage(io, gpa, target, &backend.relocs, identifier, code, entry_off, cstrings, data_relocs, libs, debug);

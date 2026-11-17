@@ -4,6 +4,7 @@
 const std = @import("std");
 const Aarch64 = @import("encode.zig");
 const Link = @import("../../../link/Link.zig");
+const Image = @import("../../../link/Image.zig");
 
 ///   * `.call26`    — a `bl`: imm26 = (target − site)/4. Intra-module.
 ///   * `.adrp_page` — an `adrp`: page delta between the site and a cstring/GOT vmaddr.
@@ -149,16 +150,14 @@ test "adrp/add/ldr reproduce the clang reference words" {
     try testing.expectEqual(@as(u32, 0xF9400210), patchWord(Aarch64.ldrRegUoff(16, 16, 0), .ldr_lo12, base + 0x4a8, base + 0x4000));
 }
 
-test "applyDataRelocs reaches the cstring, GOT and bss words through the patcher" {
+test "Image.patch reaches the cstring, GOT and bss words through the patcher" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{ .concurrent_limit = .limited(0) });
     defer threaded.deinit();
     const io = threaded.io();
     const base: u64 = 0x100000000;
     const cstring_vmaddr: u64 = base + 0x4b0;
     const got_vmaddr: u64 = base + 0x4000;
-    var import_slots: std.StringHashMapUnmanaged(u32) = .empty;
-    defer import_slots.deinit(testing.allocator);
-    try import_slots.put(testing.allocator, "write", 0);
+    const imports = [_]Image.Import{.{ .name = "write" }};
     const Case = struct { word: u32, target: Link.SymbolId, kind: Kind, site: u64, want: u32 };
     for ([_]Case{
         .{ .word = Aarch64.adrp(8, 0), .target = .{ .cstr = 0 }, .kind = .adrp_page, .site = 0x478, .want = 0x90000008 },
@@ -169,7 +168,8 @@ test "applyDataRelocs reaches the cstring, GOT and bss words through the patcher
         var w: [4]u8 = undefined;
         std.mem.writeInt(u32, &w, c.word, .little);
         const r = [_]Link.Reloc{.{ .site = 0, .target = c.target, .kind = of(c.kind) }};
-        Link.applyDataRelocs(io, &patcher, &w, &r, base + c.site, cstring_vmaddr, got_vmaddr, 0, &import_slots);
+        const img: Image = .{ .arch = .aarch64, .text = &w, .entry_off = 0, .relocs = &r, .patcher = &patcher, .imports = &imports };
+        img.patch(io, &w, .{ .text = base + c.site, .cstrings = cstring_vmaddr, .got = got_vmaddr });
         try testing.expectEqual(c.want, std.mem.readInt(u32, &w, .little));
     }
     // A `.data` target lands in the bss segment: two pages up, at its offset.
@@ -180,7 +180,8 @@ test "applyDataRelocs reaches the cstring, GOT and bss words through the patcher
         .{ .site = 0, .target = .{ .data = 0x10 }, .kind = of(.adrp_page) },
         .{ .site = 4, .target = .{ .data = 0x10 }, .kind = of(.add_lo12) },
     };
-    Link.applyDataRelocs(io, &patcher, &w, &r, base + 0x478, cstring_vmaddr, got_vmaddr, base + 0x2000, &import_slots);
+    const img: Image = .{ .arch = .aarch64, .text = &w, .entry_off = 0, .relocs = &r, .patcher = &patcher, .imports = &imports };
+    img.patch(io, &w, .{ .text = base + 0x478, .cstrings = cstring_vmaddr, .got = got_vmaddr, .bss = base + 0x2000 });
     try testing.expectEqual(Aarch64.adrp(9, 2), std.mem.readInt(u32, w[0..4], .little));
     try testing.expectEqual(Aarch64.addImm(9, 9, 0x10), std.mem.readInt(u32, w[4..8], .little));
 }

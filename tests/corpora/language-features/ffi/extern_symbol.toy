@@ -1,7 +1,7 @@
 # Each extern the program calls must be exported by the library it binds to: a bare extern
-# by libSystem (and what it re-exports, such as libm), a block's by its library, here a
+# by the system C library (on macOS libSystem, and what it re-exports, such as libm), a block's by its library, here a
 # shared-cache one that dyld answers for.
-# expect: compile-error "[R0019]: C symbol 'putz' is not exported by libSystem; a bare 'extern fn' binds to libSystem"
+# expect: compile-error "[R0019]: C symbol 'putz' is not exported by the system C library; a bare 'extern fn' binds to the system C library"
 extern fn labs(x: int) -> int
 extern fn sqrt(x: float) -> float
 extern fn putz(x: int) -> int
