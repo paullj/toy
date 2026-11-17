@@ -17,7 +17,7 @@ const Mono = @import("../symbols/Mono.zig");
 const Mangle = @import("../symbols/Mangle.zig");
 const Walk = @import("../ast/Walk.zig");
 const LayoutEngine = @import("../layout/Engine.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
 const Typecheck = @import("../types.zig");
 const Type = Typecheck.Type;
 const Layout = Typecheck.Layout;
@@ -602,8 +602,8 @@ fn layoutCaptureEnv(
             continue;
         }
         const ty = nodes.typeOf(c.first_use);
-        sz.* = Abi.typeSize(ty, layouts, enum_layouts);
-        al.* = Abi.typeAlign(ty, layouts, enum_layouts);
+        sz.* = ValueLayout.typeSize(ty, layouts, enum_layouts);
+        al.* = ValueLayout.typeAlign(ty, layouts, enum_layouts);
     }
     const size = envLayout(sizes, aligns, offs);
     for (captures, offs, out) |c, off, *es| es.* = .{ .slot = c.slot, .ty = nodes.typeOf(c.first_use), .off = off };

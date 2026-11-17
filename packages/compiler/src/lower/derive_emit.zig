@@ -18,7 +18,6 @@ const L = @import("../lower.zig");
 const Ir = @import("../ir/Ir.zig");
 const Typecheck = @import("../types.zig");
 const Link = @import("../link/Link.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const arith = @import("../opt/arith.zig");

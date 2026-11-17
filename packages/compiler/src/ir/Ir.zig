@@ -40,14 +40,13 @@ pub const no_line: u32 = std.math.maxInt(u32);
 
 /// Target-independent comparison condition. Signedness is carried BY the cond
 /// (the `u*` variants are unsigned), baked at lower-time from the operand type, so
-/// it survives operand-rewriting opt passes (store→load forwarding). codegen maps
-/// this to `Aarch64.Cond`; lower maps the source comparison token + signedness to
-/// this. Append-only: existing ordinals (eq=0..ge=5) are frozen (`--emit ir` golden).
+/// it survives operand-rewriting opt passes (store→load forwarding). Each ISA maps
+/// this to its own condition codes; lower maps the source comparison token +
+/// signedness to this. Append-only: existing ordinals (eq=0..ge=5) are frozen (`--emit ir` golden).
 pub const Cond = enum(u8) { eq, ne, lt, le, gt, ge, ult, ule, ugt, uge };
 
 /// Target-independent float comparison condition. Distinct from `Cond` (no
-/// signedness axis; the codegen mapping to `Aarch64.Cond` picks the NaN-safe
-/// forms), so the int-cond `--emit ir` golden is untouched.
+/// signedness axis; each ISA maps it to NaN-safe forms), so the int-cond `--emit ir` golden is untouched.
 pub const FCond = enum(u8) { eq, ne, lt, le, gt, ge };
 
 /// An operand of a call / terminator. Scalars travel by `value`; str/struct/enum

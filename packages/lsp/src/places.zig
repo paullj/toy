@@ -23,7 +23,7 @@ const toyc = @import("toy_compiler");
 const render = @import("render.zig");
 
 const Ast = toyc.Ast;
-const Abi = toyc.Abi;
+const ValueLayout = toyc.ValueLayout;
 const Callee = toyc.Callee;
 const Closure = toyc.Closure;
 const Body = toyc.Body;
@@ -307,7 +307,7 @@ fn sizeOf(an: *const Analysis, ty: Type) ?u32 {
         .@"enum" => if (ty.enum_id >= t.enum_layouts.len) return null,
         else => {},
     }
-    return Abi.typeSize(ty, t.layouts, t.enum_layouts);
+    return ValueLayout.typeSize(ty, t.layouts, t.enum_layouts);
 }
 
 /// A `mut self` method call's receiver node.

@@ -2,8 +2,9 @@
 //! all `gc_alloc`-backed packed-byte-buffer producers appended at link time.
 
 const std = @import("std");
-const Aarch64 = @import("../Aarch64.zig");
-const Link = @import("../../link/Link.zig");
+const Aarch64 = @import("../encode.zig");
+const Link = @import("../../../../link/Link.zig");
+const Reloc = @import("../reloc.zig");
 const testing = std.testing;
 const em = @import("emit.zig");
 const emitWord = em.emitWord;
@@ -226,7 +227,7 @@ test "ir-codegen: __int_to_str builtin byte shape (prologue, buffer, digit loop,
     // It allocates (unlike a bare fd write): a `.call26` reloc to `core/rt` `alloc`.
     var saw_gc_alloc = false;
     for (fc.relocs) |r| {
-        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
+        if (r.kind == Reloc.of(.call26) and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
     }
     try testing.expect(saw_gc_alloc);
 }
@@ -259,7 +260,7 @@ test "ir-codegen: __uint_to_str builtin shape (udiv digit loop, no sign, gc_allo
     try testing.expect(saw_cbnz);
     var saw_gc_alloc = false;
     for (fc.relocs) |r| {
-        if (r.kind == .call26 and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
+        if (r.kind == Reloc.of(.call26) and r.target == .func and std.mem.eql(u8, r.target.func.name, "core/rt/gc.alloc")) saw_gc_alloc = true;
     }
     try testing.expect(saw_gc_alloc);
 }

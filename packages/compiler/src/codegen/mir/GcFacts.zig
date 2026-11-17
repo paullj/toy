@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");
-const Abi = @import("../abi/Abi.zig");
 const FrameLayout = @import("../frame/FrameLayout.zig");
 const runtime = @import("../runtime/runtime.zig");
 const types = @import("../../types.zig");
@@ -35,7 +34,7 @@ pub fn valueRefs(
 }
 
 fn inRegister(ty: types.Type) bool {
-    return ty.kind != .unit and !Abi.isAggregate(ty);
+    return ty.kind != .unit and !ty.isAggregateValue();
 }
 
 pub const CallFacts = struct {

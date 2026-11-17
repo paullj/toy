@@ -76,7 +76,6 @@ const Typecheck = @This();
 const LayoutEngine = @import("layout/Engine.zig");
 const const_fold = @import("types/const_fold.zig");
 const const_eval = @import("types/const_eval.zig");
-const Abi = @import("codegen/abi/Abi.zig");
 const FrameLayout = @import("codegen/frame/FrameLayout.zig");
 
 // Re-export the algebra/layout value types so every downstream importer keeps

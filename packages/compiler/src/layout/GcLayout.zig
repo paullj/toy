@@ -15,8 +15,8 @@
 //! A program names offsets, never addresses, so a moving collector could use it as is.
 
 const std = @import("std");
-const types = @import("../../types.zig");
-const Abi = @import("Abi.zig");
+const types = @import("../types.zig");
+const ValueLayout = @import("ValueLayout.zig");
 const Type = types.Type;
 const Layout = types.Layout;
 const EnumLayout = types.EnumLayout;
@@ -189,7 +189,7 @@ pub fn arrayProgram(gpa: std.mem.Allocator, elem: Type, layouts: []const Layout,
     const words = if (inner.len == 0) 2 else 1 + inner.len / 8;
     const out = try gpa.alloc(u8, words * 8);
     @memset(out, 0);
-    const size: u64 = Abi.typeSize(elem, layouts, enum_layouts);
+    const size: u64 = ValueLayout.typeSize(elem, layouts, enum_layouts);
     std.mem.writeInt(u64, out[0..8], (size << 3) | array_mark, .little);
     @memcpy(out[8 .. 8 + inner.len], inner);
     return out;

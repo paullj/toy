@@ -17,10 +17,11 @@
 const std = @import("std");
 const Ir = @import("../../../ir/Ir.zig");
 const Abi = @import("../../abi/Abi.zig");
+const ValueLayout = @import("../../../layout/ValueLayout.zig");
 const FrameLayout = @import("../../frame/FrameLayout.zig");
 const Link = @import("../../../link/Link.zig");
 const types = @import("../../../types.zig");
-const Aarch64 = @import("../../Aarch64.zig");
+const Aarch64 = @import("encode.zig");
 const Mir = @import("../Mir.zig");
 const GcFacts = @import("../GcFacts.zig");
 const Inst = @import("Inst.zig");
@@ -37,6 +38,8 @@ pub const Input = struct {
     ir: *const Ir.Function,
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
+    /// The target's C convention, for extern calls and C callback adapters.
+    c_abi: Abi.CAbi,
     is_entry: bool,
     fl: *const FrameLayout,
     roots: []const FrameLayout.Root,
@@ -113,7 +116,7 @@ const S = struct {
     }
 
     fn typeSize(s: *const S, ty: Type) u32 {
-        return Abi.typeSize(ty, s.in.layouts, s.in.enum_layouts);
+        return ValueLayout.typeSize(ty, s.in.layouts, s.in.enum_layouts);
     }
 
     /// Where the bytes of an aggregate operand live, or null for a scalar or unit one.
@@ -169,7 +172,7 @@ const S = struct {
         var param_types: std.ArrayList(Type) = .empty;
         defer param_types.deinit(s.gpa);
         for (s.ir.params) |sid| try param_types.append(s.gpa, s.ir.slots[sid].type);
-        var plan = try Abi.planParamsConv(s.gpa, FrameLayout.convOf(s.ir), param_types.items, s.ir.ret_type, s.in.layouts, s.in.enum_layouts);
+        var plan = try Abi.planParamsConv(s.gpa, FrameLayout.convOf(s.ir, s.in.c_abi), param_types.items, s.ir.ret_type, s.in.layouts, s.in.enum_layouts);
         defer plan.deinit(s.gpa);
         for (plan.locs, s.ir.params) |loc, sid| {
             const slot = Mir.FrameRef{ .slot = sid };
@@ -507,7 +510,7 @@ const S = struct {
     }
 
     fn call(s: *S, res: Ir.ValueId, c: Ir.Call) Error!void {
-        const conv: Abi.Conv = if (c.callee.kind == .import) .c else .toy;
+        const conv: Abi.Conv = if (c.callee.kind == .import) .{ .c = s.in.c_abi } else .toy;
         const ret_ty = s.retType(c.ret_slot, res);
         var arg_types: std.ArrayList(Type) = .empty;
         defer arg_types.deinit(s.gpa);

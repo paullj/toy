@@ -1,5 +1,5 @@
 //! The AArch64 MIR encoder: MIR on physical registers to machine words, relocs and the line
-//! table, through the `Aarch64.zig` word encoders. It lays blocks out in index order,
+//! table, through the `encode.zig` word encoders. It lays blocks out in index order,
 //! drops a `b` to the next block, turns a conditional branch to the next block followed
 //! by a `b` into one inverted branch, aims a branch at a block whose code is only a `b` at
 //! that `b`'s target instead, repeats the epilogue for a `b` to a block that is only the
@@ -15,10 +15,11 @@
 //! offset past 16 MiB, x15 the word a copy moves. No other code may use them.
 
 const std = @import("std");
-const Aarch64 = @import("../../Aarch64.zig");
+const Aarch64 = @import("encode.zig");
 const Link = @import("../../../link/Link.zig");
 const Ir = @import("../../../ir/Ir.zig");
-const rt_emit = @import("../../runtime/emit.zig");
+const rt_emit = @import("runtime/emit.zig");
+const Reloc = @import("reloc.zig");
 const StdNames = @import("../../../symbols/StdNames.zig");
 const Mir = @import("../Mir.zig");
 const Inst = @import("Inst.zig");
@@ -216,8 +217,8 @@ const E = struct {
         }
     }
 
-    fn reloc(e: *E, target: Link.SymbolId, kind: Link.RelocKind) error{OutOfMemory}!void {
-        try e.out.relocs.append(e.gpa, .{ .site = e.here(), .target = target, .kind = kind });
+    fn reloc(e: *E, target: Link.SymbolId, kind: Reloc.Kind) error{OutOfMemory}!void {
+        try e.out.relocs.append(e.gpa, .{ .site = e.here(), .target = target, .kind = Reloc.of(kind) });
     }
 
     fn funcTarget(e: *E, s: Ir.SymName) error{OutOfMemory}!Link.SymbolId {
@@ -360,7 +361,7 @@ const E = struct {
                         try e.word(Aarch64.addImm(rd, rd, 0));
                     },
                     .func => |s| {
-                        inline for (.{ Link.RelocKind.adrp_page, Link.RelocKind.add_lo12 }) |kind| {
+                        inline for (.{ Reloc.Kind.adrp_page, Reloc.Kind.add_lo12 }) |kind| {
                             const t = try e.funcTarget(s);
                             e.reloc(t, kind) catch |err| {
                                 e.gpa.free(t.func.name);
@@ -598,7 +599,7 @@ test "encode: main calls the stack guard before it opens its frame" {
         try testing.expectEqual(@as(usize, 1), out.relocs.items.len);
         const rl = out.relocs.items[0];
         try testing.expectEqual(@as(u32, 8), rl.site);
-        try testing.expectEqual(Link.RelocKind.call26, rl.kind);
+        try testing.expectEqual(Reloc.of(.call26), rl.kind);
         try testing.expectEqualStrings("core/rt/stack.guard", rl.target.func.name);
     }
 }

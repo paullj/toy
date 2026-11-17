@@ -110,7 +110,7 @@ pub fn span_count() -> int {
     return word(spans_mapped(control_block()))
 }
 
-# The size classes, as `Abi.size_classes` lists them: the first that holds `size`.
+# The size classes, as `ValueLayout.size_classes` lists them: the first that holds `size`.
 fn size_class(size: int) -> int {
     if size <= 16 { return 0 }
     if size <= 32 { return 1 }

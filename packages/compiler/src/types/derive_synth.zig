@@ -11,7 +11,6 @@ const Method = Typecheck.Method;
 const DeriveRecipe = Typecheck.DeriveRecipe;
 const Derive = @import("../symbols/Derive.zig");
 const Mangle = @import("../symbols/Mangle.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
 const LayoutEngine = @import("../layout/Engine.zig");
 
 const conforms = Typecheck.conform.structural;

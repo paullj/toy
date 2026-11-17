@@ -2,8 +2,9 @@
 //! STDERR, then SYS_exit(1)) and the `text_base()` self-locate builtin.
 
 const std = @import("std");
-const Aarch64 = @import("../Aarch64.zig");
-const Link = @import("../../link/Link.zig");
+const Aarch64 = @import("../encode.zig");
+const Link = @import("../../../../link/Link.zig");
+const Reloc = @import("../reloc.zig");
 const testing = std.testing;
 const em = @import("emit.zig");
 const emitWord = em.emitWord;
@@ -218,10 +219,10 @@ pub fn lowerPanic(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
     // write() call). The relink tail reserved `symtab_base_hash` at the table's
     // __cstring offset, so this resolves like a string-literal pointer (adrp+add).
     site = @intCast(code.items.len);
-    try relocs.append(gpa, .{ .site = site, .target = .{ .cstr = Link.symtab_base_hash }, .kind = .adrp_page });
+    try relocs.append(gpa, .{ .site = site, .target = .{ .cstr = Link.symtab_base_hash }, .kind = Reloc.of(.adrp_page) });
     try emit(&code, gpa, A.adrp(27, 0)); // adrp x27, symtab@page
     site = @intCast(code.items.len);
-    try relocs.append(gpa, .{ .site = site, .target = .{ .cstr = Link.symtab_base_hash }, .kind = .add_lo12 });
+    try relocs.append(gpa, .{ .site = site, .target = .{ .cstr = Link.symtab_base_hash }, .kind = Reloc.of(.add_lo12) });
     try emit(&code, gpa, A.addImm(27, 27, 0)); // x27 = &symtab
 
     // Walk state: x20 = fp cursor (this frame), x21 = frame cap, x23/x24 = hex shifts.
@@ -303,17 +304,17 @@ test "lowerPanic: prologue, self-locate movw relocs, hex frame loop, then SYS_ex
     // two self-relative movw relocs that bake the text-base offset, then the adrp+add
     // pair that loads the backtrace symbol table base (a `.cstr` to the reserved hash).
     try testing.expectEqual(@as(usize, 6), fc.relocs.len);
-    try testing.expectEqual(Link.RelocKind.adrp_page, fc.relocs[0].kind);
+    try testing.expectEqual(Reloc.of(.adrp_page), fc.relocs[0].kind);
     try testing.expectEqualStrings("write", fc.relocs[0].target.import.name);
-    try testing.expectEqual(Link.RelocKind.ldr_lo12, fc.relocs[1].kind);
+    try testing.expectEqual(Reloc.of(.ldr_lo12), fc.relocs[1].kind);
     try testing.expectEqualStrings("write", fc.relocs[1].target.import.name);
-    try testing.expectEqual(Link.RelocKind.movw_g0, fc.relocs[2].kind);
-    try testing.expectEqual(Link.RelocKind.movw_g1, fc.relocs[3].kind);
+    try testing.expectEqual(Reloc.of(.movw_g0), fc.relocs[2].kind);
+    try testing.expectEqual(Reloc.of(.movw_g1), fc.relocs[3].kind);
     // The movw addends name the `adr` site relative to each mov site (−4, −8).
     try testing.expectEqual(@as(i64, -4), fc.relocs[2].addend);
     try testing.expectEqual(@as(i64, -8), fc.relocs[3].addend);
-    try testing.expectEqual(Link.RelocKind.adrp_page, fc.relocs[4].kind);
+    try testing.expectEqual(Reloc.of(.adrp_page), fc.relocs[4].kind);
     try testing.expectEqual(Link.symtab_base_hash, fc.relocs[4].target.cstr);
-    try testing.expectEqual(Link.RelocKind.add_lo12, fc.relocs[5].kind);
+    try testing.expectEqual(Reloc.of(.add_lo12), fc.relocs[5].kind);
     try testing.expectEqual(Link.symtab_base_hash, fc.relocs[5].target.cstr);
 }

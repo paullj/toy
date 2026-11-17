@@ -12,7 +12,7 @@ const Ir = @import("../ir/Ir.zig");
 const Opt = @import("../opt/Opt.zig");
 const Walk = @import("../ast/Walk.zig");
 const Ast = @import("../ast/Ast.zig");
-const Abi = @import("../codegen/abi/Abi.zig");
+const ValueLayout = @import("../layout/ValueLayout.zig");
 const Typecheck = @import("../types.zig");
 const lower = @import("../lower.zig");
 const DeriveEmit = @import("../lower/derive_emit.zig");
@@ -389,7 +389,7 @@ const Scope = struct {
 
     fn bytes(ctx: *anyopaque, t: Ir.Type) u32 {
         const s: *Scope = @ptrCast(@alignCast(ctx));
-        return Abi.typeSize(t, s.inliner.layouts, s.inliner.enum_layouts);
+        return ValueLayout.typeSize(t, s.inliner.layouts, s.inliner.enum_layouts);
     }
 
     fn findSpliced(ctx: *anyopaque, name: []const u8) error{OutOfMemory}!?*const Ir.Function {
