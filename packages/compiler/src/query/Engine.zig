@@ -272,7 +272,7 @@ pub const Chunk = struct {
     /// Per-fn cstring-reloc rewrite (`emit.rewriteCstr`): ~0.001-0.01ms/fn, by-key map
     /// lookups only. Tiny + uniform; chunk only on big programs, coarse ranges.
     pub const cstr = .{ .threshold = 256, .chunks_per_cpu = 4 };
-    /// Per-reloc data-reloc patch (`Link.applyDataRelocs`) and per-page code-sign hash
+    /// Per-reloc data-reloc patch (`Image.patch`) and per-page code-sign hash
     /// (`CodeSign`): small unit COUNT (relocs/pages), not 10K, so contention is already
     /// bounded. High threshold leaves them serial except on the largest images.
     pub const small_count = .{ .threshold = 256, .chunks_per_cpu = 2 };

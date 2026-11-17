@@ -2,15 +2,19 @@
 //! `DW_TAG_subprogram` per function written in toy source, and a line program mapping
 //! each function's statement boundaries to its file and line.
 //!
-//! Version 4 over 5: it needs no `__debug_line_str` or string-offsets table, and every
+//! Version 4 over 5: it needs no `debug_line_str` or string-offsets table, and every
 //! Apple tool reads it. Variables and types are out of scope (#73).
 //!
-//! Addresses are written relative to `__text` and patched by `MachO` once it has placed
-//! the code (`Sections.relocate`): the section sizes do not depend on the address, so
-//! the image is laid out once.
+//! Addresses are written relative to the code and patched by the object format's writer
+//! once it has placed the code (`Sections.relocate`): the section sizes do not depend on
+//! the address, so the image is laid out once. Sections are named by `Kind` alone; each
+//! writer spells the format's name (`__debug_line`, `.debug_line`).
 
 const std = @import("std");
 const Io = std.Io;
+
+/// A DWARF section, by the name every format suffixes to its debug prefix.
+pub const Kind = enum { info, abbrev, line, str };
 
 /// The built section bytes, empty (the default) for a build without debug info.
 pub const Sections = struct {
@@ -18,7 +22,7 @@ pub const Sections = struct {
     abbrev: []u8 = &.{},
     line: []u8 = &.{},
     str: []u8 = &.{},
-    /// Where an 8-byte address relative to `__text` sits, in `info` and in `line`.
+    /// Where an 8-byte address relative to the code sits, in `info` and in `line`.
     info_addrs: []u32 = &.{},
     line_addrs: []u32 = &.{},
 
@@ -35,13 +39,13 @@ pub const Sections = struct {
         gpa.free(s.line_addrs);
     }
 
-    /// The four sections in the order `MachO` lays them out, with their Mach-O names.
-    pub fn parts(s: *const Sections) [4]struct { name: []const u8, bytes: []const u8 } {
+    /// The four sections in the order a writer lays them out.
+    pub fn parts(s: *const Sections) [4]struct { kind: Kind, bytes: []const u8 } {
         return .{
-            .{ .name = "__debug_info", .bytes = s.info },
-            .{ .name = "__debug_abbrev", .bytes = s.abbrev },
-            .{ .name = "__debug_line", .bytes = s.line },
-            .{ .name = "__debug_str", .bytes = s.str },
+            .{ .kind = .info, .bytes = s.info },
+            .{ .kind = .abbrev, .bytes = s.abbrev },
+            .{ .kind = .line, .bytes = s.line },
+            .{ .kind = .str, .bytes = s.str },
         };
     }
 

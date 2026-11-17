@@ -986,7 +986,7 @@ fn emitExecutable(
     // The interpreter ran every stage clean: `lowered` is `.ok` with no EFFECTIVE error.
     const lp = &lowered.?.ok;
 
-    var libs = try toyc.Libraries.collect(gpa, io, &graph.?, link);
+    var libs = try toyc.Libraries.collect(gpa, io, &graph.?, link, toyc.LibResolver.of(target) orelse return error.UnsupportedTarget);
     defer libs.deinit();
     if (try reportLibraryUsage(usage, &libs)) |code| return code;
     if (try reportLinkDiags(gpa, out, level, &graph.?, libs.diags, sev)) |code| return code;
@@ -1424,9 +1424,9 @@ fn runCheck(
             return 2;
         };
     }
-    // The library resolver reads Mach-O dylibs, so it says nothing true about another
-    // object format's libraries; until one is read, those checks wait for the build.
-    var libs: ?toyc.Libraries.Result = if (target.objectFormat() == .macho) toyc.Libraries.collect(gpa, cio, graph, link) catch |e| {
+    // A target whose libraries toy cannot read yet has no resolver; until it has one,
+    // those checks wait for the build.
+    var libs: ?toyc.Libraries.Result = if (toyc.LibResolver.of(target)) |r| toyc.Libraries.collect(gpa, cio, graph, link, r) catch |e| {
         try argLine(usage, @errorName(e));
         return 2;
     } else null;

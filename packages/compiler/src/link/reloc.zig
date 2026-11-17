@@ -60,7 +60,7 @@ pub const RelocKind = enum(u8) { _ };
 
 /// Where a kind resolves. `.intra` — link time, from `__text` offsets alone (an offset,
 /// not an address, so PIE-safe with no runtime reloc; patched in place by `link`).
-/// `.cross` — once the object format has placed every section (`applyDataRelocs`).
+/// `.cross` — once the object format has placed every section (`Image.patch`).
 pub const Phase = enum { intra, cross };
 
 /// One patch to apply during linking. `site` is the byte offset, within its owning

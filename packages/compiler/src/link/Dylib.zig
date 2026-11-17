@@ -1,4 +1,5 @@
-//! Find a user dynamic library and read what a binary must record to load it.
+//! The Mach-O library reader behind `LibResolver`: find a user dynamic library and read
+//! what a binary must record to load it.
 //!
 //! The writer emits one LC_LOAD_DYLIB per library and binds each import to its
 //! library's ordinal, so the linker must know, for every library, the install name
@@ -16,7 +17,29 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+const Image = @import("Image.zig");
+const LibResolver = @import("LibResolver.zig");
 const MachO = @import("MachO.zig");
+
+pub const Found = LibResolver.Found;
+pub const Cache = LibResolver.Cache;
+
+pub const resolver: LibResolver.Resolver = .{
+    .system_name = "libSystem",
+    .suffix = ".dylib",
+    .default_dirs = &default_dirs,
+    .fallback = "the dyld shared cache",
+    .max_libraries = MachO.max_libraries,
+    .system = &Exports.libsystem,
+    .find = find,
+    .isPath = isPath,
+    .has = has,
+};
+
+fn has(arena: std.mem.Allocator, io: Io, cache: *Cache, exports: LibResolver.Exports, sym: []const u8) LibResolver.FindError!bool {
+    const e: *const Exports = @ptrCast(@alignCast(exports));
+    return e.has(arena, io, cache, sym);
+}
 
 /// Searched after every `-L` directory, as the system linker does. /usr/lib is
 /// also where the shared-cache fallback looks.
@@ -27,48 +50,6 @@ const libsystem_path = "/usr/lib/libSystem.B.dylib";
 /// Names whose library is libSystem itself: libc, libm, libpthread and libdl are
 /// part of it, so naming one adds no load command.
 const libsystem_names = [_][]const u8{ "System", "c", "m", "pthread", "dl" };
-
-/// What a program links beyond libSystem: the libraries to load, the LC_RPATH
-/// entries their `@rpath/` install names need, and the C symbols bound to a library
-/// other than libSystem. Every slice is borrowed from whoever built it.
-pub const Linking = struct {
-    dylibs: []const MachO.Dylib = &.{},
-    rpaths: []const []const u8 = &.{},
-    /// Sorted by name, one entry per symbol.
-    bindings: []const Binding = &.{},
-
-    pub fn load(self: Linking) MachO.Libraries {
-        return .{ .dylibs = self.dylibs, .rpaths = self.rpaths };
-    }
-
-    /// The import ordinal of the bare C symbol `name`; a symbol no library claims
-    /// binds to libSystem.
-    pub fn ordinalOf(self: Linking, name: []const u8) u8 {
-        var lo: usize = 0;
-        var hi: usize = self.bindings.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            switch (std.mem.order(u8, self.bindings[mid].name, name)) {
-                .eq => return self.bindings[mid].ordinal,
-                .lt => lo = mid + 1,
-                .gt => hi = mid,
-            }
-        }
-        return 1;
-    }
-};
-
-pub const Binding = struct { name: []const u8, ordinal: u8 };
-
-/// Where a library name led. Strings are allocated in the allocator `find` got.
-pub const Found = union(enum) {
-    libsystem,
-    dylib: struct { dylib: MachO.Dylib, rpath: ?[]const u8, exports: Exports },
-    /// Only a static archive or object matched: the path of the first one.
-    static: []const u8,
-    not_found,
-    not_dylib: struct { path: []const u8, why: []const u8 },
-};
 
 /// True for a name that is a static archive or an object file, which cannot be
 /// loaded at run time.
@@ -85,9 +66,9 @@ pub fn isPath(name: []const u8) bool {
 /// otherwise `lib<name>.dylib` in each of `dirs`, then `default_dirs`, then the
 /// shared cache. A directory holding only `lib<name>.a` does not stop the search,
 /// but if no dylib turns up the archive is reported, so the user learns why.
-pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []const u8) !Found {
+pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []const u8) LibResolver.FindError!Found {
     if (isStatic(name)) return .{ .static = name };
-    for (libsystem_names) |n| if (std.mem.eql(u8, n, name)) return .libsystem;
+    for (libsystem_names) |n| if (std.mem.eql(u8, n, name)) return .system;
     if (isPath(name)) {
         if (!exists(io, name)) return if (std.fs.path.isAbsolute(name) and inSharedCache(name)) cached(arena, name) else .not_found;
         return open(arena, io, name);
@@ -110,9 +91,15 @@ pub fn find(arena: std.mem.Allocator, io: Io, name: []const u8, dirs: []const []
 /// library (`/usr/lib/libz.dylib` and `/usr/lib/libz.1.dylib`) load it once, and
 /// with the versions of its LC_ID_DYLIB, as the system linker records them.
 fn cached(arena: std.mem.Allocator, path: []const u8) !Found {
-    const dylib: MachO.Dylib = (try cachedId(arena, path)) orelse .{ .install_name = path };
-    if (std.mem.eql(u8, dylib.install_name, libsystem_path)) return .libsystem;
-    return .{ .dylib = .{ .dylib = dylib, .rpath = null, .exports = .{ .cached = path } } };
+    const lib: Image.Library = (try cachedId(arena, path)) orelse .{ .name = path };
+    if (std.mem.eql(u8, lib.name, libsystem_path)) return .system;
+    return .{ .library = .{ .library = lib, .search_path = null, .exports = try exportsIn(arena, .{ .cached = path }) } };
+}
+
+fn exportsIn(arena: std.mem.Allocator, e: Exports) !*const Exports {
+    const p = try arena.create(Exports);
+    p.* = e;
+    return p;
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -123,20 +110,20 @@ fn exists(io: Io, path: []const u8) bool {
 /// Read the library at `path` and choose the install name the binary records.
 fn open(arena: std.mem.Allocator, io: Io, path: []const u8) !Found {
     const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |e| switch (e) {
-        error.OutOfMemory => return e,
-        else => return .{ .not_dylib = .{ .path = path, .why = "it cannot be read" } },
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .unusable = .{ .path = path, .why = "it cannot be read" } },
     };
     const id = switch (readId(bytes)) {
         .ok => |id| id,
-        .bad => |why| return .{ .not_dylib = .{ .path = path, .why = why } },
+        .bad => |why| return .{ .unusable = .{ .path = path, .why = why } },
     };
     const real = Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch try arena.dupe(u8, path);
     const choice = try record(arena, id.install_name, real);
-    if (std.mem.eql(u8, choice.install_name, libsystem_path)) return .libsystem;
-    return .{ .dylib = .{
-        .dylib = id.recordAs(choice.install_name),
-        .rpath = choice.rpath,
-        .exports = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } },
+    if (std.mem.eql(u8, choice.install_name, libsystem_path)) return .system;
+    return .{ .library = .{
+        .library = id.recordAs(choice.install_name),
+        .search_path = choice.rpath,
+        .exports = try exportsIn(arena, .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } }),
     } };
 }
 
@@ -166,8 +153,8 @@ pub const Id = struct {
 
     /// The load command for this library under `install_name`, which may differ from
     /// the library's own (see `record`).
-    pub fn recordAs(id: Id, install_name: []const u8) MachO.Dylib {
-        return .{ .install_name = install_name, .current_version = id.current_version, .compat_version = id.compat_version };
+    pub fn recordAs(id: Id, install_name: []const u8) Image.Library {
+        return .{ .name = install_name, .current_version = id.current_version, .compat_version = id.compat_version };
     }
 };
 
@@ -184,13 +171,13 @@ pub const Exports = union(enum) {
     /// Whether the library exports the C symbol `sym`. It answers true when it cannot
     /// tell (a re-exported library it cannot find, or a host without dyld), so the
     /// check never rejects a symbol dyld would bind.
-    pub fn has(self: Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8) !bool {
+    pub fn has(self: *const Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8) !bool {
         const mangled = try std.fmt.allocPrint(arena, "_{s}", .{sym});
         return self.hasDepth(arena, io, cache, sym, mangled, 0);
     }
 
-    fn hasDepth(self: Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8, mangled: []const u8, depth: u8) !bool {
-        switch (self) {
+    fn hasDepth(self: *const Exports, arena: std.mem.Allocator, io: Io, cache: *Cache, sym: []const u8, mangled: []const u8, depth: u8) !bool {
+        switch (self.*) {
             .cached => |path| return cachedHas(path, sym),
             .trie => |t| {
                 if (trieHas(t.trie, mangled)) return true;
@@ -208,18 +195,14 @@ pub const Exports = union(enum) {
     }
 };
 
-/// Re-exported libraries read so far, by path; null for one that is not a readable
-/// dylib. Every extern is checked through it, so each library is read once per link.
-pub const Cache = std.StringHashMapUnmanaged(?Exports);
-
 /// The library a re-export names, found the way dyld would from the re-exporting
 /// library (load commands `cmds`, folder `dir`): `@loader_path/` from `dir`,
 /// `@rpath/` through its LC_RPATHs and then `dir`, which is the LC_RPATH the binary
 /// records for an `@rpath/` library it links. Null when it cannot be found.
-fn reexported(arena: std.mem.Allocator, io: Io, cache: *Cache, cmds: []const u8, dir: []const u8, name: []const u8) !?Exports {
+fn reexported(arena: std.mem.Allocator, io: Io, cache: *Cache, cmds: []const u8, dir: []const u8, name: []const u8) !?*const Exports {
     if (std.fs.path.isAbsolute(name)) {
         if (exists(io, name)) return loadCached(arena, io, cache, name);
-        return if (inSharedCache(name)) .{ .cached = name } else null;
+        return if (inSharedCache(name)) try exportsIn(arena, .{ .cached = name }) else null;
     }
     if (std.mem.startsWith(u8, name, "@loader_path/")) {
         const path = try std.fs.path.join(arena, &.{ dir, name["@loader_path/".len..] });
@@ -241,13 +224,13 @@ fn reexported(arena: std.mem.Allocator, io: Io, cache: *Cache, cmds: []const u8,
     return if (exists(io, path)) loadCached(arena, io, cache, path) else null;
 }
 
-fn loadCached(arena: std.mem.Allocator, io: Io, cache: *Cache, path: []const u8) !?Exports {
+fn loadCached(arena: std.mem.Allocator, io: Io, cache: *Cache, path: []const u8) !?*const Exports {
     const gop = try cache.getOrPut(arena, path);
-    if (gop.found_existing) return gop.value_ptr.*;
+    if (gop.found_existing) return @ptrCast(@alignCast(gop.value_ptr.*));
     gop.key_ptr.* = try arena.dupe(u8, path);
     gop.value_ptr.* = null;
     const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |e| switch (e) {
-        error.OutOfMemory => return e,
+        error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
     const id = switch (readId(bytes)) {
@@ -255,8 +238,9 @@ fn loadCached(arena: std.mem.Allocator, io: Io, cache: *Cache, path: []const u8)
         .bad => return null,
     };
     const real = Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch try arena.dupe(u8, path);
-    gop.value_ptr.* = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } };
-    return gop.value_ptr.*;
+    const e = try exportsIn(arena, .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = std.fs.path.dirname(real) orelse "/" } });
+    gop.value_ptr.* = e;
+    return e;
 }
 
 /// One load command: its kind and its bytes, header included.
@@ -450,7 +434,7 @@ fn cachedHas(path: []const u8, sym: []const u8) bool {
 /// The load command for the shared-cache library at `path`, from its LC_ID_DYLIB,
 /// its install name owned by `arena`. dyld has no call from a path to its image, so the library is opened and
 /// the loaded image whose handle matches is read in memory; null when none does.
-fn cachedId(arena: std.mem.Allocator, path: []const u8) !?MachO.Dylib {
+fn cachedId(arena: std.mem.Allocator, path: []const u8) !?Image.Library {
     if (comptime builtin.os.tag != .macos) return null;
     const h = openCached(path, 0) orelse return null;
     defer _ = dyld.dlclose(h);
@@ -587,7 +571,7 @@ test "names: static inputs, paths and libSystem aliases" {
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    try testing.expect(try find(arena.allocator(), threaded.io(), "m", &.{}) == .libsystem);
+    try testing.expect(try find(arena.allocator(), threaded.io(), "m", &.{}) == .system);
     try testing.expectEqualStrings("libz.a", (try find(arena.allocator(), threaded.io(), "libz.a", &.{})).static);
 }
 
@@ -606,11 +590,11 @@ test "find searches -L folders for lib<name>.dylib and reports a folder that hol
     try tmp.dir.writeFile(io, .{ .sub_path = "libtoyexe.dylib", .data = fakeDylib(&buf, "x", 0x2) });
     const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
 
-    const q = (try find(a, io, "toyq", &.{dir})).dylib;
-    try testing.expectEqualStrings("@rpath/libtoyq.dylib", q.dylib.install_name);
-    try testing.expectEqualStrings(dir, q.rpath.?);
+    const q = (try find(a, io, "toyq", &.{dir})).library;
+    try testing.expectEqualStrings("@rpath/libtoyq.dylib", q.library.name);
+    try testing.expectEqualStrings(dir, q.search_path.?);
     try testing.expect(std.mem.endsWith(u8, (try find(a, io, "toyarc", &.{dir})).static, "/libtoyarc.a"));
-    try testing.expectEqualStrings("it is not a dynamic library", (try find(a, io, "toyexe", &.{dir})).not_dylib.why);
+    try testing.expectEqualStrings("it is not a dynamic library", (try find(a, io, "toyexe", &.{dir})).unusable.why);
     try testing.expect(try find(a, io, "toy-no-such-lib", &.{dir}) == .not_found);
 }
 
@@ -621,7 +605,7 @@ test "a dylib's export trie answers which C symbols it exports" {
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const e: Exports = .{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = "/opt" } };
+    const e: *const Exports = &.{ .trie = .{ .trie = id.exports, .cmds = id.cmds, .dir = "/opt" } };
     var cache: Cache = .empty;
     for ([_][]const u8{ "q_one", "q_two", "q" }) |sym| try testing.expect(try e.has(arena.allocator(), threaded.io(), &cache, sym));
     for ([_][]const u8{ "q_on", "q_three", "", "q_one_" }) |sym| try testing.expect(!try e.has(arena.allocator(), threaded.io(), &cache, sym));
@@ -653,7 +637,7 @@ test "re-exports through @rpath and @loader_path are followed, each library read
     var cache: Cache = .empty;
     for ([_][]const u8{ "librw.dylib", "liblw.dylib" }) |lib| {
         const path = try std.fs.path.join(a, &.{ dir, lib });
-        const e = (try find(a, io, path, &.{})).dylib.exports;
+        const e: *const Exports = @ptrCast(@alignCast((try find(a, io, path, &.{})).library.exports));
         for (0..3) |_| {
             try testing.expect(try e.has(a, io, &cache, "wrap"));
             try testing.expect(try e.has(a, io, &cache, "mine"));
@@ -693,20 +677,13 @@ test "shared-cache libraries: dyld answers exports, and aliases share one instal
     try testing.expect(try Exports.libsystem.has(a, io, &cache, "sqrt"));
     try testing.expect(!try Exports.libsystem.has(a, io, &cache, "putz_toy_nope"));
     // RTLD_FIRST: libz depends on libSystem but does not export its symbols.
-    const z = (try find(a, io, "z", &.{})).dylib;
-    try testing.expect(try z.exports.has(a, io, &cache, "crc32"));
-    try testing.expect(!try z.exports.has(a, io, &cache, "puts"));
-    const z1 = (try find(a, io, "/usr/lib/libz.1.dylib", &.{})).dylib;
-    try testing.expectEqualStrings(z1.dylib.install_name, z.dylib.install_name);
-    try testing.expectEqual(@as(u32, 0x10000), z.dylib.compat_version);
-    try testing.expect(z.dylib.current_version >= 0x10200);
-    try testing.expectEqual(z1.dylib.current_version, z.dylib.current_version);
-    try testing.expect(try find(a, io, "/usr/lib/libc.dylib", &.{}) == .libsystem);
-}
-
-test "ordinalOf finds a bound symbol and defaults to libSystem" {
-    const l: Linking = .{ .bindings = &.{ .{ .name = "a_fn", .ordinal = 2 }, .{ .name = "m_fn", .ordinal = 3 }, .{ .name = "z_fn", .ordinal = 2 } } };
-    try testing.expectEqual(@as(u8, 3), l.ordinalOf("m_fn"));
-    try testing.expectEqual(@as(u8, 2), l.ordinalOf("z_fn"));
-    try testing.expectEqual(@as(u8, 1), l.ordinalOf("write"));
+    const z = (try find(a, io, "z", &.{})).library;
+    try testing.expect(try resolver.has(a, io, &cache, z.exports, "crc32"));
+    try testing.expect(!try resolver.has(a, io, &cache, z.exports, "puts"));
+    const z1 = (try find(a, io, "/usr/lib/libz.1.dylib", &.{})).library;
+    try testing.expectEqualStrings(z1.library.name, z.library.name);
+    try testing.expectEqual(@as(u32, 0x10000), z.library.compat_version);
+    try testing.expect(z.library.current_version >= 0x10200);
+    try testing.expectEqual(z1.library.current_version, z.library.current_version);
+    try testing.expect(try find(a, io, "/usr/lib/libc.dylib", &.{}) == .system);
 }

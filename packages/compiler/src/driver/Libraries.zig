@@ -1,8 +1,9 @@
 //! The libraries a program links: every `-l` the command line names, then every
-//! library an `extern "name" { .. }` block names, each loaded once, libSystem first.
-//! It also binds each extern's C symbol to the ordinal of its block's library. Once the
-//! program is checked, `Result.unexportedCalls` checks that each library exports the
-//! symbols the program calls.
+//! library an `extern "name" { .. }` block names, each loaded once, after the target's
+//! system libraries. It also binds each extern's C symbol to its block's library. Once
+//! the program is checked, `Result.unexportedCalls` checks that each library exports the
+//! symbols the program calls. What a library file is and where one is found are the
+//! target's object format's, asked through `LibResolver`.
 //!
 //! It reads only the module ASTs, the checked program and the file system, so `check`
 //! reports the same library errors `build` does, and a warm build recomputes the set
@@ -12,8 +13,8 @@ const std = @import("std");
 const Io = std.Io;
 const Ast = @import("../ast/Ast.zig");
 const Graph = @import("Graph.zig");
-const Dylib = @import("../link/Dylib.zig");
-const MachO = @import("../link/MachO.zig");
+const Image = @import("../link/Image.zig");
+const LibResolver = @import("../link/LibResolver.zig");
 const Walk = @import("../ast/Walk.zig");
 const Typecheck = @import("../types.zig");
 const Callee = @import("../symbols/Callee.zig").Callee;
@@ -36,14 +37,15 @@ pub const CliError = struct { code: codes.Code, message: []const u8 };
 /// Everything is allocated in `arena`, so one `deinit` frees it.
 pub const Result = struct {
     arena: std.heap.ArenaAllocator,
-    linking: Dylib.Linking,
+    resolver: *const LibResolver.Resolver,
+    linking: LibResolver.Linking,
     cli_errors: []const CliError,
     /// At the library string of an `extern "name"` block, or at a conflicting extern.
     diags: []const Diagnostic,
     sites: []const Site,
-    /// Parallel to `linking.dylibs`.
-    exports: []const Dylib.Exports,
-    reexports: Dylib.Cache,
+    /// Parallel to `linking.libraries`.
+    exports: []const LibResolver.Exports,
+    reexports: LibResolver.Cache,
     conflicted: std.StringHashMapUnmanaged(void),
 
     pub fn deinit(self: *Result) void {
@@ -70,14 +72,14 @@ pub const Result = struct {
         // A symbol already in conflict is not checked as well: one error per bad extern.
         for (self.sites) |site| {
             if (!imported.contains(site.sym) or self.conflicted.contains(site.sym)) continue;
-            const exports: Dylib.Exports = if (site.bound.ordinal == 1) .libsystem else self.exports[site.bound.ordinal - 2];
-            if (try exports.has(a, io, &self.reexports, site.sym)) continue;
+            const exports = if (site.bound.library) |l| self.exports[l] else self.resolver.system;
+            if (try self.resolver.has(a, io, &self.reexports, exports, site.sym)) continue;
             const s = site.bound.site.?;
             try diags.append(a, .{
                 .byte_offset = s.start,
                 .end = s.end,
                 .message = if (site.bare)
-                    try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by libSystem; a bare 'extern fn' binds to libSystem", .{site.sym})
+                    try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by {s}; a bare 'extern fn' binds to {s}", .{ site.sym, self.resolver.system_name, self.resolver.system_name })
                 else
                     try std.fmt.allocPrint(a, "C symbol '{s}' is not exported by library '{s}'", .{ site.sym, site.bound.lib }),
                 .scope = s.module,
@@ -184,63 +186,68 @@ const CallVisitor = struct {
 /// An extern declaration and where it binds its C symbol `sym`.
 const Site = struct { bound: Bound, bare: bool, sym: []const u8 };
 
+/// A library lookup's outcome: the library it binds to (null for the system libraries),
+/// or nothing when it failed.
+const Lookup = ?Bound.Library;
+
 const Builder = struct {
     a: std.mem.Allocator,
     io: Io,
+    r: *const LibResolver.Resolver,
     dirs: []const []const u8,
-    dylibs: std.ArrayList(MachO.Dylib) = .empty,
-    /// Parallel to `dylibs`.
-    exports: std.ArrayList(Dylib.Exports) = .empty,
-    reexports: Dylib.Cache = .empty,
-    rpaths: std.ArrayList([]const u8) = .empty,
-    /// Each name looked up so far, to its ordinal (null when it failed).
-    seen: std.StringHashMapUnmanaged(?u8) = .empty,
+    libraries: std.ArrayList(Image.Library) = .empty,
+    /// Parallel to `libraries`.
+    exports: std.ArrayList(LibResolver.Exports) = .empty,
+    reexports: LibResolver.Cache = .empty,
+    search_paths: std.ArrayList([]const u8) = .empty,
+    /// Each name looked up so far.
+    seen: std.StringHashMapUnmanaged(Lookup) = .empty,
 
-    /// The library a resolved name adds, deduplicated by install name, as its ordinal.
-    fn add(b: *Builder, found: Dylib.Found) !u8 {
+    /// The library a resolved name adds, deduplicated by runtime name.
+    fn add(b: *Builder, found: LibResolver.Found) !Bound.Library {
         const d = switch (found) {
-            .libsystem => return 1,
-            .dylib => |d| d,
+            .system => return null,
+            .library => |d| d,
             else => unreachable,
         };
-        for (b.dylibs.items, 0..) |have, i| {
-            if (std.mem.eql(u8, have.install_name, d.dylib.install_name)) return @intCast(i + 2);
+        for (b.libraries.items, 0..) |have, i| {
+            if (std.mem.eql(u8, have.name, d.library.name)) return @intCast(i);
         }
-        if (b.dylibs.items.len == MachO.Libraries.max_dylibs) return error.TooManyLibraries;
-        try b.dylibs.append(b.a, d.dylib);
+        if (b.libraries.items.len == b.r.max_libraries) return error.TooManyLibraries;
+        try b.libraries.append(b.a, d.library);
         try b.exports.append(b.a, d.exports);
-        if (d.rpath) |r| {
-            for (b.rpaths.items) |have| {
+        if (d.search_path) |r| {
+            for (b.search_paths.items) |have| {
                 if (std.mem.eql(u8, have, r)) break;
-            } else try b.rpaths.append(b.a, r);
+            } else try b.search_paths.append(b.a, r);
         }
-        return @intCast(b.dylibs.items.len + 1);
+        return @intCast(b.libraries.items.len - 1);
     }
 
-    /// Why `name` cannot be linked, or null with `ordinal` set.
-    fn resolve(b: *Builder, name: []const u8, ordinal: *u8) !?struct { code: codes.Code, message: []const u8 } {
-        const found = try Dylib.find(b.a, b.io, name, b.dirs);
+    /// Why `name` cannot be linked, or null with `library` set.
+    fn resolve(b: *Builder, name: []const u8, library: *Bound.Library) !?struct { code: codes.Code, message: []const u8 } {
+        const found = try b.r.find(b.a, b.io, name, b.dirs);
         switch (found) {
-            .libsystem, .dylib => {
-                ordinal.* = try b.add(found);
+            .system, .library => {
+                library.* = try b.add(found);
                 return null;
             },
             .static => |path| return .{ .code = .R0015, .message = if (std.mem.eql(u8, path, name))
-                try std.fmt.allocPrint(b.a, "library '{s}' is a static library; toy links only dynamic libraries (.dylib)", .{name})
+                try std.fmt.allocPrint(b.a, "library '{s}' is a static library; toy links only dynamic libraries ({s})", .{ name, b.r.suffix })
             else
-                try std.fmt.allocPrint(b.a, "library '{s}' is only a static library ('{s}'); toy links only dynamic libraries (.dylib)", .{ name, path }) },
+                try std.fmt.allocPrint(b.a, "library '{s}' is only a static library ('{s}'); toy links only dynamic libraries ({s})", .{ name, path, b.r.suffix }) },
             .not_found => return .{ .code = .R0016, .message = try b.notFound(name) },
-            .not_dylib => |nd| return .{ .code = .R0017, .message = try std.fmt.allocPrint(b.a, "library '{s}' cannot be linked: '{s}': {s}", .{ name, nd.path, nd.why }) },
+            .unusable => |nd| return .{ .code = .R0017, .message = try std.fmt.allocPrint(b.a, "library '{s}' cannot be linked: '{s}': {s}", .{ name, nd.path, nd.why }) },
         }
     }
 
     fn notFound(b: *Builder, name: []const u8) ![]const u8 {
-        if (Dylib.isPath(name)) return std.fmt.allocPrint(b.a, "library '{s}' not found: no such file", .{name});
+        if (b.r.isPath(name)) return std.fmt.allocPrint(b.a, "library '{s}' not found: no such file", .{name});
         var list: std.ArrayList(u8) = .empty;
         for (b.dirs) |d| try list.print(b.a, "{s}, ", .{d});
-        for (Dylib.default_dirs) |d| try list.print(b.a, "{s}, ", .{d});
-        try list.appendSlice(b.a, "the dyld shared cache");
-        return std.fmt.allocPrint(b.a, "library '{s}' not found: no lib{s}.dylib in {s}", .{ name, name, list.items });
+        for (b.r.default_dirs) |d| try list.print(b.a, "{s}, ", .{d});
+        if (b.r.fallback) |f| try list.appendSlice(b.a, f) else if (list.items.len > 0) list.shrinkRetainingCapacity(list.items.len - 2);
+        return std.fmt.allocPrint(b.a, "library '{s}' not found: no lib{s}{s} in {s}", .{ name, name, b.r.suffix, list.items });
     }
 };
 
@@ -256,9 +263,12 @@ fn libraryName(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
 
 /// Where one extern binds its C symbol. `site` is null for the runtime's own imports.
 const Bound = struct {
-    ordinal: u8,
+    library: Library,
     lib: []const u8,
     site: ?struct { module: u32, start: u32, end: u32 },
+
+    /// An index into the program's libraries; null for the system libraries.
+    const Library = ?Image.LibraryIndex;
 };
 
 /// R0018 for `sym`, bound by `first` and again by `second` to another library. It sits
@@ -299,28 +309,29 @@ pub fn namesLibraries(graph: *const Graph.Graph, req: Request) bool {
     return false;
 }
 
-/// Collect and resolve the program's libraries. `graph` must have discovered cleanly.
-pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: Request) !Result {
+/// Collect and resolve the program's libraries through the target's `resolver`. `graph`
+/// must have discovered cleanly.
+pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: Request, resolver: *const LibResolver.Resolver) !Result {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
-    var b: Builder = .{ .a = a, .io = io, .dirs = req.dirs };
+    var b: Builder = .{ .a = a, .io = io, .r = resolver, .dirs = req.dirs };
     var cli_errors: std.ArrayList(CliError) = .empty;
     var diags: std.ArrayList(Diagnostic) = .empty;
 
     for (req.libs) |name| {
         if (b.seen.contains(name)) continue;
-        var ordinal: u8 = 0;
-        if (try b.resolve(name, &ordinal)) |e| {
+        var library: Bound.Library = null;
+        if (try b.resolve(name, &library)) |e| {
             try cli_errors.append(a, .{ .code = e.code, .message = try std.fmt.allocPrint(a, "{s} (-l {s})", .{ e.message, name }) });
             try b.seen.put(a, name, null);
-        } else try b.seen.put(a, name, ordinal);
+        } else try b.seen.put(a, name, library);
     }
 
     // An import binds by bare C name, so the runtime's own imports are bound first: a
     // block that names one for another library would move the runtime's call there.
     var bound: std.StringArrayHashMapUnmanaged(Bound) = .empty;
-    for (runtime.libsystem_imports) |sym| try bound.put(a, sym, .{ .ordinal = 1, .lib = "libSystem", .site = null });
+    for (runtime.libsystem_imports) |sym| try bound.put(a, sym, .{ .library = null, .lib = resolver.system_name, .site = null });
     var sites: std.ArrayList(Site) = .empty;
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     for (graph.modules, 0..) |*m, mi| {
@@ -331,26 +342,26 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
             const n = tree.nodes[idx.int()];
             if (n.tag != .extern_fn_decl) continue;
             const lib = if (Ast.externLibrary(tree, m.tokens, m.source, idx)) |raw| try libraryName(a, raw) else null;
-            var ordinal: u8 = 1;
+            var library: Bound.Library = null;
             if (lib) |name| {
                 const gop = try b.seen.getOrPut(a, name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = null;
-                    var o: u8 = 0;
-                    if (try b.resolve(name, &o)) |e| {
+                    var l: Bound.Library = null;
+                    if (try b.resolve(name, &l)) |e| {
                         const tok = m.tokens[tree.nodes[n.rhs.int()].main_token];
                         try diags.append(a, .{ .byte_offset = tok.start, .end = tok.end, .message = e.message, .scope = @intCast(mi), .code = e.code });
-                    } else gop.value_ptr.* = o;
+                    } else gop.value_ptr.* = l;
                 }
-                ordinal = gop.value_ptr.* orelse continue;
+                library = gop.value_ptr.* orelse continue;
             }
             const sym_tok = m.tokens[n.main_token];
             const sym = sym_tok.text(m.source);
-            const here: Bound = .{ .ordinal = ordinal, .lib = lib orelse "libSystem", .site = .{ .module = @intCast(mi), .start = sym_tok.start, .end = sym_tok.end } };
+            const here: Bound = .{ .library = library, .lib = lib orelse resolver.system_name, .site = .{ .module = @intCast(mi), .start = sym_tok.start, .end = sym_tok.end } };
             const gop = try bound.getOrPut(a, sym);
             if (!gop.found_existing) {
                 gop.value_ptr.* = here;
-            } else if (gop.value_ptr.ordinal != ordinal) {
+            } else if (gop.value_ptr.library != library) {
                 try diags.append(a, try conflict(a, graph, sym, gop.value_ptr.*, here));
                 try conflicted.put(a, sym, {});
             }
@@ -358,19 +369,20 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
         }
     }
 
-    var bindings: std.ArrayList(Dylib.Binding) = .empty;
+    var bindings: std.ArrayList(LibResolver.Binding) = .empty;
     for (bound.keys(), bound.values()) |sym, v| {
-        if (v.ordinal != 1) try bindings.append(a, .{ .name = sym, .ordinal = v.ordinal });
+        if (v.library) |l| try bindings.append(a, .{ .name = sym, .library = l });
     }
-    std.mem.sort(Dylib.Binding, bindings.items, {}, struct {
-        fn lt(_: void, x: Dylib.Binding, y: Dylib.Binding) bool {
+    std.mem.sort(LibResolver.Binding, bindings.items, {}, struct {
+        fn lt(_: void, x: LibResolver.Binding, y: LibResolver.Binding) bool {
             return std.mem.lessThan(u8, x.name, y.name);
         }
     }.lt);
 
     return .{
         .arena = arena,
-        .linking = .{ .dylibs = b.dylibs.items, .rpaths = b.rpaths.items, .bindings = bindings.items },
+        .resolver = resolver,
+        .linking = .{ .libraries = b.libraries.items, .search_paths = b.search_paths.items, .bindings = bindings.items },
         .cli_errors = cli_errors.items,
         .diags = diags.items,
         .sites = sites.items,
@@ -381,6 +393,8 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
 }
 
 const testing = std.testing;
+const Dylib = @import("../link/Dylib.zig");
+const macho = &Dylib.resolver;
 
 fn graphOf(gpa: std.mem.Allocator, src: []const u8) !struct { tokens: []@import("../ast/Token.zig").Token, tree: Ast.Tree, g: Graph.Graph } {
     const tokens = try @import("../lex.zig").tokenize(gpa, src);
@@ -419,15 +433,15 @@ test "externs bind to their block's library; libSystem names and bare externs st
         gpa.free(p.tree.extra);
         gpa.free(p.tokens);
     }
-    var r = try collect(gpa, io, &p.g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &p.g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expect(r.ok());
-    try testing.expectEqual(@as(usize, 1), r.linking.dylibs.len);
-    try testing.expectEqualStrings(dir, r.linking.rpaths[0]);
-    try testing.expectEqual(@as(u8, 2), r.linking.ordinalOf("q_one"));
-    try testing.expectEqual(@as(u8, 2), r.linking.ordinalOf("q_two"));
-    try testing.expectEqual(@as(u8, 1), r.linking.ordinalOf("sqrt"));
-    try testing.expectEqual(@as(u8, 1), r.linking.ordinalOf("labs"));
+    try testing.expectEqual(@as(usize, 1), r.linking.libraries.len);
+    try testing.expectEqualStrings(dir, r.linking.search_paths[0]);
+    try testing.expectEqual(@as(?Image.LibraryIndex, 0), r.linking.libraryOf("q_one"));
+    try testing.expectEqual(@as(?Image.LibraryIndex, 0), r.linking.libraryOf("q_two"));
+    try testing.expectEqual(@as(?Image.LibraryIndex, null), r.linking.libraryOf("sqrt"));
+    try testing.expectEqual(@as(?Image.LibraryIndex, null), r.linking.libraryOf("labs"));
 }
 
 test "a missing or static library is one error at the block; -l problems are usage errors" {
@@ -450,7 +464,7 @@ test "a missing or static library is one error at the block; -l problems are usa
         gpa.free(p.tree.extra);
         gpa.free(p.tokens);
     }
-    var r = try collect(gpa, threaded.io(), &p.g, .{ .libs = &.{ "z.o", "toy-no-such-lib" } });
+    var r = try collect(gpa, threaded.io(), &p.g, .{ .libs = &.{ "z.o", "toy-no-such-lib" } }, macho);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 2), r.cli_errors.len);
     try testing.expectEqual(codes.Code.R0015, r.cli_errors[0].code);
@@ -487,7 +501,7 @@ test "one C symbol bound to two libraries is R0018 at the second extern" {
         gpa.free(p.tree.extra);
         gpa.free(p.tokens);
     }
-    var r = try collect(gpa, io, &p.g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &p.g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diags.len);
     try testing.expectEqual(codes.Code.R0018, r.diags[0].code);
@@ -546,7 +560,7 @@ test "a block that binds a symbol the runtime imports is R0018 at the block's ex
     ;
     var g = try graphOfMods(gpa, &.{.{ .path = "main", .src = src }});
     defer freeGraphOfMods(gpa, &g);
-    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diags.len);
     try testing.expectEqual(codes.Code.R0018, r.diags[0].code);
@@ -578,7 +592,7 @@ test "R0018 against a bundled module's extern sits at the user's extern" {
         else
             try graphOfMods(gpa, &.{ .{ .path = "main", .src = user }, .{ .path = "core/os", .src = core, .bundled = true } });
         defer freeGraphOfMods(gpa, &g);
-        var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+        var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
         defer r.deinit();
         try testing.expectEqual(@as(usize, 1), r.diags.len);
         try testing.expectEqual(codes.Code.R0018, r.diags[0].code);
@@ -602,10 +616,10 @@ test "a block's library string has its escapes decoded" {
     try tmp.dir.writeFile(io, .{ .sub_path = "libtoyq.dylib", .data = Dylib.fakeDylibExporting(&buf, "/opt/libtoyq.dylib", 6, &.{"q_one"}) });
     var g = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern \"toy\\x71\" { fn q_one() -> int }\n" }});
     defer freeGraphOfMods(gpa, &g);
-    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expect(r.ok());
-    try testing.expectEqual(@as(u8, 2), r.linking.ordinalOf("q_one"));
+    try testing.expectEqual(@as(?Image.LibraryIndex, 0), r.linking.libraryOf("q_one"));
 }
 
 test "an extern its library does not export is R0019 at the extern, bare externs against libSystem" {
@@ -632,7 +646,7 @@ test "an extern its library does not export is R0019 at the extern, bare externs
     ;
     var g = try graphOfMods(gpa, &.{.{ .path = "main", .src = src }});
     defer freeGraphOfMods(gpa, &g);
-    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expect(r.ok());
     const diags = try r.unexported(io, &.{ "q_one", "q_nope", "labs", "putz" });
@@ -671,7 +685,7 @@ test "an extern the program does not call is not checked, in the program or in c
     const core = "pub extern fn __errno_location() -> rawptr\npub extern fn __error() -> rawptr\n";
     var g = try graphOfMods(gpa, &.{ .{ .path = "main", .src = user }, .{ .path = "core/os", .src = core, .bundled = true } });
     defer freeGraphOfMods(gpa, &g);
-    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} });
+    var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expect(r.ok());
     try testing.expectEqual(@as(usize, 0), (try r.unexported(io, &.{ "q_one", "__error" })).len);
@@ -690,10 +704,10 @@ test "-l z and /usr/lib/libz.1.dylib load one shared-cache library" {
     defer threaded.deinit();
     var g = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern \"/usr/lib/libz.1.dylib\" { fn crc32(c: int, p: rawptr, n: int) -> int }\nfn main() -> int { 0 }\n" }});
     defer freeGraphOfMods(gpa, &g);
-    var r = try collect(gpa, threaded.io(), &g, .{ .libs = &.{"z"} });
+    var r = try collect(gpa, threaded.io(), &g, .{ .libs = &.{"z"} }, macho);
     defer r.deinit();
     try testing.expect(r.ok());
-    try testing.expectEqual(@as(usize, 1), r.linking.dylibs.len);
-    try testing.expectEqualStrings("/usr/lib/libz.1.dylib", r.linking.dylibs[0].install_name);
-    try testing.expectEqual(@as(u8, 2), r.linking.ordinalOf("crc32"));
+    try testing.expectEqual(@as(usize, 1), r.linking.libraries.len);
+    try testing.expectEqualStrings("/usr/lib/libz.1.dylib", r.linking.libraries[0].name);
+    try testing.expectEqual(@as(?Image.LibraryIndex, 0), r.linking.libraryOf("crc32"));
 }

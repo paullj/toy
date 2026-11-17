@@ -1,5 +1,5 @@
-//! The single backend boundary: lowered per-function `FnCode`s -> a signed,
-//! runnable Mach-O image.
+//! The single backend boundary: lowered per-function `FnCode`s -> a runnable image in
+//! the target's object format.
 //!
 //! WHY this is one entry point: the backend tail is a fixed, order-sensitive
 //! pipeline — (0) drop every fn and descriptor unreachable from the entry, (1)
@@ -8,20 +8,20 @@
 //! literals program-wide IN A DETERMINISTIC ORDER (fn source order, then in-fn
 //! literal order), (3) rewrite each `.cstr` reloc's
 //! hash target to its global `__cstring` offset, (4) `Link.link` (layout +
-//! intra-module patch + collect cross-segment data_relocs), (5)
-//! `MachO.assemble` (segments, __cstring, __got import, chained fixups), (6)
-//! `Link.applyDataRelocs` (rebase cross-segment relocs after vmaddrs are known),
-//! (7) `CodeSign.sign` LAST, over the final bytes. The ORDER IS BYTE-LOAD-BEARING
-//! (esp. sign last). Hiding it behind `emitExecutable` keeps the program-wide
+//! intra-module patch + collect cross-segment data_relocs), (5) the format-neutral
+//! `Image` (the import set and its libraries), (6) the format's writer (`writerOf`; for Mach-O `MachO.write`:
+//! segments, __cstring, __got import, chained fixups, then the cross-segment relocs
+//! patched once addresses are known), (7) for Mach-O, `MachO.sign` LAST, over the final
+//! bytes. The ORDER IS BYTE-LOAD-BEARING (esp. sign last). Hiding it behind
+//! `emitExecutable` keeps the program-wide
 //! interning + `.cstr`-rewrite an image-emission concern (it lives here, not in
 //! the driver), and gives the driver a clean handoff: lowered fns in, signed
 //! image out.
 //!
 //! Internally the pipeline is split into `linkProgram` (steps 1-4, producing a
-//! linked `Linked` tail) and `assembleAndSign` (steps 5-7). `emitExecutable`
-//! fuses them; the driver also calls them individually on the asm/listing path
-//! where it needs the linked tail without a final image, and the existing
-//! byte-identity tests drive `assembleAndSign` directly.
+//! linked `Linked` tail) and `writeImage` (steps 5-7). `emitExecutable` fuses
+//! them; the driver also calls them individually on the asm/listing path where it
+//! needs the linked tail without a final image.
 
 const std = @import("std");
 const testing = std.testing;
@@ -30,8 +30,8 @@ const Io = std.Io;
 const Link = @import("Link.zig");
 const ValueLayout = @import("../layout/ValueLayout.zig");
 const MachO = @import("MachO.zig");
-const CodeSign = @import("CodeSign.zig");
-const Dylib = @import("Dylib.zig");
+const Image = @import("Image.zig");
+const LibResolver = @import("LibResolver.zig");
 const runtime = @import("../codegen/runtime/runtime.zig");
 const Isa = @import("../codegen/Isa.zig");
 const sym = @import("../symbols/Sym.zig");
@@ -40,7 +40,7 @@ const Target = @import("../Target.zig");
 
 /// Emission options. `identifier` is the code-signing identity (the output
 /// basename) and is byte-load-bearing (it enters both the signature and the
-/// Mach-O layout). The dyld imports list is DERIVED internally from the `.import`
+/// Mach-O layout). The imports list is DERIVED internally from the `.import`
 /// reloc targets (dedup + stable-sort by name), not a caller input.
 pub const Options = struct {
     identifier: []const u8,
@@ -62,13 +62,13 @@ pub const Linked = struct {
     /// Interned `__cstring` bytes. Owned; empty for string-free programs.
     cstrings: []u8 = &.{},
     /// Cross-segment relocs (to __cstring/__got/__bss) rebased to absolute
-    /// __text offsets, patched by `Link.applyDataRelocs` after MachO assigns
-    /// vmaddrs. Owned; empty for programs with no data relocations. The dyld import
-    /// set is DERIVED from these (`.import` targets) in `assembleAndSign` — never a
-    /// separate flag — so it is a pure function of the fn set at any `-jN`.
+    /// __text offsets, patched by the format writer once it has placed the sections.
+    /// Owned; empty for programs with no data relocations. The import set is DERIVED
+    /// from these (`.import` targets) in `writeImage` — never a separate flag — so it
+    /// is a pure function of the fn set at any `-jN`.
     data_relocs: []Link.Reloc = &.{},
     /// The debug info, empty unless asked for. Owned.
-    debug: MachO.Debug = .{},
+    debug: Image.Debug = .{},
 };
 
 /// Drop fns and descriptors unreachable from `entry`, append referenced hand-emitted
@@ -386,120 +386,56 @@ fn internCstrings(gpa: std.mem.Allocator, fns: []const Link.FnCode) !InternedCst
     return .{ .cstrings = try cstrings.toOwnedSlice(gpa), .off_by_hash = off_by_hash };
 }
 
-/// The DISTINCT `.import` reloc target names, sorted by name bytes — the canonical
-/// GOT slot order. Dedup first (via `seen`) means the sort ranges over unique keys, so
-/// sort stability is moot: the total order is a pure function of the name SET,
-/// independent of `data_relocs` arrival order / thread count. Caller owns the slice
-/// and each duped name.
-fn importNames(gpa: std.mem.Allocator, data_relocs: []const Link.Reloc) ![]const []const u8 {
+/// The DISTINCT `.import` reloc targets, sorted by name bytes — the canonical GOT slot
+/// order — each bound to its library. Dedup first (via `seen`) means the sort ranges over
+/// unique keys, so sort stability is moot: the total order is a pure function of the name
+/// SET, independent of `data_relocs` arrival order / thread count. Names are borrowed
+/// from `data_relocs`; caller owns the slice.
+fn importsOf(gpa: std.mem.Allocator, data_relocs: []const Link.Reloc, libs: LibResolver.Linking) ![]Image.Import {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(gpa);
-    var names: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (names.items) |nm| gpa.free(nm);
-        names.deinit(gpa);
-    }
+    var out: std.ArrayList(Image.Import) = .empty;
+    errdefer out.deinit(gpa);
     for (data_relocs) |rl| switch (rl.target) {
         .import => |s| {
             const gop = try seen.getOrPut(gpa, s.name);
-            if (!gop.found_existing) try names.append(gpa, try gpa.dupe(u8, s.name));
+            if (!gop.found_existing) try out.append(gpa, .{ .name = s.name, .library = libs.libraryOf(s.name) });
         },
         else => {},
     };
-    const out = try names.toOwnedSlice(gpa);
-    std.mem.sort([]const u8, out, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    std.mem.sort(Image.Import, out.items, {}, struct {
+        fn lt(_: void, a: Image.Import, b: Image.Import) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
-    return out;
+    return out.toOwnedSlice(gpa);
 }
 
-/// Build the fully signed, runnable Mach-O image for `code`. `identifier` is the
-/// code-signing identity (the output basename); `entry_off` is `main`'s byte
-/// offset within `code`. `cstrings` are the interned `__cstring` bytes, and
-/// `data_relocs` the cross-segment patches `Link.link` rebased to
-/// absolute __text offsets; the dyld import set is derived from their `.import` targets.
-///
-/// ORDER MATTERS: MachO assigns segment vmaddrs, THEN `Link.applyDataRelocs`
-/// patches the cross-segment relocs in __text, and ONLY THEN does `CodeSign.sign`
-/// hash the (now final) bytes. Patching after signing would invalidate the hash.
-/// Caller owns the returned bytes and writes them mode 0o755.
-pub fn assembleAndSign(
-    io: Io,
-    gpa: std.mem.Allocator,
-    patcher: *const Link.Patcher,
-    identifier: []const u8,
-    code: []const u8,
-    entry_off: u32,
-    cstrings: []const u8,
-    data_relocs: []const Link.Reloc,
-    libs: Dylib.Linking,
-    debug: MachO.Debug,
-) ![]u8 {
-    // Derive the ordered dyld import set from the `.import` reloc targets: collect the
-    // DISTINCT names, stable-sort by name → canonical GOT slot order. This is a pure
-    // function of the name SET (arrival order / thread count irrelevant), so it is the
-    // sole authority for the GOT layout, the imports/symbols tables, `import_slots`,
-    // and each slot's chained-fixups ordinal — byte-identical at any `-jN`.
-    const names = try importNames(gpa, data_relocs);
-    defer {
-        for (names) |nm| gpa.free(nm);
-        gpa.free(names);
-    }
+/// One object format's writer: the finished, runnable bytes of `img`. `identifier` is the
+/// output's name where the format records one (the Mach-O code-signing identity).
+pub const Writer = *const fn (io: Io, gpa: std.mem.Allocator, img: *const Image, identifier: []const u8) error{OutOfMemory}![]u8;
 
-    // The dyld-facing linkage name is the C symbol with a leading `_` (`labs`→`_labs`),
-    // in the same sorted slot order. Heap-owned; freed after `assemble` copies them.
-    const imports = try gpa.alloc(MachO.Import, names.len);
-    defer {
-        for (imports) |im| gpa.free(@constCast(im.name));
-        gpa.free(imports);
-    }
-    for (names, 0..) |nm, i| imports[i] = .{ .name = try std.fmt.allocPrint(gpa, "_{s}", .{nm}), .ordinal = libs.ordinalOf(nm) };
-
-    const wants_bss = for (data_relocs) |rl| {
-        if (rl.target == .data) break true;
-    } else false;
-    const layout = try MachO.assemble(gpa, identifier, code, entry_off, cstrings, imports, libs.load(), debug, if (wants_bss) Link.bss_size else 0);
-    errdefer gpa.free(layout.image);
-
-    // Slot i binds the i-th sorted import; `applyDataRelocs` looks each `.import`
-    // target's (bare) name up here to patch its sites to the right __got slot.
-    var import_slots: std.StringHashMapUnmanaged(u32) = .empty;
-    defer import_slots.deinit(gpa);
-    for (names, 0..) |nm, i| try import_slots.put(gpa, nm, @intCast(i));
-
-    // Patch the cross-segment relocs now that vmaddrs are known. The reloc sites
-    // are absolute within __text, so slice the image at __text and pass them
-    // through directly.
-    if (data_relocs.len > 0) {
-        Link.applyDataRelocs(
-            io,
-            patcher,
-            layout.image[layout.code_file_off..][0..layout.text_size],
-            data_relocs,
-            layout.text_vmaddr + layout.code_file_off,
-            layout.cstring_vmaddr,
-            layout.got_vmaddr,
-            layout.bss_vmaddr,
-            &import_slots,
-        );
-    }
-
-    // Sign last: the hash must cover the final, patched bytes.
-    try CodeSign.sign(io, layout.image, identifier, layout.sig_file_off, layout.text_size);
-
-    return layout.image;
+/// The writer for `format`, or null when toy cannot write it yet.
+pub fn writerOf(format: Target.ObjectFormat) ?Writer {
+    return switch (format) {
+        .macho => &MachO.writeSigned,
+        .elf => null,
+    };
 }
 
-/// Whether toy emits code for `target`: it has an ISA module for the arch and writes
-/// Mach-O only, so any other target stops at `toy check`.
+/// Whether toy emits code for `target`: it has an ISA module for the arch and a
+/// writer for its object format, so any other target stops at `toy check`.
 pub fn canEmit(target: Target) bool {
-    return Isa.of(target) != null and target.objectFormat() == .macho;
+    return Isa.of(target) != null and writerOf(target.objectFormat()) != null;
 }
 
-/// The runnable image for `target`, in its object format. The driver rejects a target
-/// `canEmit` refuses before it lowers, so `error.UnsupportedTarget` is a caller bug.
+/// The runnable image for `target`, in its object format. `code` is the linked text,
+/// `entry_off` the entry function's offset in it, `cstrings` the interned read-only
+/// bytes, and `data_relocs` the cross-segment patches `Link.link` rebased to absolute
+/// text offsets; the import set is derived from their `.import` targets. `identifier`
+/// is the Mach-O code-signing identity (the output basename). The driver rejects a
+/// target `canEmit` refuses before it lowers, so `error.UnsupportedTarget` is a caller
+/// bug. Caller owns the returned bytes and writes them mode 0o755.
 pub fn writeImage(
     io: Io,
     gpa: std.mem.Allocator,
@@ -510,18 +446,34 @@ pub fn writeImage(
     entry_off: u32,
     cstrings: []const u8,
     data_relocs: []const Link.Reloc,
-    libs: Dylib.Linking,
-    debug: MachO.Debug,
+    libs: LibResolver.Linking,
+    debug: Image.Debug,
 ) ![]u8 {
-    if (!canEmit(target)) return error.UnsupportedTarget;
-    return switch (target.objectFormat()) {
-        .macho => assembleAndSign(io, gpa, patcher, identifier, code, entry_off, cstrings, data_relocs, libs, debug),
-        .elf => unreachable,
+    if (Isa.of(target) == null) return error.UnsupportedTarget;
+    const write = writerOf(target.objectFormat()) orelse return error.UnsupportedTarget;
+    const imports = try importsOf(gpa, data_relocs, libs);
+    defer gpa.free(imports);
+    const wants_bss = for (data_relocs) |rl| {
+        if (rl.target == .data) break true;
+    } else false;
+    const img: Image = .{
+        .arch = target.arch,
+        .text = code,
+        .entry_off = entry_off,
+        .cstrings = cstrings,
+        .bss_size = if (wants_bss) Link.bss_size else 0,
+        .imports = imports,
+        .libraries = libs.libraries,
+        .search_paths = libs.search_paths,
+        .relocs = data_relocs,
+        .patcher = patcher,
+        .debug = debug,
     };
+    return write(io, gpa, &img, identifier);
 }
 
-/// THE SINGLE PUBLIC BOUNDARY: lowered `FnCode`s -> a signed, runnable Mach-O
-/// image. CONSUMES `fns`. Fuses `linkProgram` + `assembleAndSign`; the step order
+/// THE SINGLE PUBLIC BOUNDARY: lowered `FnCode`s -> a runnable image (signed, for
+/// Mach-O). CONSUMES `fns`. Fuses `linkProgram` + `writeImage`; the step order
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
 /// symbol identity (e.g. `{.user_fn, "main"}`). Caller owns the returned bytes.
 pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
@@ -669,6 +621,13 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
     for (lk.data_relocs) |rl| try testing.expectEqualStrings("labs", rl.target.import.name);
 }
 
+test "one writer lookup decides which object formats toy emits" {
+    try testing.expect(writerOf(.macho) != null);
+    try testing.expect(writerOf(.elf) == null);
+    try testing.expect(canEmit(.aarch64_macos));
+    try testing.expect(!canEmit(.aarch64_linux));
+}
+
 test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and -jN" {
     // The [C11] gate: the generalized N-import chained-fixups blob + GOT layout + the
     // whole emitted image must be byte-identical regardless of thread count, because the
@@ -694,7 +653,7 @@ test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and 
 
     // The __got sits at the third segment's __got section; its two slots carry the
     // name-sorted chained binds: labs (slot 0) then write (slot 1).
-    const got_off: usize = @intCast(MachO.PAGE); // __DATA_CONST is the page after single-page __TEXT
+    const got_off: usize = MachO.PAGE; // __DATA_CONST is the page after single-page __TEXT
     try testing.expectEqual(@as(u64, 0x8010000000000000), std.mem.readInt(u64, img_serial[got_off..][0..8], .little));
     try testing.expectEqual(@as(u64, 0x8000000000000001), std.mem.readInt(u64, img_serial[got_off + 8 ..][0..8], .little));
 }
