@@ -101,7 +101,7 @@ pub const Literal = struct {
 /// typed operands (scalar→value, aggregate→slot). `ret_slot` is the destination
 /// slot for an aggregate result, or `none_slot` for a scalar/unit result (whose
 /// `Instr.result` then holds the scalar value, or `none_value` for unit). The
-/// ABI (reg-pair vs indirect, x8 sret, NGRN/NSAA) is decided in codegen.
+/// ABI (reg-pair vs indirect, sret, argument registers and stack) is decided in codegen.
 pub const Call = struct {
     callee: SymName,
     args: []Operand,
@@ -117,8 +117,8 @@ pub const Call = struct {
     /// callee's signature because the operand's type cannot tell: the address of a
     /// closure-captured local is its box pointer, a `rawptr`.
     by_ptr: u64 = 0,
-    /// A C variadic callee: the args past `params` are its varargs, each in an 8-byte
-    /// stack slot (Apple arm64), typed by its operand.
+    /// A C variadic callee: the args past `params` are its varargs, placed by the C
+    /// convention's vararg rule, typed by its operand.
     variadic: bool = false,
 
     /// How many args take the C convention's register/stack walk; the rest are varargs.
@@ -128,7 +128,7 @@ pub const Call = struct {
 };
 
 /// An indirect call. `target` is a computed value holding the callee's runtime
-/// code address (via `blr`). `args`/`ret_slot` follow `Call`'s conventions.
+/// code address. `args`/`ret_slot` follow `Call`'s conventions.
 pub const CallIndirect = struct {
     target: ValueId,
     args: []Operand,
@@ -168,7 +168,7 @@ pub const Op = union(enum) {
     load: struct { addr: ValueId, ty: Type },
     /// Zero-extended single-byte load from a ptr value → int value. The
     /// heap-free str byte-compare reads one code unit at `ptr + i` this way; distinct
-    /// from `load` (which is always a 64-bit `ldr`) so store→load forwarding — which
+    /// from `load` (always a 64-bit load) so store→load forwarding — which
     /// only matches slot-based `.load` — never rewrites across a `cstr`-ptr byte read.
     load_byte: ValueId,
     /// Scalar store; no result.
@@ -227,7 +227,7 @@ pub const Op = union(enum) {
     /// The address of this byte offset in the image's zero-fill `__bss` (the collector's
     /// control block) → int value. Pure, no operands.
     data_addr: u32,
-    /// The current fn's frame record address (its x29) → int value. Pure, no operands; a
+    /// The current fn's frame record address (its frame pointer) → int value. Pure, no operands; a
     /// fn that reads it is never inlined, as its frame would vanish.
     frame_addr,
 

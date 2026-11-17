@@ -23,6 +23,14 @@
 //!     builtins written by hand per ISA until they are toy code in core/rt.
 //!   * `c_abis` — the C calling conventions (`Target.CAbi`) its selector places
 //!     arguments for.
+//!   * `abi` — its calling-convention and frame facts, which the target-neutral placement
+//!     walk (`abi/Abi.zig`) and frame layout (`frame/FrameLayout.zig`) read:
+//!     `facts(c_abi)`, a `FrameLayout.Facts` per C convention (toy's and the C
+//!     convention's `Abi.Desc`, the saved-register area between a frame and its caller's
+//!     stack arguments, the stack alignment, the frame and incoming-offset limits);
+//!     and the registers the placement indices name: `gpr_args`, `fpr_args`, `gpr_rets`
+//!     (at least 2, for a reg pair), `fpr_rets` (at least 4 under an `hfa` convention)
+//!     and `sret_reg` (`gpr_args[0]` under `sret_uses_gpr`).
 //!   * `instCount(code)` — how many instructions encoded `code` holds, for
 //!     `--opt-stats`.
 //!
@@ -36,6 +44,8 @@ const types = @import("../types.zig");
 const Target = @import("../Target.zig");
 const runtime = @import("runtime/runtime.zig");
 const CodegenMir = @import("CodegenMir.zig");
+const Abi = @import("abi/Abi.zig");
+const FrameLayout = @import("frame/FrameLayout.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
 pub const LowerFn = *const fn (
@@ -79,12 +89,28 @@ pub fn of(target: Target) ?*const Backend {
     return null;
 }
 
-fn backendsOf(arch: Target.Arch) []const Backend {
+fn moduleOf(comptime arch: Target.Arch) ?type {
     return switch (arch) {
-        .aarch64 => &CodegenMir.CodegenMir(@import("mir/aarch64/aarch64.zig")).backends,
-        .x86_64 => &.{},
+        .aarch64 => @import("mir/aarch64/aarch64.zig"),
+        .x86_64 => null,
     };
 }
+
+fn backendsOf(arch: Target.Arch) []const Backend {
+    switch (arch) {
+        inline else => |a| return if (comptime moduleOf(a)) |I| &CodegenMir.CodegenMir(I).backends else &.{},
+    }
+}
+
+/// The largest frame every ISA addresses. The checker caps every struct and enum at it
+/// (T0077): a value of one has to fit in a frame, and the IR is shared by all targets.
+pub const max_frame: u32 = blk: {
+    var m: u32 = std.math.maxInt(u32);
+    for (std.enums.values(Target.Arch)) |a| if (moduleOf(a)) |I| {
+        for (I.c_abis) |c_abi| m = @min(m, I.abi.facts(c_abi).max_frame);
+    };
+    break :blk m;
+};
 
 /// Whether `func`'s fixed frame fits every backend's cap. The IR is cached once for all
 /// targets, so a body kept for one target must lower on any.
@@ -105,7 +131,7 @@ pub fn check(comptime I: type) void {
     const decls = .{
         "Inst",         "Isel",          "Peephole", "Emit",      "reserved",  "allocatable",
         "callee_saved", "moveScratch",   "move",     "jump",      "spillLoad", "spillStore",
-        "relocs",       "hand_builtins", "c_abis",   "instCount",
+        "relocs",       "hand_builtins", "c_abis",   "instCount", "abi",
     };
     inline for (decls) |d| if (!@hasDecl(I, d)) @compileError(@typeName(I) ++ " is no ISA module: it has no `" ++ d ++ "`");
     inline for (.{ "caller_saved", "branchTarget", "setBranchTarget", "copyRegs", "operands", "callRegs" }) |d|
@@ -115,6 +141,28 @@ pub fn check(comptime I: type) void {
     inline for (.{ "Out", "encode" }) |d|
         if (!@hasDecl(I.Emit, d)) @compileError(@typeName(I) ++ ".Emit has no `" ++ d ++ "`");
     if (I.Isel.Func != @import("mir/Mir.zig").Function(I.Inst)) @compileError(@typeName(I) ++ ".Isel.Func is not Mir.Function(Inst)");
+    inline for (.{ "facts", "gpr_args", "fpr_args", "gpr_rets", "fpr_rets", "sret_reg" }) |d|
+        if (!@hasDecl(I.abi, d)) @compileError(@typeName(I) ++ ".abi has no `" ++ d ++ "`");
+    const Reg = @import("mir/Mir.zig").Reg;
+    const sret_reg: Reg = I.abi.sret_reg;
+    const gpr_args: []const Reg = &I.abi.gpr_args;
+    const fpr_args: []const Reg = &I.abi.fpr_args;
+    const gpr_rets: []const Reg = &I.abi.gpr_rets;
+    const fpr_rets: []const Reg = &I.abi.fpr_rets;
+    // Isel returns a 2-word reg pair in gpr_rets[0..2] and an HFA in fpr_rets[0..4].
+    if (gpr_rets.len < 2) @compileError(@typeName(I) ++ ".abi: `gpr_rets` holds fewer than 2 registers");
+    for (I.c_abis) |c_abi| {
+        const f: FrameLayout.Facts = I.abi.facts(c_abi);
+        for ([_]Abi.Desc{ f.toy, f.c }) |d| {
+            if (d.gprs != gpr_args.len or d.fprs != fpr_args.len)
+                @compileError(@typeName(I) ++ ".abi: a convention's register counts differ from its register lists");
+            if (d.hfa and fpr_rets.len < 4) @compileError(@typeName(I) ++ ".abi: an HFA convention needs 4 `fpr_rets`");
+            // The walk reserves GPR argument 0 for the buffer while the prologue and call
+            // site name `sret_reg`; they must be the same register.
+            if (d.sret_uses_gpr and sret_reg != gpr_args[0]) @compileError(@typeName(I) ++ ".abi: `sret_uses_gpr` but `sret_reg` is not `gpr_args[0]`");
+        }
+        if (!std.math.isPowerOfTwo(f.stack_align)) @compileError(@typeName(I) ++ ".abi: the stack alignment is not a power of two");
+    }
     const relocs: Link.Patcher = I.relocs;
     const builtins: [runtime.hand_builtins.len]BuiltinFn = I.hand_builtins;
     const c_abis: []const Target.CAbi = &I.c_abis;

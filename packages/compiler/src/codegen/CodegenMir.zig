@@ -52,7 +52,7 @@ pub fn CodegenMir(comptime I: type) type {
                     layouts: []const types.Layout,
                     enum_layouts: []const types.EnumLayout,
                 ) error{OutOfMemory}!bool {
-                    return FrameLayout.fits(gpa, func, c_abi, layouts, enum_layouts);
+                    return FrameLayout.fits(gpa, func, comptime I.abi.facts(c_abi), layouts, enum_layouts);
                 }
             };
             return .{ .c_abi = c_abi, .lower = For.lower, .fits = For.fits, .relocs = I.relocs, .hand_builtins = &I.hand_builtins, .inst_count = I.instCount };
@@ -66,14 +66,15 @@ pub fn CodegenMir(comptime I: type) type {
             func: *const Ir.Function,
             layouts: []const types.Layout,
             enum_layouts: []const types.EnumLayout,
-            c_abi: Target.CAbi,
+            comptime c_abi: Target.CAbi,
             is_entry: bool,
             guard_stack: bool,
             diags: *std.ArrayList(Diagnostic),
         ) error{OutOfMemory}!Link.FnCode {
-            var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, c_abi, layouts, enum_layouts) catch |e| switch (e) {
+            const facts = comptime I.abi.facts(c_abi);
+            var frame: Mir.Frame = .{ .layout = FrameLayout.compute(gpa, func, facts, layouts, enum_layouts) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.FrameTooLarge => return fail(gpa, func, diags, frameTooLargeMessage(func, layouts, enum_layouts)),
+                error.FrameTooLarge => return fail(gpa, func, diags, frameTooLargeMessage(func, facts.max_frame, layouts, enum_layouts)),
                 error.ParamOffsetTooLarge => return fail(gpa, func, diags, "too many parameters for codegen (stack-arg offset out of range)"),
             } };
             defer frame.deinit(gpa);
@@ -93,7 +94,7 @@ pub fn CodegenMir(comptime I: type) type {
                 .ir = func,
                 .layouts = layouts,
                 .enum_layouts = enum_layouts,
-                .c_abi = c_abi,
+                .facts = &facts,
                 .is_entry = is_entry,
                 .fl = &frame.layout,
                 .roots = roots,
@@ -116,7 +117,7 @@ pub fn CodegenMir(comptime I: type) type {
             };
             defer maps.deinit(gpa);
             std.debug.assert(mf.allPhysical());
-            if (frame.size() > FrameLayout.MAX_FRAME) return fail(gpa, func, diags, frameTooLargeMessage(func, layouts, enum_layouts));
+            if (frame.size() > facts.max_frame) return fail(gpa, func, diags, frameTooLargeMessage(func, facts.max_frame, layouts, enum_layouts));
 
             var out: I.Emit.Out = .{};
             defer out.deinit(gpa);
@@ -167,9 +168,9 @@ fn fail(gpa: std.mem.Allocator, func: *const Ir.Function, diags: *std.ArrayList(
 
 /// A struct or enum may take a whole frame (T0077 stops only a larger one), and then the
 /// frame has no room for the fn's other values; "too many locals" would misname that.
-fn frameTooLargeMessage(func: *const Ir.Function, layouts: []const types.Layout, enum_layouts: []const types.EnumLayout) []const u8 {
-    if (FrameLayout.largestSlot(func, layouts, enum_layouts) > FrameLayout.MAX_FRAME - 64 * 1024)
-        return "function frame too large for codegen (one value nearly fills the 16 MiB frame; hold large data in a Vec)";
+fn frameTooLargeMessage(func: *const Ir.Function, comptime max_frame: u32, layouts: []const types.Layout, enum_layouts: []const types.EnumLayout) []const u8 {
+    if (FrameLayout.largestSlot(func, layouts, enum_layouts) > max_frame -| 64 * 1024)
+        return comptime std.fmt.comptimePrint("function frame too large for codegen (one value nearly fills the {d} MiB frame; hold large data in a Vec)", .{std.math.divCeil(u32, max_frame, 1 << 20) catch unreachable});
     return "function frame too large for codegen (too many locals)";
 }
 

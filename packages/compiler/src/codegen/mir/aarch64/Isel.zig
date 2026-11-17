@@ -7,8 +7,9 @@
 //! or a value with no memory where an address is) fails with `error.Unsupported`, which the
 //! build reports as an internal error.
 //!
-//! The calling convention comes from `Abi`. Argument and result registers appear as
-//! physical operands next to the virtual ones; the selector never names x9-x15 or v16-v18,
+//! The calling convention comes from `Abi`, placed by the facts in `abi.zig`, whose
+//! register lists name the argument and result registers. These appear as physical
+//! operands next to the virtual ones; the selector never names x9-x15 or v16-v18,
 //! which belong to the allocator's and encoder's scratch.
 //!
 //! GC facts for the allocator (which values are references, which calls are safepoints,
@@ -19,6 +20,7 @@ const Ir = @import("../../../ir/Ir.zig");
 const Abi = @import("../../abi/Abi.zig");
 const ValueLayout = @import("../../../layout/ValueLayout.zig");
 const FrameLayout = @import("../../frame/FrameLayout.zig");
+const abi = @import("abi.zig");
 const Link = @import("../../../link/Link.zig");
 const types = @import("../../../types.zig");
 const Aarch64 = @import("encode.zig");
@@ -38,8 +40,8 @@ pub const Input = struct {
     ir: *const Ir.Function,
     layouts: []const types.Layout,
     enum_layouts: []const types.EnumLayout,
-    /// The target's C convention, for extern calls and C callback adapters.
-    c_abi: Abi.CAbi,
+    /// The backend's conventions: toy's and the target's C one.
+    facts: *const FrameLayout.Facts,
     is_entry: bool,
     fl: *const FrameLayout,
     roots: []const FrameLayout.Root,
@@ -167,12 +169,12 @@ const S = struct {
 
     fn prologue(s: *S) Error!void {
         if (s.in.fl.sret_save_off != FrameLayout.NO_SRET)
-            try s.emit(.{ .store = .{ .rt = Reg.gp(8), .mem = Mem.frame(.sret_save, 0) } });
+            try s.emit(.{ .store = .{ .rt = abi.sret_reg, .mem = Mem.frame(.sret_save, 0) } });
 
         var param_types: std.ArrayList(Type) = .empty;
         defer param_types.deinit(s.gpa);
         for (s.ir.params) |sid| try param_types.append(s.gpa, s.ir.slots[sid].type);
-        var plan = try Abi.planParamsConv(s.gpa, FrameLayout.convOf(s.ir, s.in.c_abi), param_types.items, s.ir.ret_type, s.in.layouts, s.in.enum_layouts);
+        var plan = try Abi.planParams(s.gpa, s.in.facts.convOf(s.ir), param_types.items, s.ir.ret_type, s.in.layouts, s.in.enum_layouts);
         defer plan.deinit(s.gpa);
         for (plan.locs, s.ir.params) |loc, sid| {
             const slot = Mir.FrameRef{ .slot = sid };
@@ -183,15 +185,15 @@ const S = struct {
             }
             switch (loc) {
                 .gpr => |r| for (0..r.count) |k| {
-                    try s.emit(.{ .store = .{ .rt = Reg.gp(r.first + @as(u32, @intCast(k))), .mem = Mem.frame(slot, @intCast(k * 8)) } });
+                    try s.emit(.{ .store = .{ .rt = abi.gpr_args[r.first + k], .mem = Mem.frame(slot, @intCast(k * 8)) } });
                 },
-                .fpr => |v| try s.emit(.{ .store = .{ .rt = Reg.fp(v), .mem = Mem.frame(slot, 0) } }),
-                .gpr_ptr => |r| try s.emit(.{ .copy = .{ .dst = Mem.frame(slot, 0), .src = Mem.reg(Reg.gp(r), 0), .size = s.typeSize(ty) } }),
+                .fpr => |v| try s.emit(.{ .store = .{ .rt = abi.fpr_args[v], .mem = Mem.frame(slot, 0) } }),
+                .gpr_ptr => |r| try s.emit(.{ .copy = .{ .dst = Mem.frame(slot, 0), .src = Mem.reg(abi.gpr_args[r], 0), .size = s.typeSize(ty) } }),
                 .stack => |st| {
                     var k: u32 = 0;
                     while (k < st.bytes) : (k += 8) {
                         const t = try s.temp(.gpr);
-                        try s.emit(.{ .load = .{ .rt = t, .mem = Mem.frame(.incoming, st.nsaa_off + k) } });
+                        try s.emit(.{ .load = .{ .rt = t, .mem = Mem.frame(.incoming, st.off + k) } });
                         try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(slot, k) } });
                     }
                 },
@@ -214,17 +216,17 @@ const S = struct {
         if (Abi.isCStruct(ty, s.in.layouts)) {
             switch (loc) {
                 .gpr => |r| {
-                    for (0..r.count) |k| try s.emit(.{ .store = .{ .rt = Reg.gp(r.first + @as(u32, @intCast(k))), .mem = Mem.frame(.c_scratch, @intCast(k * 8)) } });
+                    for (0..r.count) |k| try s.emit(.{ .store = .{ .rt = abi.gpr_args[r.first + k], .mem = Mem.frame(.c_scratch, @intCast(k * 8)) } });
                     try s.unpackC(ty, img, Mem.frame(slot, 0));
                 },
                 .fpr_run => |r| {
                     const size: Inst.Size = if (r.single) .b4 else .b8;
                     const elem: u32 = if (r.single) 4 else 8;
-                    for (0..r.count) |k| try s.emit(.{ .store = .{ .rt = Reg.fp(r.first + @as(u32, @intCast(k))), .mem = Mem.frame(.c_scratch, @as(u32, @intCast(k)) * elem), .size = size } });
+                    for (0..r.count) |k| try s.emit(.{ .store = .{ .rt = abi.fpr_args[r.first + k], .mem = Mem.frame(.c_scratch, @as(u32, @intCast(k)) * elem), .size = size } });
                     try s.unpackC(ty, img, Mem.frame(slot, 0));
                 },
-                .gpr_ptr => |r| try s.unpackC(ty, Mem.reg(Reg.gp(r), 0), Mem.frame(slot, 0)),
-                .stack => |st| try s.unpackC(ty, Mem.frame(.incoming, st.nsaa_off), Mem.frame(slot, 0)),
+                .gpr_ptr => |r| try s.unpackC(ty, Mem.reg(abi.gpr_args[r], 0), Mem.frame(slot, 0)),
+                .stack => |st| try s.unpackC(ty, Mem.frame(.incoming, st.off), Mem.frame(slot, 0)),
                 .stack_ptr => |off| {
                     const p = try s.temp(.gpr);
                     try s.emit(.{ .load = .{ .rt = p, .mem = Mem.frame(.incoming, off) } });
@@ -236,7 +238,7 @@ const S = struct {
         }
         switch (loc) {
             .gpr => |r| {
-                try s.emit(.{ .store = .{ .rt = Reg.gp(r.first), .mem = Mem.frame(slot, 0) } });
+                try s.emit(.{ .store = .{ .rt = abi.gpr_args[r.first], .mem = Mem.frame(slot, 0) } });
                 if (Abi.cScalarSize(ty) < 8) {
                     const t = try s.temp(.gpr);
                     try s.loadC(t, Mem.frame(slot, 0), ty);
@@ -245,12 +247,12 @@ const S = struct {
             },
             .fpr => |v| if (ty.isFloat32()) {
                 const t = try s.temp(.gpr);
-                try s.emit(.{ .mov = .{ .rd = t, .rn = Reg.fp(v), .single = true } });
+                try s.emit(.{ .mov = .{ .rd = t, .rn = abi.fpr_args[v], .single = true } });
                 try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(slot, 0) } });
-            } else try s.emit(.{ .store = .{ .rt = Reg.fp(v), .mem = Mem.frame(slot, 0) } }),
+            } else try s.emit(.{ .store = .{ .rt = abi.fpr_args[v], .mem = Mem.frame(slot, 0) } }),
             .stack => |st| {
                 const t = try s.temp(.gpr);
-                try s.loadC(t, Mem.frame(.incoming, st.nsaa_off), ty);
+                try s.loadC(t, Mem.frame(.incoming, st.off), ty);
                 try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(slot, 0) } });
             },
             .zero => {},
@@ -510,17 +512,18 @@ const S = struct {
     }
 
     fn call(s: *S, res: Ir.ValueId, c: Ir.Call) Error!void {
-        const conv: Abi.Conv = if (c.callee.kind == .import) .{ .c = s.in.c_abi } else .toy;
+        const conv = s.in.facts.callConv(c.callee);
+        const is_c = FrameLayout.Facts.isCCall(c.callee);
         const ret_ty = s.retType(c.ret_slot, res);
         var arg_types: std.ArrayList(Type) = .empty;
         defer arg_types.deinit(s.gpa);
         for (0..c.args.len) |i| try arg_types.append(s.gpa, s.ir.argType(c.args, c.params, c.by_ptr, i));
-        var plan = try Abi.planCallConv(s.gpa, conv, arg_types.items, c.fixedArgs(), ret_ty, s.in.layouts, s.in.enum_layouts);
+        var plan = try Abi.planCall(s.gpa, conv, arg_types.items, c.fixedArgs(), ret_ty, s.in.layouts, s.in.enum_layouts);
         defer plan.deinit(s.gpa);
 
         // An extern struct crosses in C layout: each one is packed into its image in the C
         // scratch region first, in `FrameLayout.cScratchBytes` order.
-        const srcs = try s.gpa.alloc(ArgSrc, if (conv == .c) c.args.len else 0);
+        const srcs = try s.gpa.alloc(ArgSrc, if (is_c) c.args.len else 0);
         defer s.gpa.free(srcs);
         var img: u32 = 0;
         for (srcs, 0..) |*src, i| {
@@ -535,34 +538,34 @@ const S = struct {
             }
             img += FrameLayout.roundUp16(Abi.cLayout(ty, s.in.layouts).size);
         }
-        const c_ret: ?Type = if (conv == .c and c.ret_slot != Ir.none_slot and Abi.isCStruct(ret_ty, s.in.layouts)) ret_ty else null;
+        const c_ret: ?Type = if (is_c and c.ret_slot != Ir.none_slot and Abi.isCStruct(ret_ty, s.in.layouts)) ret_ty else null;
 
         var uses = try s.marshalArgs(c.args, plan, srcs);
-        if (plan.sret_in_x8) {
+        if (plan.sret) {
             const buf = if (c_ret != null) Mem.frame(.c_scratch, img) else Mem.frame(.{ .slot = c.ret_slot }, 0);
-            try s.emit(.{ .addr = .{ .rd = Reg.gp(8), .mem = buf } });
-            uses |= Mir.regBit(Reg.gp(8));
+            try s.emit(.{ .addr = .{ .rd = abi.sret_reg, .mem = buf } });
+            uses |= Mir.regBit(abi.sret_reg);
         }
-        const callee: Inst.Callee = if (conv == .c) .{ .import = c.callee.name } else .{ .func = c.callee };
-        const defs = if (c_ret) |rt| cRetDefs(rt, s.in.layouts) else s.retDefs(ret_ty);
+        const callee: Inst.Callee = if (is_c) .{ .import = c.callee.name } else .{ .func = c.callee };
+        const defs = if (c_ret) |rt| cRetDefs(conv, rt, s.in.layouts) else s.retDefs(ret_ty);
         const facts = GcFacts.callFacts(c.callee);
         try s.emit(.{ .call = .{ .callee = callee, .uses = uses, .defs = defs, .safepoint = facts.safepoint } });
         // A C callee leaves the bits above its result's width unspecified, and toy keeps
         // every value canonical.
-        if (conv == .c and res != Ir.none_value) {
+        if (is_c and res != Ir.none_value) {
             if (ret_ty.kind == .bool)
-                try s.emit(.{ .unary = .{ .op = .uxtb, .rd = Reg.gp(0), .rn = Reg.gp(0) } })
+                try s.emit(.{ .unary = .{ .op = .uxtb, .rd = abi.gpr_rets[0], .rn = abi.gpr_rets[0] } })
             else
-                try s.normalize(Reg.gp(0), ret_ty);
+                try s.normalize(abi.gpr_rets[0], ret_ty);
         }
         if (c_ret) |rt| {
             // The result's C bytes into its image, then back into toy layout in its slot.
-            switch (Abi.cRet(rt, s.in.layouts)) {
+            switch (Abi.cRet(conv, rt, s.in.layouts)) {
                 .hfa => |h| for (0..h.count) |k| {
                     const elem: u32 = if (h.single) 4 else 8;
-                    try s.emit(.{ .store = .{ .rt = Reg.fp(@intCast(k)), .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * elem), .size = if (h.single) .b4 else .b8 } });
+                    try s.emit(.{ .store = .{ .rt = abi.fpr_rets[k], .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * elem), .size = if (h.single) .b4 else .b8 } });
                 },
-                .regs => |n| for (0..n) |k| try s.emit(.{ .store = .{ .rt = Reg.gp(@intCast(k)), .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * 8) } }),
+                .regs => |n| for (0..n) |k| try s.emit(.{ .store = .{ .rt = abi.gpr_rets[k], .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * 8) } }),
                 .sret => {},
             }
             try s.unpackC(rt, Mem.frame(.c_scratch, img), Mem.frame(.{ .slot = c.ret_slot }, 0));
@@ -583,13 +586,13 @@ const S = struct {
         var arg_types: std.ArrayList(Type) = .empty;
         defer arg_types.deinit(s.gpa);
         for (c.args) |a| try arg_types.append(s.gpa, s.ir.operandType(a));
-        var plan = try Abi.planCall(s.gpa, arg_types.items, ret_ty, s.in.layouts, s.in.enum_layouts);
+        var plan = try Abi.planCall(s.gpa, s.in.facts.toy, arg_types.items, arg_types.items.len, ret_ty, s.in.layouts, s.in.enum_layouts);
         defer plan.deinit(s.gpa);
 
         var uses = try s.marshalArgs(c.args, plan, &.{});
-        if (plan.sret_in_x8) {
-            try s.emit(.{ .addr = .{ .rd = Reg.gp(8), .mem = Mem.frame(.{ .slot = c.ret_slot }, 0) } });
-            uses |= Mir.regBit(Reg.gp(8));
+        if (plan.sret) {
+            try s.emit(.{ .addr = .{ .rd = abi.sret_reg, .mem = Mem.frame(.{ .slot = c.ret_slot }, 0) } });
+            uses |= Mir.regBit(abi.sret_reg);
         }
         try s.emit(.{ .mov = .{ .rd = Reg.gp(16), .rn = try s.val(c.target) } });
         uses |= Mir.regBit(Reg.gp(16));
@@ -600,8 +603,8 @@ const S = struct {
     fn retDefs(s: *const S, ret_ty: Type) Mir.RegSet {
         return switch (Abi.classifyRet(ret_ty, s.in.layouts, s.in.enum_layouts)) {
             .none, .sret => 0,
-            .fp_reg => Mir.regBit(Reg.fp(0)),
-            .reg => |r| if (r.regs == 1) Mir.regBit(Reg.gp(0)) else Mir.regBit(Reg.gp(0)) | Mir.regBit(Reg.gp(1)),
+            .fp_reg => Mir.regBit(abi.fpr_rets[0]),
+            .reg => |r| if (r.regs == 1) Mir.regBit(abi.gpr_rets[0]) else Mir.regBit(abi.gpr_rets[0]) | Mir.regBit(abi.gpr_rets[1]),
         };
     }
 
@@ -620,28 +623,28 @@ const S = struct {
                 .gpr => |r| {
                     if (mem) |m| {
                         for (0..r.count) |k| {
-                            const reg = Reg.gp(r.first + @as(u32, @intCast(k)));
+                            const reg = abi.gpr_args[r.first + k];
                             try s.emit(.{ .load = .{ .rt = reg, .mem = .{ .base = m.base, .off = @intCast(k * 8) } } });
                             uses |= Mir.regBit(reg);
                         }
                     } else {
                         std.debug.assert(r.count == 1);
-                        try s.emit(.{ .mov = .{ .rd = Reg.gp(r.first), .rn = try s.val(arg.value) } });
-                        uses |= Mir.regBit(Reg.gp(r.first));
+                        try s.emit(.{ .mov = .{ .rd = abi.gpr_args[r.first], .rn = try s.val(arg.value) } });
+                        uses |= Mir.regBit(abi.gpr_args[r.first]);
                     }
                 },
                 .fpr => |v| {
                     if (mem) |m| {
-                        try s.emit(.{ .load = .{ .rt = Reg.fp(v), .mem = m } });
-                    } else try s.emit(.{ .mov = .{ .rd = Reg.fp(v), .rn = try s.val(arg.value) } });
-                    uses |= Mir.regBit(Reg.fp(v));
+                        try s.emit(.{ .load = .{ .rt = abi.fpr_args[v], .mem = m } });
+                    } else try s.emit(.{ .mov = .{ .rd = abi.fpr_args[v], .rn = try s.val(arg.value) } });
+                    uses |= Mir.regBit(abi.fpr_args[v]);
                 },
                 .gpr_ptr => |r| {
-                    try s.emit(.{ .addr = .{ .rd = Reg.gp(r), .mem = mem orelse return error.Unsupported } });
-                    uses |= Mir.regBit(Reg.gp(r));
+                    try s.emit(.{ .addr = .{ .rd = abi.gpr_args[r], .mem = mem orelse return error.Unsupported } });
+                    uses |= Mir.regBit(abi.gpr_args[r]);
                 },
                 .stack => |st| {
-                    const dst = Mem.frame(.outgoing, st.nsaa_off);
+                    const dst = Mem.frame(.outgoing, st.off);
                     const narrow: ?Inst.Size = switch (st.bytes) {
                         1 => .b1,
                         2 => .b2,
@@ -682,22 +685,22 @@ const S = struct {
             .operand => unreachable,
             .image => |img| switch (loc) {
                 .gpr => |r| for (0..r.count) |k| {
-                    const reg = Reg.gp(r.first + @as(u32, @intCast(k)));
+                    const reg = abi.gpr_args[r.first + k];
                     try s.emit(.{ .load = .{ .rt = reg, .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * 8) } });
                     uses |= Mir.regBit(reg);
                 },
                 .fpr_run => |r| for (0..r.count) |k| {
-                    const reg = Reg.fp(r.first + @as(u32, @intCast(k)));
+                    const reg = abi.fpr_args[r.first + k];
                     const elem: u32 = if (r.single) 4 else 8;
                     try s.emit(.{ .load = .{ .rt = reg, .mem = Mem.frame(.c_scratch, img + @as(u32, @intCast(k)) * elem), .size = if (r.single) .b4 else .b8 } });
                     uses |= Mir.regBit(reg);
                 },
                 // The image is already the copy a C callee may write.
                 .gpr_ptr => |r| {
-                    try s.emit(.{ .addr = .{ .rd = Reg.gp(r), .mem = Mem.frame(.c_scratch, img) } });
-                    uses |= Mir.regBit(Reg.gp(r));
+                    try s.emit(.{ .addr = .{ .rd = abi.gpr_args[r], .mem = Mem.frame(.c_scratch, img) } });
+                    uses |= Mir.regBit(abi.gpr_args[r]);
                 },
-                .stack => |st| try s.emit(.{ .copy = .{ .dst = Mem.frame(.outgoing, st.nsaa_off), .src = Mem.frame(.c_scratch, img), .size = st.bytes } }),
+                .stack => |st| try s.emit(.{ .copy = .{ .dst = Mem.frame(.outgoing, st.off), .src = Mem.frame(.c_scratch, img), .size = st.bytes } }),
                 .stack_ptr => |off| {
                     const t = try s.temp(.gpr);
                     try s.emit(.{ .addr = .{ .rd = t, .mem = Mem.frame(.c_scratch, img) } });
@@ -707,13 +710,13 @@ const S = struct {
             },
             .image_addr => |img| switch (loc) {
                 .gpr => |r| {
-                    try s.emit(.{ .addr = .{ .rd = Reg.gp(r.first), .mem = Mem.frame(.c_scratch, img) } });
-                    uses |= Mir.regBit(Reg.gp(r.first));
+                    try s.emit(.{ .addr = .{ .rd = abi.gpr_args[r.first], .mem = Mem.frame(.c_scratch, img) } });
+                    uses |= Mir.regBit(abi.gpr_args[r.first]);
                 },
                 .stack => |st| {
                     const t = try s.temp(.gpr);
                     try s.emit(.{ .addr = .{ .rd = t, .mem = Mem.frame(.c_scratch, img) } });
-                    try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(.outgoing, st.nsaa_off) } });
+                    try s.emit(.{ .store = .{ .rt = t, .mem = Mem.frame(.outgoing, st.off) } });
                 },
                 else => unreachable,
             },
@@ -725,13 +728,13 @@ const S = struct {
         switch (Abi.classifyRet(ret_ty, s.in.layouts, s.in.enum_layouts)) {
             .none, .sret => {},
             .fp_reg => if (res != Ir.none_value) {
-                try s.emit(.{ .mov = .{ .rd = try s.def(res), .rn = Reg.fp(0), .single = ret_ty.isFloat32() } });
+                try s.emit(.{ .mov = .{ .rd = try s.def(res), .rn = abi.fpr_rets[0], .single = ret_ty.isFloat32() } });
             },
             .reg => |r| {
                 if (ret_slot != Ir.none_slot) {
-                    for (0..r.regs) |k| try s.emit(.{ .store = .{ .rt = Reg.gp(@intCast(k)), .mem = Mem.frame(.{ .slot = ret_slot }, @intCast(k * 8)) } });
+                    for (0..r.regs) |k| try s.emit(.{ .store = .{ .rt = abi.gpr_rets[k], .mem = Mem.frame(.{ .slot = ret_slot }, @intCast(k * 8)) } });
                 } else if (res != Ir.none_value) {
-                    try s.emit(.{ .mov = .{ .rd = try s.def(res), .rn = Reg.gp(0) } });
+                    try s.emit(.{ .mov = .{ .rd = try s.def(res), .rn = abi.gpr_rets[0] } });
                 }
             },
         }
@@ -811,18 +814,18 @@ const S = struct {
         const ret_ty = s.ir.ret_type;
         if (s.ir.c_abi and Abi.isCStruct(ret_ty, s.in.layouts)) return s.placeCStructReturn(o, ret_ty);
         switch (Abi.classifyRet(ret_ty, s.in.layouts, s.in.enum_layouts)) {
-            .none => if (s.in.is_entry) try s.emit(.{ .mov_imm = .{ .rd = Reg.gp(0), .imm = 0 } }),
+            .none => if (s.in.is_entry) try s.emit(.{ .mov_imm = .{ .rd = abi.gpr_rets[0], .imm = 0 } }),
             .reg => |r| {
                 if (o == .none) return;
                 if (s.memOf(o)) |m| {
-                    for (0..r.regs) |k| try s.emit(.{ .load = .{ .rt = Reg.gp(@intCast(k)), .mem = .{ .base = m.base, .off = @intCast(k * 8) } } });
-                } else try s.emit(.{ .mov = .{ .rd = Reg.gp(0), .rn = try s.val(o.value) } });
+                    for (0..r.regs) |k| try s.emit(.{ .load = .{ .rt = abi.gpr_rets[k], .mem = .{ .base = m.base, .off = @intCast(k * 8) } } });
+                } else try s.emit(.{ .mov = .{ .rd = abi.gpr_rets[0], .rn = try s.val(o.value) } });
             },
             .fp_reg => {
                 if (o == .none) return;
                 if (s.memOf(o)) |m| {
-                    try s.emit(.{ .load = .{ .rt = Reg.fp(0), .mem = m } });
-                } else try s.emit(.{ .mov = .{ .rd = Reg.fp(0), .rn = try s.val(o.value) } });
+                    try s.emit(.{ .load = .{ .rt = abi.fpr_rets[0], .mem = m } });
+                } else try s.emit(.{ .mov = .{ .rd = abi.fpr_rets[0], .rn = try s.val(o.value) } });
             },
             .sret => {
                 const src = s.memOf(o) orelse return;
@@ -838,7 +841,7 @@ const S = struct {
     fn placeCStructReturn(s: *S, o: Ir.Operand, ty: Type) Error!void {
         const src = s.memOf(o) orelse return;
         const img = Mem.frame(.c_scratch, 0);
-        switch (Abi.cRet(ty, s.in.layouts)) {
+        switch (Abi.cRet(s.in.facts.c, ty, s.in.layouts)) {
             .sret => {
                 const buf = try s.temp(.gpr);
                 try s.emit(.{ .load = .{ .rt = buf, .mem = Mem.frame(.sret_save, 0) } });
@@ -846,12 +849,12 @@ const S = struct {
             },
             .regs => |n| {
                 try s.packC(ty, src, img);
-                for (0..n) |k| try s.emit(.{ .load = .{ .rt = Reg.gp(@intCast(k)), .mem = at(img, @as(u32, @intCast(k)) * 8) } });
+                for (0..n) |k| try s.emit(.{ .load = .{ .rt = abi.gpr_rets[k], .mem = at(img, @as(u32, @intCast(k)) * 8) } });
             },
             .hfa => |h| {
                 try s.packC(ty, src, img);
                 const elem: u32 = if (h.single) 4 else 8;
-                for (0..h.count) |k| try s.emit(.{ .load = .{ .rt = Reg.fp(@intCast(k)), .mem = at(img, @as(u32, @intCast(k)) * elem), .size = if (h.single) .b4 else .b8 } });
+                for (0..h.count) |k| try s.emit(.{ .load = .{ .rt = abi.fpr_rets[k], .mem = at(img, @as(u32, @intCast(k)) * elem), .size = if (h.single) .b4 else .b8 } });
             },
         }
     }
@@ -860,9 +863,9 @@ const S = struct {
     fn panicCall(s: *S, msg: []const u8) Error!void {
         const h = std.hash.Wyhash.hash(Ir.lit_seed, msg);
         try addLiteral(s.gpa, s.literals, h, msg);
-        try s.emit(.{ .sym_addr = .{ .rd = Reg.gp(0), .target = .{ .cstr = h } } });
-        try s.emit(.{ .mov_imm = .{ .rd = Reg.gp(1), .imm = @intCast(msg.len) } });
-        const uses = Mir.regBit(Reg.gp(0)) | Mir.regBit(Reg.gp(1));
+        try s.emit(.{ .sym_addr = .{ .rd = abi.gpr_args[0], .target = .{ .cstr = h } } });
+        try s.emit(.{ .mov_imm = .{ .rd = abi.gpr_args[1], .imm = @intCast(msg.len) } });
+        const uses = Mir.regBit(abi.gpr_args[0]) | Mir.regBit(abi.gpr_args[1]);
         try s.emit(.{ .call = .{ .callee = .{ .func = .{ .kind = .builtin, .name = "panic" } }, .uses = uses, .safepoint = false } });
         try s.emit(.brk);
     }
@@ -873,14 +876,14 @@ const S = struct {
 /// the C scratch region.
 const ArgSrc = union(enum) { operand, image: u32, image_addr: u32 };
 
-fn cRetDefs(ty: Type, layouts: []const types.Layout) Mir.RegSet {
+fn cRetDefs(d: Abi.Desc, ty: Type, layouts: []const types.Layout) Mir.RegSet {
     var set: Mir.RegSet = 0;
-    switch (Abi.cRet(ty, layouts)) {
+    switch (Abi.cRet(d, ty, layouts)) {
         .hfa => |h| for (0..h.count) |k| {
-            set |= Mir.regBit(Reg.fp(@intCast(k)));
+            set |= Mir.regBit(abi.fpr_rets[k]);
         },
         .regs => |n| for (0..n) |k| {
-            set |= Mir.regBit(Reg.gp(@intCast(k)));
+            set |= Mir.regBit(abi.gpr_rets[k]);
         },
         .sret => {},
     }

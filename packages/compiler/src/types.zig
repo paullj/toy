@@ -76,7 +76,7 @@ const Typecheck = @This();
 const LayoutEngine = @import("layout/Engine.zig");
 const const_fold = @import("types/const_fold.zig");
 const const_eval = @import("types/const_eval.zig");
-const FrameLayout = @import("codegen/frame/FrameLayout.zig");
+const Isa = @import("codegen/Isa.zig");
 
 // Re-export the algebra/layout value types so every downstream importer keeps
 // reading `Typecheck.Type`/`.Layout`/`.EnumLayout` etc. unchanged.
@@ -2352,7 +2352,7 @@ pub fn layoutEnv(t: *Typecheck) LayoutEngine.Env {
         .emitEmptyStruct = T.emitEmptyStruct,
         .emitEmptyEnum = T.emitEmptyEnum,
         // A value lives in a frame, so the largest frame codegen addresses bounds it.
-        .max_size = FrameLayout.MAX_FRAME,
+        .max_size = Isa.max_frame,
         .emitTooLarge = T.emitTooLarge,
         .tree = T.castTree,
         .reifyApp = T.reifyApp,
@@ -5108,7 +5108,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
 /// backend already marshals to two consecutive integer registers, so an extern `str`
 /// param spreads to a C `(const char* buf, size_t len)` pair — the only way to hand a
 /// toy string to a raw C call in plain toy source (no address-of-local exists to
-/// decompose it into a `rawptr`). A `float` is an f64 riding the V-register (NSRN)
+/// decompose it into a `rawptr`). A `float` is an f64 riding the FP-register
 /// sequence, matching C `double`, and a `float32` the same sequence as a C `float`. An
 /// extern struct passes in C layout (by value, or by pointer as a `mut` param). Poison
 /// (`.invalid`) is accepted so a prior error does not cascade into a second T0037.
