@@ -14,6 +14,7 @@ pub const LabelKind = model.LabelKind;
 pub const Label = model.Label;
 pub const NoteKind = model.NoteKind;
 pub const Note = model.Note;
+pub const Notes = model.Notes;
 pub const NO_SOURCE = model.NO_SOURCE;
 pub const Diagnostic = model.Diagnostic;
 pub const richFromPod = model.richFromPod;

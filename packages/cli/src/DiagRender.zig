@@ -22,6 +22,8 @@ const Rr = term.render;
 // diagnostic hues) so the status table and the pretty snippet can never drift; every
 // use goes through `Style.styled` (zero bytes at `.none`, so `.none` == plain).
 pub const sty_err: Style.Style = Rr.Theme.plain.style(.err); // bright red 9, bold — the header word hue
+pub const sty_note: Style.Style = Rr.Theme.plain.style(.note);
+pub const Notes = Rr.Diagnostic.Notes;
 pub const sty_ok: Style.Style = .{ .fg = .{ .ansi = 10 } }; // bright green — success, not a severity (no Theme equivalent)
 pub const sty_head: Style.Style = .{ .bold = true };
 pub const sty_faint: Style.Style = Rr.Theme.plain.secondaryStyle(); // dim — matches secondary labels
@@ -82,10 +84,10 @@ fn countVisible(diags: []const toyc.DiagnosticSink.Diagnostic, cfg: SevCfg.Sever
 /// identity); a `null` result means the code was `--ignore`'d, so nothing is written and
 /// `false` is returned (for cap/summary accounting). The POD is never rewritten, so the
 /// cached blob stays rule-independent.
-pub fn renderSinkDiag(out: *Io.Writer, level: Style.ColorLevel, sm: *const Rr.SourceMap, d: toyc.DiagnosticSink.Diagnostic, cfg: SevCfg.SeverityConfig) !bool {
+pub fn renderSinkDiag(out: *Io.Writer, level: Style.ColorLevel, sm: *const Rr.SourceMap, d: toyc.DiagnosticSink.Diagnostic, cfg: SevCfg.SeverityConfig, notes: Notes) !bool {
     const eff = SevCfg.resolve(d.code, d.severity, cfg) orelse return false; // .ignore -> zero bytes
     var sec_buf: [1]Rr.Diagnostic.Label = undefined;
-    const rich = Rr.Diagnostic.richFromPod(d, eff, codes.str(d.code), codes.relatedLabel(d.code), &sec_buf);
+    const rich = Rr.Diagnostic.richFromPod(d, eff, codes.str(d.code), codes.relatedLabel(d.code), &sec_buf, notes);
     try Rr.Renderer.render(rich, sm, out, renderOpts(level));
     return true;
 }
@@ -138,7 +140,7 @@ fn moduleAt(g: *const Graph.Graph, id: u32) *const Graph.Module {
 /// REUSING one SourceMap per scope: the diagnostics are sorted by (scope, offset) so
 /// same-scope diagnostics are contiguous — we build a map per scope and keep it while
 /// the scope holds. Scope `NO_SCOPE` (single-file) picks the entry module.
-pub fn renderScopedDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, g: *const Graph.Graph, diags: []const toyc.DiagnosticSink.Diagnostic, cfg: SevCfg.SeverityConfig) !void {
+pub fn renderScopedDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, g: *const Graph.Graph, diags: []const toyc.DiagnosticSink.Diagnostic, cfg: SevCfg.SeverityConfig, notes: Notes) !void {
     // Apply the severity config before the cap so "... and N more" excludes --ignore'd
     // diagnostics; the passed-in `diags` slice is NEVER truncated (render-only).
     const visible = countVisible(diags, cfg);
@@ -150,7 +152,7 @@ pub fn renderScopedDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.C
         if (drawn == DIAG_CAP) break;
         const m = moduleAt(g, d.scope); // NO_SCOPE / out-of-range -> entry
         const sm = try cache.get(gpa, d.scope, m.displayName(), m.source);
-        _ = try renderSinkDiag(out, level, sm, d, cfg);
+        _ = try renderSinkDiag(out, level, sm, d, cfg, notes);
         drawn += 1;
     }
     try renderCapSummary(out, level, visible, drawn);
@@ -171,6 +173,7 @@ pub fn renderFileDiags(
     source: []const u8,
     diags: []const toyc.DiagnosticSink.Diagnostic,
     cfg: SevCfg.SeverityConfig,
+    notes: Notes,
 ) !void {
     if (diags.len == 0) return;
     const visible = countVisible(diags, cfg);
@@ -179,7 +182,7 @@ pub fn renderFileDiags(
     var drawn: usize = 0;
     for (diags) |d| {
         if (drawn == DIAG_CAP) break;
-        if (try renderSinkDiag(out, level, &sm, d, cfg)) drawn += 1; // false == --ignore'd
+        if (try renderSinkDiag(out, level, &sm, d, cfg, notes)) drawn += 1; // false == --ignore'd
     }
     try renderCapSummary(out, level, visible, drawn);
 }
@@ -195,7 +198,7 @@ pub fn renderGraphError(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.Co
         const m = moduleAt(g, e.module orelse g.entry_index);
         var sm = try Rr.SourceMap.init(gpa, m.displayName(), m.source);
         defer sm.deinit(gpa);
-        for (e.parse_diags) |d| _ = try renderSinkDiag(out, level, &sm, d, cfg);
+        for (e.parse_diags) |d| _ = try renderSinkDiag(out, level, &sm, d, cfg, .{});
         return;
     }
     const name = if (e.module) |m| moduleAt(g, m).displayName() else if (g.modules.len > 0) g.entry().displayName() else "<entry>";

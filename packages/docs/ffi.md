@@ -30,8 +30,8 @@ fn main() -> int {
   trailing `...` declares a C variadic function (see [Varargs](#varargs)).
 - An `extern "lib" { .. }` block declares several functions of one library, one per
   line, and links that library (see [Libraries](#libraries)). A block without a name,
-  `extern { .. }`, and a bare `extern fn` both bind to libSystem, which holds libc and
-  libm.
+  `extern { .. }`, and a bare `extern fn` both bind to the system C library, which
+  holds libc and libm (on macOS, libSystem).
 - An extern follows the `pub` rules of any fn: without `pub` it is private to its
   module, and `pub extern fn` or a `pub fn` inside a block exports it to importers,
   qualified (`c.labs`) or selected (`import c.{labs}`). `pub` goes on each function
@@ -316,9 +316,10 @@ pub fn put(c: int32) {
 
 ## Libraries
 
-Each library a program names becomes one `LC_LOAD_DYLIB` in the binary, and each C
-function binds to the library of its block, so dyld looks it up there (a two-level
-namespace). libSystem is always loaded first.
+Each library a program names is loaded by the binary as a shared library, and each C
+function binds to the library of its block, so the loader looks it up there. The
+system C library is always loaded first. On macOS each library is one `LC_LOAD_DYLIB`,
+the system C library is libSystem, and the binding is dyld's two-level namespace.
 
 ```toy
 extern "sqlite3" {
@@ -336,16 +337,18 @@ fn main() -> int {
 ```
 
 ```
-toy build main.toy -L path/to/lib     # finds path/to/lib/libtoyffi.dylib
+toy build main.toy -L path/to/lib     # finds path/to/lib/libtoyffi.dylib on macOS
 toy run main.toy -L path/to/lib -l z  # also loads libz
 ```
 
-**Finding a library.** A name such as `"toyffi"` or `-l toyffi` is looked up as
-`libtoyffi.dylib` in each `-L` folder in order, then in `/usr/local/lib` and
-`/usr/lib`, then in the dyld shared cache, where macOS keeps its system libraries
-(`z`, `sqlite3`, `curl`, ...) with no file on disk. A name that contains a `/` or ends
-in `.dylib` is a path, used as given, relative to the working directory. `"c"`, `"m"`,
-`"pthread"`, `"dl"` and `"System"` name libSystem itself and add nothing. The same
+**Finding a library.** A name such as `"toyffi"` or `-l toyffi` is looked up as the
+shared library `libtoyffi` in each `-L` folder in order, then in `/usr/local/lib` and
+`/usr/lib`, then in the system library cache. On macOS a shared library is
+`libtoyffi.dylib`, and the system library cache is the dyld shared cache, where macOS
+keeps its system libraries (`z`, `sqlite3`, `curl`, ...) with no file on disk. A name
+that contains a `/` or ends in the shared library extension is a path, used as given,
+relative to the working directory. `"c"`, `"m"`, `"pthread"`, `"dl"` and `"System"`
+name the system C library itself and add nothing. The same
 library named twice, by blocks in several modules or by `-l`, is loaded once. A block
 with no functions binds nothing, so it links nothing; use `-l` to load a library
 without declaring a function of it.
@@ -353,23 +356,26 @@ without declaring a function of it.
 **`-l` and `-L`.** `build`, `run` and `check` take both, repeatable, attached or not
 (`-lz`, `-L lib`). `-l name` loads a library even when no block names it; a function
 still binds to a library only through an `extern "name"` block, and a bare `extern fn`
-always binds to libSystem. `check` resolves the libraries as `build` does, so it
+always binds to the system C library. `check` resolves the libraries as `build` does, so it
 reports the same errors. A `-L` that is not a folder is a usage error.
 
 **Errors.** Each is reported once, at the block's library string (at the extern for
-R0018 and R0019), or for a `-l` as a usage error (exit 2) naming the flag:
+R0018 and R0019), or for a `-l` as a usage error (exit 2) naming the flag. The messages
+use the same words on every target. Where one names the system C library, a shared
+library or the system library cache, a note under it names the real file for the target
+(on macOS: libSystem, `lib<name>.dylib` and the dyld shared cache):
 
 | code | when |
 |---|---|
 | R0015 | the name is a static archive or object (`.a`, `.o`), or only `lib<name>.a` exists |
-| R0016 | no `lib<name>.dylib` in any searched folder; the error lists them |
-| R0017 | the file is not an arm64 Mach-O dynamic library |
-| R0018 | one C symbol is bound to two different libraries, or a block binds one the toy runtime or std imports from libSystem |
-| R0019 | the library does not export the extern's C symbol (a bare `extern fn` is checked against libSystem); reported at the extern, and only for an extern the program calls outside an untaken `when` arm |
+| R0016 | no shared library `lib<name>` in any searched folder; the error lists them |
+| R0017 | the file is not a shared library the target loads (on macOS, an arm64 Mach-O dylib) |
+| R0018 | one C symbol is bound to two different libraries, or a block binds one the toy runtime or std imports from the system C library |
+| R0019 | the library does not export the extern's C symbol (a bare `extern fn` is checked against the system C library); reported at the extern, and only for an extern the program calls outside an untaken `when` arm |
 
 Static linking (`.a`, `.o`) is not supported; build the library with `cc -shared`.
 
-**Where dyld finds it at run time.** The binary records each library by its own
+**Where dyld finds it at run time (macOS).** The binary records each library by its own
 install name (its `LC_ID_DYLIB`), as the system linker does:
 
 - An absolute install name (`/usr/lib/libz.1.dylib`, `/opt/homebrew/opt/x/lib/libx.dylib`)

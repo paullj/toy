@@ -55,8 +55,8 @@ pub const Code = enum(u16) {
     R0013, // core-import-private (a user module imports a bundled `core/` module)
     R0014, // ambiguous-module (an import path matches more than one file, or a file is imported under two paths)
     R0015, // static-library (an `extern "lib"` block or `-l` names a .a/.o, or finds only lib<name>.a)
-    R0016, // library-not-found (no lib<name>.dylib in the -L folders, the default folders or the shared cache)
-    R0017, // not-a-dylib (the library file is not an arm64 Mach-O dynamic library)
+    R0016, // library-not-found (no shared library lib<name> in the -L folders, the default folders or the system library cache)
+    R0017, // not-a-shared-library (the library file is not a shared library the target loads)
     R0018, // extern-library-conflict (one C symbol is bound to two different libraries)
     R0019, // extern-symbol-not-found (the extern's library does not export its C symbol)
     R0020, // target-import-private (a module outside core/ imports core/target)
@@ -222,7 +222,7 @@ pub const table = [_]Entry{
     .{ .code = .R0014, .str = "R0014", .slug = "ambiguous-module" },
     .{ .code = .R0015, .str = "R0015", .slug = "static-library" },
     .{ .code = .R0016, .str = "R0016", .slug = "library-not-found" },
-    .{ .code = .R0017, .str = "R0017", .slug = "not-a-dylib" },
+    .{ .code = .R0017, .str = "R0017", .slug = "not-a-shared-library" },
     .{ .code = .R0018, .str = "R0018", .slug = "extern-library-conflict" },
     .{ .code = .R0019, .str = "R0019", .slug = "extern-symbol-not-found" },
     .{ .code = .R0020, .str = "R0020", .slug = "target-import-private" },

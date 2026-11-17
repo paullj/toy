@@ -506,7 +506,7 @@ fn checkRootDirs(io: Io, usage: Usage, st: *const State) !?u8 {
     if (st.root) |r| if (!isDir(io, r)) return try cliValueError(usage, .{ .kind = .bad_value, .arg = "--root", .got = r, .expected = "a directory" });
     for (st.include.items) |r| if (!isDir(io, r)) return try cliValueError(usage, .{ .kind = .bad_value, .arg = "-I", .got = r, .expected = "a directory" });
     for (st.lib_dirs.items) |r| if (!isDir(io, r)) return try cliValueError(usage, .{ .kind = .bad_value, .arg = "-L", .got = r, .expected = "a directory" });
-    for (st.libs.items) |l| if (l.len == 0) return try cliValueError(usage, .{ .kind = .bad_value, .arg = "-l", .got = l, .expected = "a library name or .dylib path" });
+    for (st.libs.items) |l| if (l.len == 0) return try cliValueError(usage, .{ .kind = .bad_value, .arg = "-l", .got = l, .expected = "a library name or path" });
     return null;
 }
 
@@ -989,8 +989,8 @@ fn emitExecutable(
     var libs = try toyc.Libraries.collect(gpa, io, &graph.?, link, toyc.LibResolver.of(target) orelse return error.UnsupportedTarget);
     defer libs.deinit();
     if (try reportLibraryUsage(usage, &libs)) |code| return code;
-    if (try reportLinkDiags(gpa, out, level, &graph.?, libs.diags, sev)) |code| return code;
-    if (try reportLinkDiags(gpa, out, level, &graph.?, try libs.unexportedCalls(io, &graph.?, &tc.?), sev)) |code| return code;
+    if (try reportLinkDiags(gpa, out, level, &graph.?, &libs, libs.diags, sev)) |code| return code;
+    if (try reportLinkDiags(gpa, out, level, &graph.?, &libs, try libs.unexportedCalls(io, &graph.?, &tc.?), sev)) |code| return code;
 
     // Render any surviving warnings + a summary, then build the binary. No warning
     // survives to here under `deny_warnings` (it would have promoted to an error and
@@ -1006,7 +1006,7 @@ fn emitExecutable(
             lp.diags,
         };
         for (stages) |s| {
-            try DiagRender.renderScopedDiags(gpa, out, level, g, s, sev);
+            try DiagRender.renderScopedDiags(gpa, out, level, g, s, sev, .{});
             const c = Check.tallyGraph(s, sev);
             counts.errors += c.errors;
             counts.warnings += c.warnings;
@@ -1100,8 +1100,8 @@ fn runPipeline(out: *Io.Writer, gpa: std.mem.Allocator, level: Style.ColorLevel,
                     try DiagRender.renderGraphError(gpa, out, level, g, g.err.?, cfg);
                     code = graphErrorExit(g.err.?);
                 },
-                .resolve => try DiagRender.renderScopedDiags(gpa, out, level, g, orch.res.*.?.diags, cfg),
-                .typecheck => try DiagRender.renderScopedDiags(gpa, out, level, g, orch.tc.*.?.diags, cfg),
+                .resolve => try DiagRender.renderScopedDiags(gpa, out, level, g, orch.res.*.?.diags, cfg, .{}),
+                .typecheck => try DiagRender.renderScopedDiags(gpa, out, level, g, orch.tc.*.?.diags, cfg, .{}),
                 .codegen => switch (orch.tail) {
                     .lower => switch (orch.lowered.*.?) {
                         .err => |ee| try DiagRender.renderGraphEmit(gpa, out, level, g, ee),
@@ -1274,9 +1274,9 @@ fn argErr(usage: Usage, message: []const u8) noreturn {
 /// Report what stops the program's libraries from linking: a bad `extern "name"` block
 /// is a diagnostic at the block, an import its library does not export one at the
 /// extern. Null when there are none.
-fn reportLinkDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, g: *const Graph.Graph, diags: []const toyc.DiagnosticSink.Diagnostic, sev: SevCfg.SeverityConfig) !?u8 {
+fn reportLinkDiags(gpa: std.mem.Allocator, out: *Io.Writer, level: Style.ColorLevel, g: *const Graph.Graph, libs: *const toyc.Libraries.Result, diags: []const toyc.DiagnosticSink.Diagnostic, sev: SevCfg.SeverityConfig) !?u8 {
     if (diags.len == 0) return null;
-    try DiagRender.renderScopedDiags(gpa, out, level, g, diags, sev);
+    try DiagRender.renderScopedDiags(gpa, out, level, g, diags, sev, libs.notes());
     const counts = Check.tallyGraph(diags, sev);
     try DiagRender.renderDiagSummary(out, level, counts.errors, counts.warnings);
     try out.flush();
@@ -1288,6 +1288,10 @@ fn reportLibraryUsage(usage: Usage, libs: *const toyc.Libraries.Result) !?u8 {
     for (libs.cli_errors) |e| {
         try sty_err.styled(usage.w, usage.level, "error");
         try usage.w.print("[{s}]: {s}\n", .{ codes.str(e.code).?, e.message });
+        if (e.note) |n| {
+            try DiagRender.sty_note.styled(usage.w, usage.level, "note");
+            try usage.w.print(": {s}\n", .{n});
+        }
     }
     try usage.w.flush();
     return usage_exit;
@@ -1397,7 +1401,7 @@ fn runCheck(
         // error in an IMPORTED module instead falls through to `renderGraphError` (matching
         // `build` — discovery never enters an import past a broken one).
         const parse_in_entry = ge.kind == .parse and (ge.module == null or ge.module == graph.entry_index);
-        if (parse_in_entry) return reportEntryFile(gpa, out, level, graph, ndjson, ge.parse_diags, &.{}, &.{}, sev, exit_zero);
+        if (parse_in_entry) return reportEntryFile(gpa, out, level, graph, ndjson, ge.parse_diags, &.{}, &.{}, .{}, sev, exit_zero);
         try DiagRender.renderGraphError(gpa, out, level, graph, ge, sev);
         try out.flush();
         if (exit_zero) return 0;
@@ -1451,6 +1455,7 @@ fn runCheck(
     @memcpy(type_diags[0..checked.len], checked);
     @memcpy(type_diags[checked.len..][0..lib_diags.len], lib_diags);
     @memcpy(type_diags[checked.len + lib_diags.len ..], unexported);
+    const lib_notes: DiagRender.Notes = if (libs) |*l| l.notes() else .{};
 
     // SINGLE-MODULE (no imports discovered): render against the entry's ON-DISK `file`,
     // not its module `path` (a bare stem like `fix_bad` vs `/tmp/fix_bad.toy`), so the
@@ -1458,7 +1463,7 @@ fn runCheck(
     // routed above, so a single-module graph carries resolve (incl. warnings) + type
     // diagnostics. Both wire forms share `reportEntryFile` with the tainted-entry path.
     if (graph.modules.len == 1)
-        return reportEntryFile(gpa, out, level, graph, ndjson, &.{}, res.diags, type_diags, sev, exit_zero);
+        return reportEntryFile(gpa, out, level, graph, ndjson, &.{}, res.diags, type_diags, lib_notes, sev, exit_zero);
 
     // Multi-module: combine resolve + type diagnostics into ONE slice (single cap + single
     // tally). Each stage sorts its own half, but the resolve-then-type concatenation is
@@ -1474,13 +1479,13 @@ fn runCheck(
         // NDJSON over the graph's flat slice: each diagnostic's `file` is its OWNING
         // module path (not always the entry), so an imported module's error is attributed
         // correctly. Schema byte-identical to the single-file form.
-        const counts = try Check.emitNdjsonGraph(out, gpa, graph, combined, sev);
+        const counts = try Check.emitNdjsonGraph(out, gpa, graph, combined, sev, lib_notes);
         try out.flush();
         return Decide.checkExit(counts, exit_zero);
     }
     // Human form: pretty per-module snippets (reusing the multi-module renderer, which
     // builds ONE SourceMap per scope) + a program-wide `N error(s), M warning(s)` summary.
-    try DiagRender.renderScopedDiags(gpa, out, level, graph, combined, sev);
+    try DiagRender.renderScopedDiags(gpa, out, level, graph, combined, sev, lib_notes);
     const counts = Check.tallyGraph(combined, sev);
     try DiagRender.renderDiagSummary(out, level, counts.errors, counts.warnings);
     try out.flush();
@@ -1502,6 +1507,7 @@ fn reportEntryFile(
     parse_diags: []const toyc.DiagnosticSink.Diagnostic,
     resolve_diags: []const toyc.DiagnosticSink.Diagnostic,
     type_diags: []const toyc.DiagnosticSink.Diagnostic,
+    notes: DiagRender.Notes,
     sev: SevCfg.SeverityConfig,
     exit_zero: bool,
 ) !u8 {
@@ -1521,12 +1527,12 @@ fn reportEntryFile(
     if (ndjson) {
         // The sorted union attributed to the entry (scope -> entry file); schema matches
         // the multi-module form (`emitNdjsonGraph` is shared).
-        const counts = try Check.emitNdjsonGraph(out, gpa, g, combined, sev);
+        const counts = try Check.emitNdjsonGraph(out, gpa, g, combined, sev, notes);
         try out.flush();
         return Decide.checkExit(counts, exit_zero);
     }
     const e = g.entry();
-    try DiagRender.renderFileDiags(gpa, out, level, e.file, e.source, combined, sev);
+    try DiagRender.renderFileDiags(gpa, out, level, e.file, e.source, combined, sev, notes);
     const counts = Check.tallyGraph(combined, sev);
     try DiagRender.renderDiagSummary(out, level, counts.errors, counts.warnings);
     try out.flush();

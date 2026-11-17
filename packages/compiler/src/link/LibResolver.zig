@@ -43,16 +43,25 @@ pub const Found = union(enum) {
 
 pub const FindError = error{OutOfMemory};
 
+/// What every library diagnostic calls the system libraries every program loads. The
+/// words are the same on every target (#60 D12); a note on each diagnostic says what
+/// they are on one (`Resolver.systemNote` and the like).
+pub const system_c_library = "the system C library";
+/// What a library diagnostic calls `Resolver.cache`.
+pub const system_cache = "the system library cache";
+
 /// One object format's reader.
 pub const Resolver = struct {
-    /// What a diagnostic calls the system libraries every program loads.
+    /// The OS the reader's binaries run on, as the note names it.
+    os_name: []const u8,
+    /// The system C library's real name on that OS, for the note.
     system_name: []const u8,
     /// A shared library's file name ending, as in `lib<name><suffix>`.
     suffix: []const u8,
     /// Searched after every `-L` folder, as the system linker does.
     default_dirs: []const []const u8,
-    /// Where a search looks after the folders, as a diagnostic names it; null for nowhere.
-    fallback: ?[]const u8,
+    /// Where a search looks after the folders, by its real name; null for nowhere.
+    cache: ?[]const u8,
     /// How many libraries beyond the system libraries one binary can load.
     max_libraries: Image.LibraryIndex,
     /// The system libraries' exports.
@@ -64,6 +73,24 @@ pub const Resolver = struct {
     /// Whether `exports` holds the C symbol `sym`. True when the reader cannot tell, so
     /// the check never rejects a symbol the loader would bind.
     has: *const fn (arena: std.mem.Allocator, io: Io, cache: *Cache, exports: Exports, sym: []const u8) FindError!bool,
+
+    /// The note on a diagnostic that says "the system C library".
+    pub fn systemNote(r: *const Resolver, a: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "on {s} " ++ system_c_library ++ " is {s}", .{ r.os_name, r.system_name });
+    }
+
+    /// The note on a diagnostic that says "shared library".
+    pub fn sharedNote(r: *const Resolver, a: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "on {s} a shared library is lib<name>{s}", .{ r.os_name, r.suffix });
+    }
+
+    /// The note on a failed search for `name`: the file it looked for, which shows a
+    /// name written with its `lib` prefix, and what `system_cache` is.
+    pub fn searchNote(r: *const Resolver, a: std.mem.Allocator, name: []const u8) ![]const u8 {
+        const head = try std.fmt.allocPrint(a, "on {s} toy looked for lib{s}{s}", .{ r.os_name, name, r.suffix });
+        const c = r.cache orelse return head;
+        return std.fmt.allocPrint(a, "{s}, and " ++ system_cache ++ " is {s}", .{ head, c });
+    }
 };
 
 /// The reader for `target`'s libraries, or null when toy cannot read them yet.
@@ -107,4 +134,35 @@ test "the target picks its reader: Mach-O for macOS, none yet for ELF" {
     try testing.expect(of(.aarch64_macos) != null);
     try testing.expect(of(.aarch64_linux) == null);
     try testing.expect(of(.x86_64_linux) == null);
+}
+
+fn stubResolver(cache: ?[]const u8) Resolver {
+    const S = struct {
+        const none: u8 = 0;
+        fn find(_: std.mem.Allocator, _: Io, _: []const u8, _: []const []const u8) FindError!Found {
+            return .not_found;
+        }
+        fn isPath(_: []const u8) bool {
+            return false;
+        }
+        fn has(_: std.mem.Allocator, _: Io, _: *Cache, _: Exports, _: []const u8) FindError!bool {
+            return true;
+        }
+    };
+    return .{ .os_name = "Linux", .system_name = "libc.so.6", .suffix = ".so", .default_dirs = &.{}, .cache = cache, .max_libraries = 1, .system = &S.none, .find = S.find, .isPath = S.isPath, .has = S.has };
+}
+
+test "the notes name the target's real files, with and without a system library cache" {
+    var pa: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer pa.deinit();
+    const a = pa.allocator();
+    const bare = stubResolver(null);
+    try testing.expectEqualStrings("on Linux the system C library is libc.so.6", try bare.systemNote(a));
+    try testing.expectEqualStrings("on Linux a shared library is lib<name>.so", try bare.sharedNote(a));
+    try testing.expectEqualStrings("on Linux toy looked for liblibz.so", try bare.searchNote(a, "libz"));
+    const cached = stubResolver("ld.so.cache");
+    try testing.expectEqualStrings("on Linux toy looked for libz.so, and the system library cache is ld.so.cache", try cached.searchNote(a, "z"));
+    const macho = of(.aarch64_macos).?;
+    try testing.expectEqualStrings("on macOS the system C library is libSystem", try macho.systemNote(a));
+    try testing.expectEqualStrings("on macOS toy looked for libtoy-nope.dylib, and the system library cache is the dyld shared cache", try macho.searchNote(a, "toy-nope"));
 }

@@ -25,10 +25,11 @@ pub const Found = LibResolver.Found;
 pub const Cache = LibResolver.Cache;
 
 pub const resolver: LibResolver.Resolver = .{
+    .os_name = "macOS",
     .system_name = "libSystem",
     .suffix = ".dylib",
     .default_dirs = &default_dirs,
-    .fallback = "the dyld shared cache",
+    .cache = "the dyld shared cache",
     .max_libraries = MachO.max_libraries,
     .system = &Exports.libsystem,
     .find = find,
@@ -358,7 +359,7 @@ fn readThin(bytes: []const u8) Read {
     const not_macho = "it is not a Mach-O file";
     if (bytes.len < 32 or std.mem.readInt(u32, bytes[0..4], .little) != MH_MAGIC_64) return .{ .bad = not_macho };
     if (std.mem.readInt(u32, bytes[4..8], .little) != CPU_TYPE_ARM64) return .{ .bad = "it is not built for arm64" };
-    if (std.mem.readInt(u32, bytes[12..16], .little) != MH_DYLIB) return .{ .bad = "it is not a dynamic library" };
+    if (std.mem.readInt(u32, bytes[12..16], .little) != MH_DYLIB) return .{ .bad = "it is not a shared library" };
     const sizeofcmds = std.mem.readInt(u32, bytes[20..24], .little);
     const cmds = bytes[32..][0..@min(sizeofcmds, bytes.len - 32)];
     var id: ?Id = null;
@@ -540,7 +541,7 @@ test "readId finds the arm64 slice of a universal file" {
 
 test "readId explains a file that is not an arm64 dylib" {
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("it is not a dynamic library", readId(fakeDylib(&buf, "x", 0x2)).bad);
+    try testing.expectEqualStrings("it is not a shared library", readId(fakeDylib(&buf, "x", 0x2)).bad);
     try testing.expectEqualStrings("it is not a Mach-O file", readId("!<arch>\nfoo.o").bad);
     const t = fakeDylib(&buf, "x", MH_DYLIB);
     std.mem.writeInt(u32, t[4..8], 0x01000007, .little);
@@ -594,7 +595,7 @@ test "find searches -L folders for lib<name>.dylib and reports a folder that hol
     try testing.expectEqualStrings("@rpath/libtoyq.dylib", q.library.name);
     try testing.expectEqualStrings(dir, q.search_path.?);
     try testing.expect(std.mem.endsWith(u8, (try find(a, io, "toyarc", &.{dir})).static, "/libtoyarc.a"));
-    try testing.expectEqualStrings("it is not a dynamic library", (try find(a, io, "toyexe", &.{dir})).unusable.why);
+    try testing.expectEqualStrings("it is not a shared library", (try find(a, io, "toyexe", &.{dir})).unusable.why);
     try testing.expect(try find(a, io, "toy-no-such-lib", &.{dir}) == .not_found);
 }
 

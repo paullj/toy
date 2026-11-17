@@ -10,7 +10,7 @@
 
 const std = @import("std");
 // The sink POD, imported from its home file (not via `Sink.zig`) so this leaf never
-// pulls in the sink's ArrayList machinery. Only used to pin `NO_SOURCE == NO_SCOPE`.
+// pulls in the sink's ArrayList machinery.
 const sink = @import("Diagnostic.zig");
 
 /// Diagnostic severity, most-to-least severe. Append new severities at the end so
@@ -56,6 +56,23 @@ pub const Note = struct {
     message: []const u8,
 };
 
+/// Footer notes some sink diagnostics carry. They live beside the diagnostics because
+/// the POD has no room for a slice beyond `message` (see `sink.Diagnostic`). Keyed by
+/// the message's address: a report copies and re-sorts the POD, but never its message
+/// bytes, and every message with a note is its own allocation.
+pub const Notes = struct {
+    by_message: ?*const Map = null,
+
+    pub const Map = std.AutoHashMapUnmanaged(usize, Note);
+
+    /// `d`'s notes; empty when it has none.
+    pub fn of(n: Notes, d: sink.Diagnostic) []const Note {
+        const map = n.by_message orelse return &.{};
+        const note = map.getPtr(@intFromPtr(d.message.ptr)) orelse return &.{};
+        return note[0..1];
+    }
+};
+
 /// The "untagged" source id: a single-source diagnostic carries no source id.
 /// Pinned equal to `sink.NO_SCOPE` by the comptime assert below, so a single-file
 /// `NO_SCOPE` lands on `NO_SOURCE` with no translation and no branch.
@@ -85,7 +102,8 @@ pub const Diagnostic = struct {
 /// `related_label` over `d.relatedSpan()` in the same scope. `sec_buf` backs that
 /// borrowed label, so it must outlive the render. Takes `code` and `related_label` as
 /// params rather than calling `codes.zig` to keep this leaf's one-way import order.
-pub fn richFromPod(d: sink.Diagnostic, eff: Severity, code: ?[]const u8, related_label: []const u8, sec_buf: *[1]Label) Diagnostic {
+/// `notes` supplies the footer notes.
+pub fn richFromPod(d: sink.Diagnostic, eff: Severity, code: ?[]const u8, related_label: []const u8, sec_buf: *[1]Label, notes: Notes) Diagnostic {
     const secondary: []const Label = if (d.relatedSpan()) |rs| blk: {
         sec_buf[0] = .{
             .kind = .secondary,
@@ -105,6 +123,7 @@ pub fn richFromPod(d: sink.Diagnostic, eff: Severity, code: ?[]const u8, related
             .source = d.scope,
         },
         .secondary = secondary,
+        .notes = notes.of(d),
         .code = code,
         .scope = d.scope,
     };
@@ -168,6 +187,23 @@ test "a secondary Label constructs with its mandatory kind" {
     const l = Label{ .kind = .secondary, .span = .{ .start = 1, .end = 2 }, .message = "ctx", .source = 5 };
     try testing.expectEqual(LabelKind.secondary, l.kind);
     try testing.expectEqual(@as(u32, 5), l.source);
+}
+
+test "Notes finds a diagnostic's note by its message, through a copy of the POD" {
+    const msg = try testing.allocator.dupe(u8, "library 'q' not found");
+    defer testing.allocator.free(msg);
+    var map: Notes.Map = .empty;
+    defer map.deinit(testing.allocator);
+    try map.put(testing.allocator, @intFromPtr(msg.ptr), .{ .kind = .note, .message = "on X toy looked for libq.so" });
+    const notes: Notes = .{ .by_message = &map };
+    const d: sink.Diagnostic = .{ .byte_offset = 0, .end = 1, .message = msg };
+    const copy = d;
+    var sec_buf: [1]Label = undefined;
+    const rich = richFromPod(copy, .err, "R0016", "", &sec_buf, notes);
+    try testing.expectEqual(@as(usize, 1), rich.notes.len);
+    try testing.expectEqualStrings("on X toy looked for libq.so", rich.notes[0].message);
+    try testing.expectEqual(@as(usize, 0), notes.of(.{ .byte_offset = 0, .end = 1, .message = "library 'q' not found" }).len);
+    try testing.expectEqual(@as(usize, 0), (Notes{}).of(d).len);
 }
 
 test "NO_SOURCE is pinned to the sink NO_SCOPE" {

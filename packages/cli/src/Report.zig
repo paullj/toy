@@ -200,7 +200,7 @@ fn renderCapped(out: *Io.Writer, level: Style.ColorLevel, sm: *const Rr.SourceMa
     var drawn: usize = 0;
     for (diags) |d| {
         if (drawn == DiagRender.DIAG_CAP) break;
-        if (try DiagRender.renderSinkDiag(out, level, sm, d, cfg)) drawn += 1; // false == --ignore'd
+        if (try DiagRender.renderSinkDiag(out, level, sm, d, cfg, .{})) drawn += 1; // false == --ignore'd
     }
     try DiagRender.renderCapSummary(out, level, visible, drawn);
 }
