@@ -55,7 +55,7 @@ pub fn CodegenMir(comptime I: type) type {
                     return FrameLayout.fits(gpa, func, comptime I.abi.facts(c_abi), layouts, enum_layouts);
                 }
             };
-            return .{ .c_abi = c_abi, .lower = For.lower, .fits = For.fits, .relocs = I.relocs, .hand_builtins = &I.hand_builtins, .inst_count = I.instCount };
+            return .{ .c_abi = c_abi, .lower = For.lower, .fits = For.fits, .relocs = I.relocs, .inst_count = I.instCount };
         }
 
         /// Lower `func` to machine code. A fn the backend cannot lower records one diagnostic in

@@ -11,6 +11,8 @@
 #   ucontext_t        48 the mcontext pointer
 #   mcontext          248 fp, 256 lr, 264 sp, 272 pc
 
+import core/rt/frames
+
 extern struct SigAction { handler: int, mask: int32, flags: int32 }
 extern struct AltStack { base: int, size: int, flags: int }
 
@@ -65,14 +67,11 @@ fn on_fault(sig: int32, info: int, uc: int) {
         unsafe { sigaction(sig, dfl, old) }
         return
     }
-    # `panic` walks the frame chain from its caller. Pointing this frame's record at the
-    # faulting frame makes the backtrace go on from the fn that overflowed rather than
-    # into the signal trampoline. The return address is one past the faulting pc, as if
-    # that instruction had been a call. The trace still opens with this fn, which panic's
-    # own record names.
-    record := frame_address()
-    set_word(record, word(mc + 248))
-    set_word(record + 8, word(mc + 272) + 4)
+    # `panic` walks the frames from its caller. Redirecting this frame to the faulting
+    # one, as if the faulting instruction had been a call, makes the backtrace go on from
+    # the fn that overflowed rather than into the signal trampoline. The trace still opens
+    # with this fn, which panic's own record names.
+    frames.redirect(frame_address(), word(mc + 248), word(mc + 272))
     panic("stack overflow")
 }
 

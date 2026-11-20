@@ -1,5 +1,5 @@
 //! The AArch64 ISA module (the interface is `codegen/Isa.zig`): the selector, the
-//! encoder, the relocation kinds and the hand-written builtins, plus what the
+//! encoder and the relocation kinds, plus what the
 //! target-independent allocator needs: the registers it may hand out, the scratch
 //! register its move resolver uses, and the instructions that move a value between
 //! registers and stack slots.
@@ -7,7 +7,6 @@
 const std = @import("std");
 const Mir = @import("../Mir.zig");
 const Link = @import("../../../link/Link.zig");
-const runtime = @import("../../runtime/runtime.zig");
 const Isa = @import("../../Isa.zig");
 const Target = @import("../../../Target.zig");
 pub const Inst = @import("Inst.zig");
@@ -16,8 +15,6 @@ pub const Emit = @import("Emit.zig");
 pub const Peephole = @import("Peephole.zig");
 pub const abi = @import("abi.zig");
 const reloc = @import("reloc.zig");
-const panic = @import("runtime/panic.zig");
-const str = @import("runtime/str.zig");
 
 pub const relocs: Link.Patcher = reloc.patcher;
 
@@ -26,25 +23,6 @@ pub const c_abis = [_]Target.CAbi{ .aapcs64_apple, .aapcs64 };
 /// Every AArch64 instruction is one 4-byte word.
 pub fn instCount(code: []const u8) usize {
     return code.len / 4;
-}
-
-/// By name, so a reorder of `runtime.hand_builtins` cannot pair a row with another body.
-pub const hand_builtins = blk: {
-    var out: [runtime.hand_builtins.len]Isa.BuiltinFn = undefined;
-    for (runtime.hand_builtins, &out) |hb, *f| f.* = lowerFor(hb.name);
-    break :blk out;
-};
-
-fn lowerFor(comptime name: []const u8) Isa.BuiltinFn {
-    const pairs = .{
-        .{ "panic", panic.lowerPanic },
-        .{ "text_base", panic.lowerTextBase },
-        .{ "__int_to_str", str.lowerIntToStr },
-        .{ "__str_concat", str.lowerStrConcat },
-        .{ "__uint_to_str", str.lowerUintToStr },
-    };
-    inline for (pairs) |p| if (std.mem.eql(u8, p[0], name)) return p[1];
-    @compileError("no aarch64 body for hand builtin " ++ name);
 }
 
 const Reg = Mir.Reg;
@@ -267,7 +245,7 @@ test "mir: a reference live across a safepoint gets a stack-map row naming its s
 
 test "mir: a reference param keeps its store, the collector's root, and is not reloaded" {
     const gpa = testing.allocator;
-    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "text_base" });
+    var func = try refAcrossCallFn(gpa, .{ .kind = .user_fn, .name = "core/rt/str.str_eq" });
     defer func.deinit(gpa);
     var fc = try lowerOk(gpa, &func);
     defer fc.deinit(gpa);
@@ -344,18 +322,9 @@ test "mir: a shift by a constant is one immediate shift, or the 0 or sign fill p
     }
 }
 
-test "mir: a call to a core/rt fn is no safepoint and gets no stack-map row" {
+test "mir: a call to a core/rt fn is no safepoint and keeps the reference in a register" {
     const gpa = testing.allocator;
     var func = try refAcrossCallFn(gpa, .{ .kind = .user_fn, .name = "core/rt/str.str_eq" });
-    defer func.deinit(gpa);
-    var fc = try lowerOk(gpa, &func);
-    defer fc.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), fc.safepoint_maps.len);
-}
-
-test "mir: a call to a builtin that never collects is no safepoint and keeps the reference in a register" {
-    const gpa = testing.allocator;
-    var func = try refAcrossCallFn(gpa, .{ .kind = .builtin, .name = "text_base" });
     defer func.deinit(gpa);
     var fc = try lowerOk(gpa, &func);
     defer fc.deinit(gpa);
@@ -496,73 +465,6 @@ test "mir: a loop closed by a cond_br polls too" {
     try testing.expectEqual(@as(usize, 1), polls);
 }
 
-const StdNames = @import("../../../symbols/StdNames.zig");
-
-test "runtime_calls lists every core/rt fn a body calls, so the linker keeps it" {
-    const gpa = testing.allocator;
-    for (runtime.hand_builtins, hand_builtins) |hb, lower| {
-        var fc = try lower(gpa);
-        defer fc.deinit(gpa);
-        for (fc.relocs) |r| {
-            if (r.kind != reloc.of(.call26) or r.target != .func) continue;
-            const f = StdNames.RuntimeFn.lookup(r.target.func.name) orelse return error.UnknownCallee;
-            if (std.mem.indexOfScalar(StdNames.RuntimeFn, hb.runtime_calls, f) == null) {
-                std.debug.print("{s} calls {s}, missing from its runtime_calls\n", .{ hb.name, f.name() });
-                return error.UnlistedCall;
-            }
-        }
-    }
-}
-
-test "no returning builtin writes a callee-saved register it does not save" {
-    const gpa = testing.allocator;
-    for (runtime.hand_builtins, hand_builtins) |hb, lower| {
-        // panic never returns.
-        if (std.mem.eql(u8, hb.name, "panic")) continue;
-        var fc = try lower(gpa);
-        defer fc.deinit(gpa);
-        const words = std.mem.bytesAsSlice(u32, fc.code);
-        var written: u32 = 0;
-        var saved: u32 = 0;
-        for (words) |w| {
-            const rt = w & 0x1F;
-            // str xN, [sp, #imm] (unsigned offset, base sp): a save of rt.
-            if (w & 0xFFC003E0 == 0xF90003E0) saved |= bitOf(rt);
-            // Any instruction class whose destination field is rt and that writes a GPR:
-            // data processing (immediate and register) and loads.
-            const op0 = (w >> 25) & 0xF;
-            const writes = op0 == 0b1000 or op0 == 0b1001 or op0 == 0b0101 or op0 == 0b1101 or
-                (op0 & 0b0101 == 0b0100 and (w >> 22) & 1 == 1);
-            if (writes) written |= bitOf(rt);
-        }
-        const callee_saved_x: u32 = 0x1FF80000; // x19-x28
-        try testing.expectEqual(@as(u32, 0), written & ~saved & callee_saved_x);
-    }
-}
-
-fn bitOf(r: u32) u32 {
-    return @as(u32, 1) << @intCast(r);
-}
-
-test "libsystem_imports lists every symbol a hand builtin imports" {
-    const gpa = testing.allocator;
-    var seen: [runtime.libsystem_imports.len]bool = @splat(false);
-    for (hand_builtins) |lower| {
-        var fc = try lower(gpa);
-        defer fc.deinit(gpa);
-        for (fc.relocs) |r| if (r.target == .import) {
-            for (runtime.libsystem_imports, 0..) |nm, i| {
-                if (std.mem.eql(u8, nm, r.target.import.name)) {
-                    seen[i] = true;
-                    break;
-                }
-            } else return error.UnlistedImport;
-        };
-    }
-    for (seen) |s| try testing.expect(s);
-    for (runtime.libsystem_imports[1..], 0..) |nm, i| try testing.expect(std.mem.lessThan(u8, runtime.libsystem_imports[i], nm));
-}
-
 test "a hand-built main links to an image that returns 42 (no front-end)" {
     if (@import("builtin").os.tag != .macos or @import("builtin").cpu.arch != .aarch64) return error.SkipZigTest;
 
@@ -621,7 +523,4 @@ test {
     _ = Emit;
     _ = Peephole;
     _ = reloc;
-    _ = panic;
-    _ = str;
-    _ = @import("runtime/emit.zig");
 }

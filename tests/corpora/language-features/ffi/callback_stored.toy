@@ -1,0 +1,32 @@
+# expect: exit 0
+# expect: stdout "42\nmain kept\n"
+# libdir: "@harness"
+# C runs a callback it stored earlier from a call that is passed none. A collection inside
+# the callback still finds what main holds below that call's C frames.
+import std/io
+import std/gc
+import std/vec
+
+extern "toyffi" {
+    fn toyffi_store(cb: fn(int) -> int)
+    fn toyffi_fire(x: int) -> int
+}
+
+fn churn(x: int) -> int {
+    junk: Vec[str] = []
+    for i in 0..64 { junk.push("garbage ".concat(i.to_string())) }
+    gc.collect()
+    x * 2
+}
+
+fn main() -> int {
+    unsafe { toyffi_store(churn) }
+    keep: Vec[str] = []
+    keep.push("main ".concat("kept"))
+    r := unsafe { toyffi_fire(21) }
+    other: Vec[str] = []
+    for i in 0..64 { other.push("reuse ".concat(i.to_string())) }
+    io.println(r)
+    io.println(keep[0])
+    return 0
+}

@@ -284,6 +284,7 @@ pub const AdapterKind = enum(u8) {
     c_fn,
     c_lambda,
     c_assoc,
+    c_call,
 
     /// How a bound adapter's env holds the receiver.
     pub fn recvHold(k: AdapterKind) Hold {
@@ -291,7 +292,7 @@ pub const AdapterKind = enum(u8) {
             .bound_copy => .copy,
             .bound_box => .cell,
             .bound_ref => .param_addr,
-            .fn_value, .assoc_value, .c_fn, .c_lambda, .c_assoc => unreachable,
+            .fn_value, .assoc_value, .c_fn, .c_lambda, .c_assoc, .c_call => unreachable,
         };
     }
 
@@ -310,10 +311,13 @@ pub const AdapterKind = enum(u8) {
 /// address of a `mut` param receiver (as an `int`, so the word is never a root).
 /// `.c_fn`, `.c_assoc` and `.c_lambda` are the C callbacks a capture-free fn passes to an
 /// extern as: C calls them in the C convention, and they call a named fn or an associated
-/// fn directly, or a lambda unit with a null env.
+/// fn directly, or a lambda unit with a null env. `.c_call` is the other side: every call
+/// of an extern that is passed a callback goes through it. Its frame is a toy frame record
+/// right above the C frames, which a callback's adapter links its own record to, so a
+/// stack walk steps over the C frames to it.
 pub const Adapter = struct {
     kind: AdapterKind,
-    /// `.fn_value`, `.c_fn`: the referenced fn's global id. `.bound_*`, `.assoc_value`,
+    /// `.fn_value`, `.c_fn`, `.c_call`: the referenced fn's global id. `.bound_*`, `.assoc_value`,
     /// `.c_assoc`: the method's index. `.c_lambda`: the lambda unit's index.
     key: u32,
     /// Owned.
@@ -327,7 +331,31 @@ pub const Adapter = struct {
     recv: Type = Type.unit,
     /// `.bound_*`: the method takes `mut self`, so it is passed the receiver's address.
     mut_self: bool = false,
+    /// `.c_call`: the args passed to C as a pointer (`Ir.Call.by_ptr`); the adapter takes
+    /// each as that address, an `int`.
+    by_ptr: u64 = 0,
+    /// `.c_call`: the extern's global id, its declared params (borrowed) and whether it
+    /// is variadic, when `sig.params` goes on with the varargs' types (owned).
+    ext: u32 = 0,
+    c_params: []const Type = &.{},
+    variadic: bool = false,
+
+    pub fn ownsParams(a: Adapter) bool {
+        return a.kind == .c_call and a.variadic;
+    }
 };
+
+/// The `.c_call` adapter a call of extern `ext` with varargs of types `extra` goes
+/// through, or null. A scan: such calls are few.
+pub fn findCCall(ads: []const Adapter, ext: u32, extra: []const Type) ?u32 {
+    for (ads, 0..) |a, i| {
+        if (a.kind != .c_call or a.ext != ext or a.sig.params.len != a.c_params.len + extra.len) continue;
+        for (a.sig.params[a.c_params.len..], extra) |x, y| {
+            if (!Type.eql(x, y)) break;
+        } else return @intCast(i);
+    }
+    return null;
+}
 
 /// The adapter a bound method value goes through: it holds a bare local receiver as the
 /// owner's storage `st` holds it (a `mut` param's address, a boxed local's cell, so the
@@ -365,6 +393,15 @@ pub fn boundRecvLocal(tree: Ast.Tree, resolutions: []const Resolution, fa: Ast.I
 pub fn isFnType(ty: Type, layouts: []const LayoutEngine.Layout) bool {
     if (ty.kind == .func) return true;
     return ty.isStruct() and ty.struct_id < layouts.len and layouts[ty.struct_id].fn_sig != null;
+}
+
+/// Bit `i`: an extern's param `i` is fn-typed, a C function pointer.
+pub fn callbackMask(params: []const Type, layouts: []const LayoutEngine.Layout) u64 {
+    var mask: u64 = 0;
+    for (params, 0..) |p, i| {
+        if (i < 64 and isFnType(p, layouts)) mask |= @as(u64, 1) << @intCast(i);
+    }
+    return mask;
 }
 
 /// The C callback adapter an extern's fn-typed argument `arg` of a body of `owner`

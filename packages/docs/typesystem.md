@@ -1165,9 +1165,9 @@ and returned. Everything that shows a value goes through that one rendering:
 scalar and calls the witness of a struct or enum, so a field never renders differently
 from the same value on its own:
 
-- `int` and every width → decimal digits through the runtime builtin `__int_to_str`, with a
-  leading `-` when negative (`i64::MIN` included); a `uint`/`uint64` → `__uint_to_str`,
-  never signed, so 2^63 and above print as their magnitude.
+- `int` and every width → decimal digits through the runtime's `int_to_str` (`core/rt/str`),
+  with a leading `-` when negative (`i64::MIN` included); a `uint`/`uint64` →
+  `uint_to_str`, never signed, so 2^63 and above print as their magnitude.
 - `bool` → the literal `true` or `false`; `()` → the literal `()`.
 - `str` → its raw bytes, never quoted.
 - a function value (a named fn, a lambda, a closure or a bound method) → the literal

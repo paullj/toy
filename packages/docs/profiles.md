@@ -82,17 +82,17 @@ address, so `nm`, `lldb` and crash reports show toy names instead of bare addres
 
 ```sh
 $ nm .toy/<stamp>/debug/main
+0000000100000810 t _core/rt/panic.panic
 00000001000004bc t _main
 0000000100000738 t _main$l0
 0000000100000328 t _main.apply
-0000000100000810 t _panic
 00000001000006f8 t _util.ident$int
 0000000100000654 t _util.sq
 ```
 
 A function is named as the panic backtrace names it: `module.fn`, with `main` bare. A
 generic instance adds its type arguments (`util.ident$int`) and a lambda its owner and
-index (`main$l0`), and a runtime function its own name (`panic`). Every symbol is local
+index (`main$l0`), and a runtime function its module's (`core/rt/panic.panic`). Every symbol is local
 and carries the leading `_` of a C symbol, which `atos`, crash reports and `lldb` drop, so
 they show `util.sq`. To break on a function by name in `lldb`, use its full name with
 `-F` (`breakpoint set -F util.sq`): `lldb`'s `-n` and `b util.sq` read the dot as a

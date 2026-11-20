@@ -6,7 +6,6 @@
 const std = @import("std");
 const Ir = @import("../../ir/Ir.zig");
 const FrameLayout = @import("../frame/FrameLayout.zig");
-const runtime = @import("../runtime/runtime.zig");
 const types = @import("../../types.zig");
 const StdNames = @import("../../symbols/StdNames.zig");
 
@@ -48,22 +47,27 @@ pub const CallFacts = struct {
 
 pub fn callFacts(callee: Ir.SymName) CallFacts {
     return switch (callee.kind) {
-        .builtin => .{ .safepoint = runtime.mayCollect(callee.name) },
+        // Every runtime fn is toy code now; a builtin callee left is unknown, so it may.
+        .builtin => .{},
         .import => .{ .keep_ref_args = true },
-        .user_fn => .{ .safepoint = StdNames.userCallMayCollect(callee.name) },
+        // A `$ccall` adapter's frame is stepped over with the C frames, so its caller keeps
+        // the args rooted as for a C call.
+        .user_fn => .{ .safepoint = StdNames.userCallMayCollect(callee.name), .keep_ref_args = std.mem.endsWith(u8, callee.name, "$ccall") },
     };
 }
 
 const testing = std.testing;
 const Type = types.Type;
 
-test "callFacts: builtins that never collect are no safepoint; a C call keeps its reference args" {
-    try testing.expect(!callFacts(.{ .kind = .builtin, .name = "panic" }).safepoint);
-    try testing.expect(callFacts(.{ .kind = .builtin, .name = "__str_concat" }).safepoint);
+test "callFacts: a str builder is a safepoint; a C call keeps its reference args" {
+    try testing.expect(!callFacts(.{ .kind = .user_fn, .name = "core/rt/panic.panic" }).safepoint);
+    try testing.expect(callFacts(.{ .kind = .user_fn, .name = "core/rt/str.str_concat" }).safepoint);
     const c = callFacts(.{ .kind = .import, .name = "strlen" });
     try testing.expect(c.safepoint and c.keep_ref_args);
     const t = callFacts(.{ .kind = .user_fn, .name = "f" });
     try testing.expect(t.safepoint and !t.keep_ref_args);
+    const cc = callFacts(.{ .kind = .user_fn, .name = "qsort$ccall" });
+    try testing.expect(cc.safepoint and cc.keep_ref_args);
 }
 
 test "callFacts: a core/rt fn is no safepoint; a minted unit in a core/rt module still is" {

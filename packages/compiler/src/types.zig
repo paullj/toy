@@ -1776,6 +1776,8 @@ pub const FnSym = struct {
     /// A C variadic extern (`fn printf(f: cstr, ...)`): a call may pass more args than
     /// `params`, each a C-promoted type.
     variadic: bool = false,
+    /// An extern a call of which may run toy code before it returns (`Sig.calls_back`).
+    calls_back: bool = false,
 
     pub fn isGeneric(f: FnSym) bool {
         return f.generic_params.len > 0;
@@ -2546,7 +2548,7 @@ pub fn checkGraph(
     // `fns`; the sig name is the resolver's qualified/bare name for that id.
     std.debug.assert(t.fns.items.len == fns.len);
     for (t.fns.items, 0..) |f, i| {
-        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask, .variadic = f.variadic, .generic = f.isGeneric() };
+        sigs[i] = .{ .kind = f.kind, .name = fns[i].name, .params = try gpa.dupe(Type, f.params), .ret = f.ret, .mut_mask = f.mut_mask, .variadic = f.variadic, .calls_back = f.calls_back, .generic = f.isGeneric() };
         sigs_built += 1;
     }
 
@@ -5061,9 +5063,11 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
     else
         "extern function parameter/return type must be int, float, float32, rawptr, cstr, bool, or an extern struct";
     const params = try t.gpa.alloc(Type, proto.params.len);
+    var takes_callback = false;
     for (proto.params, 0..) |param_idx, i| {
         const param = t.tree.nodes[param_idx.int()];
         const pty = t.typeFromNode(param.lhs);
+        takes_callback = takes_callback or pty.isFunc();
         // Core's `str` spread is a private convention of its own wrappers; a C function a
         // program declares expects a NUL-terminated pointer, which a `str` is not.
         if (pty.kind == .str and !core) {
@@ -5100,7 +5104,7 @@ fn decodeExternSig(t: *Typecheck, fn_idx: Ast.Index, mod: u32) !void {
         try t.sink.report(.{ .span = t.spanOf(proto.ret_type), .code = .T0037 }, "{s}", .{bad_type_msg});
         ret = .invalid;
     }
-    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod, .mut_mask = Modes.ofProto(t.tree, t.tokens, proto), .variadic = Ast.isVariadicExtern(t.tree, t.tokens, fn_idx) });
+    try t.fns.append(t.gpa, .{ .decl_node = fn_idx, .kind = .import, .params = params, .ret = ret, .mod = mod, .mut_mask = Modes.ofProto(t.tree, t.tokens, proto), .variadic = Ast.isVariadicExtern(t.tree, t.tokens, fn_idx), .calls_back = takes_callback or !core });
 }
 
 /// The C-ABI type set an `extern` param/return may use: any integer width, `bool`,

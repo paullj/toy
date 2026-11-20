@@ -1,0 +1,38 @@
+# expect: exit 1
+# expect: stderr "stored"
+# expect: stderr " callback_stored_panic.boom$cfn\n0x0000000000000000 <C>\n0x"
+# expect: stderr " callback_stored_panic.cmp$cfn\n0x0000000000000000 <C>\n0x"
+# expect: stderr " main\n"
+# libdir: "@harness"
+# A panic in a stored callback that C runs from a comparator qsort calls: the backtrace
+# steps over both runs of C frames, naming each `<C>` once, and ends at main.
+extern struct Two { a: int, b: int }
+
+extern {
+    fn qsort(mut base: Two, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+}
+
+extern "toyffi" {
+    fn toyffi_store(cb: fn(int) -> int)
+    fn toyffi_fire(x: int) -> int
+}
+
+fn boom(_x: int) -> int {
+    panic("stored")
+}
+
+fn middle() -> int {
+    return unsafe { toyffi_fire(1) }
+}
+
+fn cmp(_a: rawptr, _b: rawptr) -> int32 {
+    _r := middle()
+    0
+}
+
+fn main() -> int {
+    unsafe { toyffi_store(boom) }
+    t := Two { a: 2, b: 1 }
+    unsafe { qsort(t, 2, 8, cmp) }
+    return 0
+}

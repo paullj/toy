@@ -19,8 +19,11 @@
 //!     and `spillStore`.
 //!   * `relocs` — its relocation kinds and how each patches its site (`Link.Patcher`).
 //!     Link carries a kind opaquely, so no other module names an encoding.
-//!   * `hand_builtins` — one body per `runtime.hand_builtins` row, in its order: the
-//!     builtins written by hand per ISA until they are toy code in core/rt.
+//!   * The two intrinsics core/rt is written over, which `Isel` selects from IR ops:
+//!     `Ir.Op.frame_addr`, the current fn's frame record, and `Ir.Op.text_base`, the
+//!     runtime address of the text's first byte. The rest of the runtime (panic and its
+//!     backtrace, the collector's stack walk, the str builders) is toy code in core/rt
+//!     over them, so a new ISA writes no runtime of its own.
 //!   * `c_abis` — the C calling conventions (`Target.CAbi`) its selector places
 //!     arguments for.
 //!   * `abi` — its calling-convention and frame facts, which the target-neutral placement
@@ -42,7 +45,6 @@ const Ir = @import("../ir/Ir.zig");
 const Link = @import("../link/Link.zig");
 const types = @import("../types.zig");
 const Target = @import("../Target.zig");
-const runtime = @import("runtime/runtime.zig");
 const CodegenMir = @import("CodegenMir.zig");
 const Abi = @import("abi/Abi.zig");
 const FrameLayout = @import("frame/FrameLayout.zig");
@@ -65,8 +67,6 @@ pub const FitsFn = *const fn (
     enum_layouts: []const types.EnumLayout,
 ) error{OutOfMemory}!bool;
 
-pub const BuiltinFn = *const fn (gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode;
-
 /// One ISA's backend for one C convention, as the driver and the link tail call it.
 pub const Backend = struct {
     /// The convention extern calls and C callback adapters follow; `lower` and `fits`
@@ -77,7 +77,6 @@ pub const Backend = struct {
     /// Whether `func`'s fixed frame fits this backend's cap; see `FrameLayout.fits`.
     fits: FitsFn,
     relocs: Link.Patcher,
-    hand_builtins: *const [runtime.hand_builtins.len]BuiltinFn,
     inst_count: *const fn (code: []const u8) usize,
 };
 
@@ -129,9 +128,9 @@ pub fn fitsEveryBackend(
 /// Fail the build at compile time when `I` lacks a declaration the interface names.
 pub fn check(comptime I: type) void {
     const decls = .{
-        "Inst",         "Isel",          "Peephole", "Emit",      "reserved",  "allocatable",
-        "callee_saved", "moveScratch",   "move",     "jump",      "spillLoad", "spillStore",
-        "relocs",       "hand_builtins", "c_abis",   "instCount", "abi",
+        "Inst",         "Isel",        "Peephole",  "Emit", "reserved",  "allocatable",
+        "callee_saved", "moveScratch", "move",      "jump", "spillLoad", "spillStore",
+        "relocs",       "c_abis",      "instCount", "abi",
     };
     inline for (decls) |d| if (!@hasDecl(I, d)) @compileError(@typeName(I) ++ " is no ISA module: it has no `" ++ d ++ "`");
     inline for (.{ "caller_saved", "branchTarget", "setBranchTarget", "copyRegs", "operands", "callRegs" }) |d|
@@ -164,10 +163,8 @@ pub fn check(comptime I: type) void {
         if (!std.math.isPowerOfTwo(f.stack_align)) @compileError(@typeName(I) ++ ".abi: the stack alignment is not a power of two");
     }
     const relocs: Link.Patcher = I.relocs;
-    const builtins: [runtime.hand_builtins.len]BuiltinFn = I.hand_builtins;
     const c_abis: []const Target.CAbi = &I.c_abis;
     _ = relocs;
-    _ = builtins;
     _ = c_abis;
 }
 

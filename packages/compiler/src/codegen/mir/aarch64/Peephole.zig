@@ -476,7 +476,7 @@ fn setsFlags(inst: Inst) bool {
         .cmp, .cmp_imm, .cmn_imm, .fcmp, .call, .b, .cbnz, .b_cond, .ret, .brk => true,
         .alu => |o| o.op == .adds,
         .mov_imm, .mov, .msub, .add_imm, .sub_imm, .alu_sh, .shift_imm, .logic_imm, .unary, .cset, .csel => false,
-        .fp_alu, .cvt, .load, .store, .addr, .copy, .sym_addr, .keep, .safepoint_poll => false,
+        .fp_alu, .cvt, .load, .store, .addr, .copy, .sym_addr, .text_base, .keep, .safepoint_poll => false,
     };
 }
 
@@ -534,6 +534,7 @@ fn pureDef(inst: Inst) ?Reg {
         .unary => |o| o.rd,
         .cset => |o| o.rd,
         .sym_addr => |o| o.rd,
+        .text_base => |r| r,
         .alu => |o| if (o.op == .adds) null else o.rd,
         else => null,
     };

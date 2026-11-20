@@ -7,9 +7,9 @@
 # Every address here is an `int`. None is a reference the collector must keep alive, so no
 # stack map names one.
 #
-# The roots are in the frames of the stopped program. A toy frame has a precise row in the
-# stack map. A frame no toy fn owns (a hand-written builtin, or C calling back into toy) is
-# scanned word by word: it is the only memory read without a layout.
+# The roots are in the frames of the stopped program, each of which has a precise row in
+# the stack map. The C frames between a call into C and a callback are stepped over, not
+# read (`core/rt/frames`): what toy passed C stays rooted in the toy caller's frame.
 #
 # Every object is allocated with a layout: 0 for one that holds no reference,
 # `container()` for a Vec or Map backing of references, `map_header()` for a Map header,
@@ -32,6 +32,8 @@
 # from a 64 MiB arena; a large object (over 8 KiB) has a mapping of its own with the same
 # header shape. The page map names the span or large object that owns each heap page. The
 # fns at the end name each field's offset.
+
+import core/rt/frames
 
 extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
 extern fn munmap(addr: int, len: int) -> int
@@ -369,28 +371,23 @@ fn grow_and_push(obj: int, layout: int) {
     set_word(mark_len(cb), n + 1)
 }
 
-# Walk the frame chain from the entry's frame `fp` out to the first frame. The return
-# address a frame saved names its caller's fn, whose stack-map row names the caller's roots
-# at that call.
+# Walk the frames from the entry's frame `fp` out to the first (`core/rt/frames`). The
+# return address a frame saved names its caller's fn, whose stack-map row names the
+# caller's roots at that call; one in C has none.
 fn scan_stack(fp: int) {
     text := text_base()
     map := stack_map()
     rows := word(map)
     frame := fp
     loop {
-        caller := word(frame)
+        roots := frame_roots(map, rows, frames.call_site(frame) - text)
+        # The count is 4 bytes; the load's other half is the next 4 bytes of the table.
+        n := low_half(word(roots))
+        if n != unmapped_frame() { scan_roots(roots + 4, n, frames.caller_sp(frame)) }
+        caller := frames.caller(frame, n == unmapped_frame())
         # A caller's frame is above its callee's, so this, unlike a frame count, ends a
         # corrupt chain without cutting off a deep live one.
         if caller <= frame { return }
-        roots := frame_roots(map, rows, word(frame + 8) - 4 - text)
-        # The count is 4 bytes; the load's other half is the next 4 bytes of the table.
-        n := low_half(word(roots))
-        sp := frame + 16
-        if n == unmapped_frame() {
-            scan_words(sp, caller)
-        } else {
-            scan_roots(roots + 4, n, sp)
-        }
         frame = caller
     }
 }
@@ -416,20 +413,6 @@ fn scan_roots(at: int, n: int, sp: int) {
     while i < n {
         mark_word(word(sp + low_half(word(at + i * 4))))
         i += 1
-    }
-}
-
-# A frame no toy fn owns, word by word. Most words are no pointer, so each is checked
-# against the heap's bounds before the call that would look it up.
-fn scan_words(from: int, to: int) {
-    cb := control_block()
-    low := word(heap_low(cb))
-    high := word(heap_high(cb))
-    at := from
-    while at < to {
-        w := word(at)
-        if w >= low && w < high { mark_word(w) }
-        at += 8
     }
 }
 
@@ -638,8 +621,10 @@ fn sweep_large(cb: int) -> int {
     return live
 }
 
-# Control block fields. Release inlines each, so a name costs no call. Byte 232 is
-# core/rt/stack's: 1 once it has armed the stack overflow handler.
+# Control block fields. Release inlines each, so a name costs no call. Bytes 120..216
+# belong to other core/rt modules: 120 is core/rt/frames's, 128..176 core/rt/str's and
+# 176..216 core/rt/panic's. Byte 232 is core/rt/stack's: 1 once it has armed the stack
+# overflow handler.
 fn spans_mapped(cb: int) -> int { return cb }
 fn collections_run(cb: int) -> int { return cb + 8 }
 # Bytes allocated since the last collection, counted when a refill or a sweep hands a
@@ -725,7 +710,7 @@ fn map_header() -> int { return 1 }
 fn array_mark() -> int { return 4 }
 
 # A stack-map count or root packs a u32 in a word's low half. The sentinel row's count
-# marks a frame no toy fn owns.
+# marks a return address outside the text: in C.
 fn low_half(w: int) -> int { return w & 4294967295 }
 fn unmapped_frame() -> int { return 4294967295 }
 

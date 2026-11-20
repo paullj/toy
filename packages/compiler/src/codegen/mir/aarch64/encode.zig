@@ -443,7 +443,7 @@ pub fn patchAddImm12(word: u32, imm12: u12) u32 {
 
 /// Re-encode a `movz`/`movk` placeholder with a resolved 16-bit immediate,
 /// keeping its opcode + shift-lane (hw) + rd (the imm16 field is bits[20:5]).
-/// The linker uses this to bake a link-time text offset into the __panic
+/// The linker uses this to bake a link-time text offset into the `text_base`
 /// self-locate sequence. patchMovImm16(movz(10,0,0), 0x1234) → movz x10,#0x1234.
 pub fn patchMovImm16(word: u32, imm16: u16) u32 {
     return (word & 0xFFE0001F) | (@as(u32, imm16) << 5);
@@ -611,12 +611,6 @@ pub fn unscaledOff(file: File, load: bool, rt: u32, rn: u32, off: i32) u32 {
 /// `bl panic` that the `.panic` IR terminator emits, should `panic` ever
 /// return. → 0xD4200000.
 pub const brk0: u32 = 0xD4200000;
-
-/// svc #0x80 — the macOS/XNU supervisor-call gate. XNU takes the syscall number
-/// from x16 (the immediate is ignored) and args from x0..; #0x80 is the BSD
-/// convention. SVC = 0xD4000001 | (imm16<<5); 0x80<<5 = 0x1000 -> 0xD4001001. The
-/// panic exit path issues `movz x0,#1; movz x16,#1 (SYS_exit); svc #0x80`.
-pub const svc0x80: u32 = 0xD4001001;
 
 /// Materialize an arbitrary i64 `value` into register `rd` in the fewest words: one
 /// `orr rd, xzr, #imm` for a bitmask immediate, else `movz` at the first nonzero lane or,
@@ -1039,7 +1033,6 @@ test "branch/system and frame constants" {
     try testing.expectEqual(@as(u32, 0xA8C17BFD), ldpFpLrPost);
     try testing.expectEqual(@as(u32, 0xD65F03C0), ret);
     try testing.expectEqual(@as(u32, 0xD4200000), brk0); // brk #0
-    try testing.expectEqual(@as(u32, 0xD4001001), svc0x80); // svc #0x80
 }
 
 test "pc-relative data addressing + indirect call" {

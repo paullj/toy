@@ -1,0 +1,44 @@
+# expect: exit 0
+# expect: stdout "cmp kept 7\ndone\n"
+# libdir: "@harness"
+# A stored callback runs inside a comparator that qsort calls: two runs of C frames lie
+# between it and main. A collection inside it still finds what the comparator holds.
+import std/io
+import std/gc
+import std/vec
+
+extern struct Two { a: int, b: int }
+
+extern {
+    fn qsort(mut base: Two, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+}
+
+extern "toyffi" {
+    fn toyffi_store(cb: fn(int) -> int)
+    fn toyffi_fire(x: int) -> int
+}
+
+fn churn(x: int) -> int {
+    junk: Vec[str] = []
+    for i in 0..64 { junk.push("garbage ".concat(i.to_string())) }
+    gc.collect()
+    x
+}
+
+fn cmp(_a: rawptr, _b: rawptr) -> int32 {
+    mine: Vec[str] = []
+    for i in 0..10 { mine.push("cmp kept ".concat(i.to_string())) }
+    _r := unsafe { toyffi_fire(1) }
+    other: Vec[str] = []
+    for i in 0..64 { other.push("reuse ".concat(i.to_string())) }
+    io.println(mine[7])
+    0
+}
+
+fn main() -> int {
+    unsafe { toyffi_store(churn) }
+    t := Two { a: 2, b: 1 }
+    unsafe { qsort(t, 2, 8, cmp) }
+    io.println("done")
+    return 0
+}

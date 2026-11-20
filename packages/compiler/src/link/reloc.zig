@@ -118,7 +118,7 @@ pub const TestIsa = struct {
 
 /// The content-hash sentinel a `.cstr` reloc carries to name the backtrace symbol
 /// table's base. The relink tail reserves it in the cstring offset map (→ the table's
-/// byte offset in the appended `__cstring` blob), so `__panic` reaches the table via the
+/// byte offset in the appended `__cstring` blob), so `core/rt/panic` reaches the table via the
 /// same `.cstr` path a string literal uses. Not a real hash (astronomically unlikely to
 /// collide; the relink tail rejects an actual collision).
 pub const symtab_base_hash: u64 = 0x5717_ab1e_ba5e_0000;

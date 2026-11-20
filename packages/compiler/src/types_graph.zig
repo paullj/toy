@@ -1599,9 +1599,10 @@ test "fn_ref/value callee tables and the adapter table are identical at -j1 and 
             try expectNoErrors(tr);
             const tags = try calleeTables(gpa, tr, out);
             try adapterTable(gpa, tr, out);
-            // A fn-value adapter per `_t`, one for `shared`, and core/rt/stack's signal
-            // handler's two (C calls one, and `signal` names the fn as a value).
-            try testing.expectEqual(@as(usize, racers + 3), tr.adapters.len);
+            // A fn-value adapter per `_t`, one for `shared`, core/rt/stack's signal
+            // handler's two (C calls one, and `signal` names the fn as a value) and the
+            // `signal` call's.
+            try testing.expectEqual(@as(usize, racers + 4), tr.adapters.len);
             // A push and a `g := shared` per body, plus one ref per `pass` instance.
             try testing.expect(tags.get(.fn_ref) >= 2 * racers + 1);
             try testing.expect(tags.get(.value) >= 2 * racers);

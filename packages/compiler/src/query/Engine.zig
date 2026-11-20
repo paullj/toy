@@ -724,6 +724,9 @@ fn adapterFp(gpa: std.mem.Allocator, fr: *const Frozen, a: *const Closure.Adapte
     for (a.sig.params) |p| try foldType(gpa, &h, fr, p);
     try foldType(gpa, &h, fr, a.sig.ret);
     try foldType(gpa, &h, fr, a.recv);
+    AstWalk.updateU32(&h, @intCast(a.c_params.len));
+    h.update(std.mem.asBytes(&a.by_ptr));
+    h.update(&[_]u8{@intFromBool(a.variadic)});
     return h.final();
 }
 
@@ -814,7 +817,12 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
             else => continue,
         };
         if (t.kind == .builtin or StdNames.isBundledRuntimeSym(t.name) or std.mem.eql(u8, t.name, fr.sym.name)) continue;
-        const base = for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
+        // A `.c_call` adapter is `<module>.<sym>$ccall`, or `<module>.<sym>$v<k>$ccall`
+        // for a variadic extern, and the caller names the extern by its bare C symbol.
+        const base = if (std.mem.endsWith(u8, t.name, "$ccall")) blk: {
+            const head = t.name[0..std.mem.indexOfScalar(u8, t.name, '$').?];
+            break :blk head[if (std.mem.lastIndexOfScalar(u8, head, '.')) |d| d + 1 else 0..];
+        } else for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
             if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];
         } else t.name;
         if (InlineUnits.containsName(names.items, base)) continue;

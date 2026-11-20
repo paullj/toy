@@ -46,7 +46,6 @@ pub const TypecheckGraph = @import("types_graph.zig");
 pub const LayoutEngine = @import("layout/Engine.zig");
 pub const CodegenMir = @import("codegen/CodegenMir.zig");
 pub const Isa = @import("codegen/Isa.zig");
-pub const CodegenRuntime = @import("codegen/runtime/runtime.zig");
 pub const Abi = @import("codegen/abi/Abi.zig");
 pub const ValueLayout = @import("layout/ValueLayout.zig");
 pub const GcLayout = @import("layout/GcLayout.zig");
@@ -119,7 +118,6 @@ test {
     _ = LayoutEngine;
     _ = CodegenMir;
     _ = Isa;
-    _ = CodegenRuntime;
     _ = Abi;
     _ = ValueLayout;
     _ = GcLayout;

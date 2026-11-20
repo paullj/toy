@@ -3,8 +3,8 @@
 //!
 //! WHY this is one entry point: the backend tail is a fixed, order-sensitive
 //! pipeline — (0) drop every fn and descriptor unreachable from the entry, (1)
-//! detect referenced hand-emitted builtin bodies (e.g. `panic`, which pulls in
-//! `write`) and append them, (2) intern the per-fn content-hashed cstring
+//! detect whether a kept fn reads the GC stack map or the backtrace symbol table, (2)
+//! intern the per-fn content-hashed cstring
 //! literals program-wide IN A DETERMINISTIC ORDER (fn source order, then in-fn
 //! literal order), (3) rewrite each `.cstr` reloc's
 //! hash target to its global `__cstring` offset, (4) `Link.link` (layout +
@@ -32,7 +32,6 @@ const ValueLayout = @import("../layout/ValueLayout.zig");
 const MachO = @import("MachO.zig");
 const Image = @import("Image.zig");
 const LibResolver = @import("LibResolver.zig");
-const runtime = @import("../codegen/runtime/runtime.zig");
 const Isa = @import("../codegen/Isa.zig");
 const sym = @import("../symbols/Sym.zig");
 const Engine = @import("../query/Engine.zig");
@@ -71,25 +70,11 @@ pub const Linked = struct {
     debug: Image.Debug = .{},
 };
 
-/// Drop fns and descriptors unreachable from `entry`, append referenced hand-emitted
-/// builtin bodies, intern strings deterministically, rewrite `.cstr` targets, then
-/// `Link.link`. CONSUMES `fns` (frees each FnCode, dropped or kept, and any appended
-/// builtin body). `entry` is the entry function's stable symbol identity. Returns the
+/// Drop fns and descriptors unreachable from `entry`, intern strings deterministically,
+/// rewrite `.cstr` targets, then `Link.link`. CONSUMES `fns` (frees each FnCode, dropped
+/// or kept). `entry` is the entry function's stable symbol identity. Returns the
 /// linked tail; the caller owns its `text`/`cstrings`/`data_relocs` (free `.import`
 /// data-reloc names individually).
-/// Each hand-emitted builtin's calls into `core/rt`, as `Link.reachable` follows them.
-const builtin_calls = blk: {
-    var n: usize = 0;
-    for (runtime.hand_builtins) |hb| n += hb.runtime_calls.len;
-    var out: [n]Link.BuiltinCall = undefined;
-    var i: usize = 0;
-    for (runtime.hand_builtins) |hb| for (hb.runtime_calls) |f| {
-        out[i] = .{ .builtin = hb.name, .callee = .{ .kind = .user_fn, .name = f.name() } };
-        i += 1;
-    };
-    break :blk out;
-};
-
 pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
     // We OWN `fns`' elements now (the caller relinquished them); on any failure free
     // the ones not yet moved into `all` (or dropped) plus everything in `all`.
@@ -110,7 +95,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
     var kept_descs: std.ArrayList(Link.DescEntry) = .empty;
     defer kept_descs.deinit(gpa);
     {
-        const r = try Link.reachable(gpa, fns, entry, planned, &builtin_calls);
+        const r = try Link.reachable(gpa, fns, entry, planned);
         defer r.deinit(gpa);
         for (planned, r.descs) |d, k| {
             if (k) try kept_descs.append(gpa, d);
@@ -122,35 +107,19 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
     }
     const descriptors = kept_descs.items;
 
-    // 1) Scan which hand-emitted builtins (`runtime.hand_builtins`) any kept fn references;
-    //    each referenced body is appended below. Those bodies emit their own `.import`
-    //    relocs (e.g. `panic` -> `write`), so the dyld import set is DERIVED from
-    //    `data_relocs` like any other import.
-    var used = [_]bool{false} ** runtime.hand_builtins.len;
-    // The collector reads the GC stack map, so a kept fn naming the map's base means the
-    // collector runs: reserve and emit the map. A heap-free program has none and stays
-    // byte-identical.
+    // 1) The collector reads the GC stack map and a panic the backtrace symbol table, so a
+    //    kept fn naming either's base reserves and emits it. A program with neither stays
+    //    free of both.
     var uses_gc = false;
+    var uses_panic = false;
     for (all.items) |f| {
         for (f.relocs) |rl| switch (rl.target) {
-            .func => |s| if (s.kind == .builtin) {
-                for (runtime.hand_builtins, 0..) |hb, i| {
-                    if (std.mem.eql(u8, s.name, hb.name)) used[i] = true;
-                }
-            },
-            .cstr => |h| if (h == Link.gc_stackmap_base_hash) {
-                uses_gc = true;
+            .cstr => |h| {
+                if (h == Link.gc_stackmap_base_hash) uses_gc = true;
+                if (h == Link.symtab_base_hash) uses_panic = true;
             },
             else => {},
         };
-    }
-    // `panic` alone is consumed past the append: it drags in the `write` import and
-    // reserves the backtrace symbol table's slot.
-    const uses_panic = used[comptime runtime.handBuiltinIndex("panic")];
-    // The referenced hand-emitted builtin bodies follow the kept fns, in `hand_builtins`
-    // order, so the linked image never depends on thread order.
-    for (0..runtime.hand_builtins.len) |i| {
-        if (used[i]) try all.append(gpa, try backend.hand_builtins[i](gpa));
     }
 
     // 2) Intern strings program-wide via `internCstrings` (stable collect +
@@ -163,7 +132,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
     const off_by_hash = &interned.off_by_hash;
 
     // 2b) Reserve the backtrace symbol table's slot at the (8-aligned) END of the
-    //     __cstring blob and bind the sentinel hash `__panic`'s `.cstr` reloc carries
+    //     __cstring blob and bind the sentinel hash `symbol_table()`'s `.cstr` reloc carries
     //     to that offset, so step 3 rewrites it like any string. The table BYTES are
     //     appended after `link` (they depend on the layout it computes); only their
     //     start offset is known now. A real literal hashing to the sentinel would be
@@ -501,30 +470,7 @@ fn litFn(literals: []const Link.Literal) Link.FnCode {
 // not an encoding, so each word is a zero placeholder the test patcher overwrites.
 const T = Link.TestIsa;
 
-/// `T.patcher` with a placeholder body per hand builtin. `panic`'s imports `write`, as
-/// every ISA's does.
-const test_backend: Isa.Backend = .{ .c_abi = .aapcs64_apple, .lower = noLower, .fits = noFits, .relocs = T.patcher, .hand_builtins = &test_builtins, .inst_count = noCount };
-
-const test_builtins = blk: {
-    var out: [runtime.hand_builtins.len]Isa.BuiltinFn = undefined;
-    for (runtime.hand_builtins, &out) |hb, *f| f.* = testBuiltin(hb.name);
-    break :blk out;
-};
-
-fn testBuiltin(comptime name: []const u8) Isa.BuiltinFn {
-    return struct {
-        fn lower(gpa: std.mem.Allocator) error{OutOfMemory}!Link.FnCode {
-            const code = try gpa.alloc(u8, 4);
-            @memset(code, 0);
-            var relocs: []Link.Reloc = &.{};
-            if (std.mem.eql(u8, name, "panic")) {
-                relocs = try gpa.alloc(Link.Reloc, 1);
-                relocs[0] = .{ .site = 0, .target = .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, "write") } }, .kind = T.pcrel };
-            }
-            return .{ .sym = .{ .kind = .builtin, .name = try gpa.dupe(u8, name) }, .code = code, .relocs = relocs, .literals = &.{} };
-        }
-    }.lower;
-}
+const test_backend: Isa.Backend = .{ .c_abi = .aapcs64_apple, .lower = noLower, .fits = noFits, .relocs = T.patcher, .inst_count = noCount };
 
 fn noFits(_: std.mem.Allocator, _: *const @import("../ir/Ir.zig").Function, _: []const @import("../types.zig").Layout, _: []const @import("../types.zig").EnumLayout) error{OutOfMemory}!bool {
     unreachable;
@@ -539,8 +485,8 @@ fn noLower(_: std.mem.Allocator, _: *const @import("../ir/Ir.zig").Function, _: 
 }
 
 /// Build one owned `FnCode` for the determinism test: an address pair referencing a
-/// cstring literal (a cross-segment data-reloc pair) plus, if `call_panic`, a call to the
-/// appended `panic` builtin, which drags in `write` + the symbol table. Consumed (freed)
+/// cstring literal (a cross-segment data-reloc pair) plus, if `call_panic`, the address of
+/// the backtrace symbol table, as `core/rt/panic` reads it. Consumed (freed)
 /// by `linkProgram`.
 fn detFn(gpa: std.mem.Allocator, name: []const u8, lit_hash: u64, lit_bytes: []const u8, call_panic: bool) !Link.FnCode {
     return detFnCalling(gpa, name, lit_hash, lit_bytes, call_panic, &.{});
@@ -556,7 +502,7 @@ fn detFnCalling(gpa: std.mem.Allocator, name: []const u8, lit_hash: u64, lit_byt
     try relocs.append(gpa, .{ .site = 0, .target = .{ .cstr = lit_hash }, .kind = T.pcrel });
     try relocs.append(gpa, .{ .site = 4, .target = .{ .cstr = lit_hash }, .kind = T.pcrel });
     if (call_panic) {
-        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .func = .{ .kind = .builtin, .name = try gpa.dupe(u8, "panic") } }, .kind = T.call });
+        try relocs.append(gpa, .{ .site = @intCast(words.items.len * 4), .target = .{ .cstr = Link.symtab_base_hash }, .kind = T.pcrel });
         try words.append(gpa, 0);
     }
     for (callees) |c| {
@@ -613,7 +559,7 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
     var lk = try linkProgram(t.io(), gpa, &test_backend, fns, entry, &.{}, null);
     defer freeLinked(gpa, &lk);
 
-    // Only `main` survives: no `aaa`, no `bbb`, so no `panic` body either.
+    // Only `main` survives: no `aaa`, no `bbb`, so no symbol table either.
     try testing.expectEqual(@as(usize, 16), lk.text.len);
     try testing.expectEqual(@as(u32, 0), lk.entry_off);
     try testing.expectEqual(@as(usize, 0), lk.cstrings.len);

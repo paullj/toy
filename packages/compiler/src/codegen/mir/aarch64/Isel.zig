@@ -16,6 +16,7 @@
 //! what a call keeps rooted) come from `GcFacts`, shared by every target.
 
 const std = @import("std");
+const StdNames = @import("../../../symbols/StdNames.zig");
 const Ir = @import("../../../ir/Ir.zig");
 const Abi = @import("../../abi/Abi.zig");
 const ValueLayout = @import("../../../layout/ValueLayout.zig");
@@ -392,6 +393,7 @@ const S = struct {
                 try s.emit(.{ .addr = .{ .rd = rd, .mem = Mem.frame(.incoming, 0) } });
                 try s.emit(.{ .sub_imm = .{ .rd = rd, .rn = rd, .imm = 16 } });
             },
+            .text_base => try s.emit(.{ .text_base = try s.def(res) }),
             .shl, .lshr, .ashr => |b| try s.shift(res, b, ins.op),
             .fconst => |v| {
                 const bits: i64 = if (s.valueType(res).isFloat32()) @as(u32, @bitCast(@as(f32, @floatCast(v)))) else @bitCast(v);
@@ -859,14 +861,14 @@ const S = struct {
         }
     }
 
-    /// `panic(msg, len)`, which prints a backtrace and exits; a `brk` backstops it.
+    /// `panic(msg)`, which prints a backtrace and exits; a `brk` backstops it.
     fn panicCall(s: *S, msg: []const u8) Error!void {
         const h = std.hash.Wyhash.hash(Ir.lit_seed, msg);
         try addLiteral(s.gpa, s.literals, h, msg);
         try s.emit(.{ .sym_addr = .{ .rd = abi.gpr_args[0], .target = .{ .cstr = h } } });
         try s.emit(.{ .mov_imm = .{ .rd = abi.gpr_args[1], .imm = @intCast(msg.len) } });
         const uses = Mir.regBit(abi.gpr_args[0]) | Mir.regBit(abi.gpr_args[1]);
-        try s.emit(.{ .call = .{ .callee = .{ .func = .{ .kind = .builtin, .name = "panic" } }, .uses = uses, .safepoint = false } });
+        try s.emit(.{ .call = .{ .callee = .{ .func = .{ .kind = .user_fn, .name = StdNames.RuntimeFn.panic.name() } }, .uses = uses, .safepoint = false } });
         try s.emit(.brk);
     }
 };

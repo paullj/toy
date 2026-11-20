@@ -52,6 +52,7 @@ pub fn adapter(gpa: std.mem.Allocator, target_sym: []const u8, kind: Closure.Ada
         .bound_box => "$boundbox",
         .bound_ref => "$boundref",
         .c_fn, .c_lambda, .c_assoc => "$cfn",
+        .c_call => "$ccall",
     };
     return std.mem.concat(gpa, u8, &.{ target_sym, suffix });
 }
