@@ -1,44 +1,555 @@
-# The quarantined libSystem float conversions. `__dtoa` and `__freedtoa` are Darwin-private
-# (D62): only this module names them, so #60 swaps the bodies and nothing else.
+# Float to decimal digits, in toy so every target prints a float the same way (#60 D7):
+# `shortest` is Zig std's Ryu (f64, small tables) and `rounded` is exact big-integer
+# arithmetic. Both give the digits the C library's dtoa gave before them.
 import core/os
+import core/text
 
-pub extern fn __dtoa(d: float, mode: int, ndigits: int, decpt: rawptr, sign: rawptr, rve: rawptr) -> rawptr
-pub extern fn __freedtoa(s: rawptr)
 pub extern fn strtod(s: rawptr, end: rawptr) -> float
 
-# The shortest digits that read back as the value: it is `0.<digits> * 10^point`, negative
-# when `neg`. Infinity and NaN come back as the digits "Infinity" and "NaN" with point 9999.
+# The digits of a float: it is `0.<digits> * 10^point`, negative when `neg`. The digits
+# never end in 0, except for zero itself ("0", point 1). Infinity and NaN come back as the
+# digits "Infinity" and "NaN" with point 9999.
 pub struct Shortest { pub digits: str, pub point: int, pub neg: bool }
 
-# A C `int` is 4 bytes and `load` reads 8; `point` can be negative, so the sign is extended.
-fn load_i32(p: rawptr) -> int {
-    v := 0
-    for i in 0..4 {
-        v = (v << 8) | unsafe { load_byte(offset(p, 3 - i)) }
+struct U128 { lo: uint64, hi: uint64 }
+
+# The shortest digits that read back as `f`, and of those the nearest to it.
+pub fn shortest(f: float) -> Shortest {
+    bits := bits_of(f)
+    return ryu((bits >> 63) != 0, bits & 0xF_FFFF_FFFF_FFFF, to_int(bits >> 52) & 0x7FF, 52, 1023)
+}
+
+# The same for a float32: its own, wider interval gives fewer digits than its widened float.
+pub fn shortest32(f: float32) -> Shortest {
+    cell := gc_alloc(8, 0)
+    unsafe { store(cell, f) }
+    narrow: uint32 = unsafe { load(cell) }
+    bits: uint64 = narrow.into()
+    return ryu((bits >> 31) != 0, bits & 0x7F_FFFF, to_int(bits >> 23) & 0xFF, 23, 127)
+}
+
+# Zig std's binaryToDecimal over the 64-bit tables, which cover float32 as well: the
+# parts of an IEEE value with `mbits` fraction bits and exponent `bias`.
+fn ryu(neg: bool, frac: uint64, biased: int, mbits: int, bias: int) -> Shortest {
+    if biased == bias * 2 + 1 { return special(frac, neg) }
+    if biased == 0 && frac == 0 { return Shortest { digits: "0", point: 1, neg: neg } }
+    # Ryu scales 4*m so the interval's halfway bounds stay integers; e2 is the exponent of
+    # that 4*m.
+    e2 := biased - bias - mbits - 2
+    m2 := frac | (1 << to_u64(mbits))
+    if biased == 0 {
+        e2 = 1 - bias - mbits - 2
+        m2 = frac
     }
-    if v >= 0x8000_0000 { return v - 0x1_0000_0000 }
+    even := (m2 & 1) == 0
+    mv := 4 * m2
+    # Below a normal power of two the gap to the next float down is half the gap up.
+    mm_shift: uint64 = 1
+    if frac == 0 && biased != 0 { mm_shift = 0 }
+
+    vr: uint64 = 0
+    vp: uint64 = 0
+    vm: uint64 = 0
+    e10 := 0
+    vm_tz := false
+    vr_tz := false
+    if e2 >= 0 {
+        q := log10_pow2(e2)
+        if e2 > 3 { q -= 1 }
+        e10 = q
+        k := 125 + pow5_bits(q) - 1
+        i := q + k - e2
+        p := inv_pow5(q)
+        vr = mul_shift(mv, p, i)
+        vp = mul_shift(mv + 2, p, i)
+        vm = mul_shift(mv - 1 - mm_shift, p, i)
+        if q <= 21 {
+            if mv % 5 == 0 {
+                vr_tz = pow5_factor(mv) >= q
+            } else if even {
+                vm_tz = pow5_factor(mv - 1 - mm_shift) >= q
+            } else if pow5_factor(mv + 2) >= q {
+                vp -= 1
+            }
+        }
+    } else {
+        q := log10_pow5(-e2)
+        if -e2 > 1 { q -= 1 }
+        e10 = q + e2
+        i := -e2 - q
+        k := pow5_bits(i) - 125
+        j := q - k
+        p := pow5(i)
+        vr = mul_shift(mv, p, j)
+        vp = mul_shift(mv + 2, p, j)
+        vm = mul_shift(mv - 1 - mm_shift, p, j)
+        if q <= 1 {
+            vr_tz = true
+            if even {
+                vm_tz = mm_shift == 1
+            } else {
+                vp -= 1
+            }
+        } else if q < 63 {
+            vr_tz = (mv & ((1 << to_u64(q)) - 1)) == 0
+        }
+    }
+
+    removed := 0
+    last: uint64 = 0
+    while vp / 10 > vm / 10 {
+        vm_tz = vm_tz && vm % 10 == 0
+        vr_tz = vr_tz && last == 0
+        last = vr % 10
+        vr /= 10
+        vp /= 10
+        vm /= 10
+        removed += 1
+    }
+    if vm_tz {
+        while vm % 10 == 0 {
+            vr_tz = vr_tz && last == 0
+            last = vr % 10
+            vr /= 10
+            vp /= 10
+            vm /= 10
+            removed += 1
+        }
+    }
+    if vr_tz && last == 5 && vr % 2 == 0 { last = 4 }
+    out := vr
+    if (vr == vm && (!even || !vm_tz)) || last >= 5 { out += 1 }
+    exp := e10 + removed
+    while out % 10 == 0 {
+        out /= 10
+        exp += 1
+    }
+    digits := out.to_string()
+    return Shortest { digits: digits, point: exp + digits.len(), neg: neg }
+}
+
+# `f` correctly rounded (half to even, on its exact binary value) to `n` significant
+# digits, at least one, with trailing zeros dropped. The digits come from the exact
+# fraction num/den = f / 10^point, so every n, however large, is exact.
+pub fn rounded(f: float, n: int) -> Shortest {
+    bits := bits_of(f)
+    neg := (bits >> 63) != 0
+    frac := bits & 0xF_FFFF_FFFF_FFFF
+    biased := to_int(bits >> 52) & 0x7FF
+    if biased == 0x7FF { return special(frac, neg) }
+    if biased == 0 && frac == 0 { return Shortest { digits: "0", point: 1, neg: neg } }
+    want := n
+    if want < 1 { want = 1 }
+    m := to_int(frac | 0x10_0000_0000_0000)
+    e := biased - 1075
+    if biased == 0 {
+        m = to_int(frac)
+        e = -1074
+    }
+
+    # f < 2^bl, so point >= floor((bl - 1) * log10 2) + 1; each multiplier errs low for
+    # its sign, so the estimate never passes the true point and the loop only climbs.
+    bl := e + bit_len(m)
+    x := bl - 1
+    point := ((x * 78913) >> 18) + 1
+    if x < 0 { point = ((x * 78914) >> 18) + 1 }
+    num := big(m)
+    den := big(1)
+    if e >= 0 { big_mul_pow(num, 2, e) } else { big_mul_pow(den, 2, -e) }
+    if point >= 0 { big_mul_pow(den, 10, point) } else { big_mul_pow(num, 10, -point) }
+    while big_cmp(num, den) >= 0 {
+        big_mul(den, 10)
+        point += 1
+    }
+
+    buf := text.alloc(want)
+    count := 0
+    while count < want && big_len(num) > 0 {
+        big_mul(num, 10)
+        d := 0
+        while big_cmp(num, den) >= 0 {
+            big_sub(num, den)
+            d += 1
+        }
+        put_digit(buf, count, d)
+        count += 1
+    }
+    big_mul(num, 2)
+    c := big_cmp(num, den)
+    if c > 0 || (c == 0 && digit_at(buf, count - 1) % 2 == 1) {
+        at := count - 1
+        while at >= 0 && digit_at(buf, at) == 9 {
+            at -= 1
+        }
+        if at < 0 {
+            put_digit(buf, 0, 1)
+            count = 1
+            point += 1
+        } else {
+            put_digit(buf, at, digit_at(buf, at) + 1)
+            count = at + 1
+        }
+    }
+    while digit_at(buf, count - 1) == 0 {
+        count -= 1
+    }
+    return Shortest { digits: text.take(buf, count), point: point, neg: neg }
+}
+
+fn special(frac: uint64, neg: bool) -> Shortest {
+    if frac != 0 { return Shortest { digits: "NaN", point: 9999, neg: neg } }
+    return Shortest { digits: "Infinity", point: 9999, neg: neg }
+}
+
+fn bits_of(f: float) -> uint64 {
+    cell := gc_alloc(8, 0)
+    unsafe { store(cell, f) }
+    b: uint64 = unsafe { load(cell) }
+    return b
+}
+
+fn to_int(x: uint64) -> int {
+    r: int = x.try_into().expect("fmt: int out of range")
+    return r
+}
+
+fn to_u64(x: int) -> uint64 {
+    r: uint64 = x.try_into().expect("fmt: negative uint64")
+    return r
+}
+
+fn bit_len(x: int) -> int {
+    n := 0
+    v := x
+    while v > 0 {
+        v = v >> 1
+        n += 1
+    }
+    return n
+}
+
+# floor(e * log10 2), floor(e * log10 5) and ceil(e * log2 5) (1 for 0), for 0 <= e <= 1650.
+fn log10_pow2(e: int) -> int {
+    return (e * 78913) >> 18
+}
+
+fn log10_pow5(e: int) -> int {
+    return (e * 732923) >> 20
+}
+
+fn pow5_bits(e: int) -> int {
+    return ((e * 1217359) >> 19) + 1
+}
+
+fn pow5_factor(v: uint64) -> int {
+    n := 0
+    x := v
+    while x > 0 && x % 5 == 0 {
+        x /= 5
+        n += 1
+    }
+    return n
+}
+
+# The high 64 bits of a * b, from four 32-bit products, none of which overflows.
+fn mul_hi(a: uint64, b: uint64) -> uint64 {
+    a0 := a & 0xFFFF_FFFF
+    a1 := a >> 32
+    b0 := b & 0xFFFF_FFFF
+    b1 := b >> 32
+    p00 := a0 * b0
+    p01 := a0 * b1
+    p10 := a1 * b0
+    mid := (p00 >> 32) + (p01 & 0xFFFF_FFFF) + (p10 & 0xFFFF_FFFF)
+    return a1 * b1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32)
+}
+
+# (m * mul) >> j for the 128-bit `mul` and 64 < j: Ryu keeps the result below 2^64.
+fn mul_shift(m: uint64, mul: U128, j: int) -> uint64 {
+    if j >= 128 { return 0 }
+    lo := mul_hi(m, mul.lo) +% (m *% mul.hi)
+    hi := mul_hi(m, mul.hi)
+    if lo < (m *% mul.hi) { hi += 1 }
+    s := to_u64(j - 64)
+    return (lo >> s) | (hi << (64 - s))
+}
+
+# ((m * mul.lo) >> delta) + ((m * mul.hi) << (64 - delta)) + add, mod 2^128, for
+# 0 < delta < 64: the small tables' product of 5^offset and a 5^base entry.
+fn shifted_sum(m: uint64, mul: U128, delta: int, add: uint64) -> U128 {
+    d := to_u64(delta)
+    s := 64 - d
+    b0h := mul_hi(m, mul.lo)
+    b0l := m *% mul.lo
+    b2h := mul_hi(m, mul.hi)
+    b2l := m *% mul.hi
+    xl := (b0l >> d) | (b0h << s)
+    xh := b0h >> d
+    yl := b2l << s
+    yh := (b2h << s) | (b2l >> d)
+    lo := xl +% yl
+    hi := xh +% yh
+    if lo < xl { hi = hi +% 1 }
+    sum := lo +% add
+    if sum < lo { hi = hi +% 1 }
+    return U128 { lo: sum, hi: hi }
+}
+
+# 5^i scaled to 125 bits.
+fn pow5(i: int) -> U128 {
+    base := i / 26
+    base2 := base * 26
+    mul := pow5_split2(base)
+    if i == base2 { return mul }
+    delta := pow5_bits(i) - pow5_bits(base2)
+    corr := (pow5_offsets(i / 16) >> to_u64((i % 16) * 2)) & 3
+    return shifted_sum(pow5_table(i - base2), mul, delta, 1 + corr)
+}
+
+# 1 / 5^i scaled to 125 bits, plus one.
+fn inv_pow5(i: int) -> U128 {
+    base := (i + 25) / 26
+    base2 := base * 26
+    mul := pow5_inv_split2(base)
+    if i == base2 { return mul }
+    delta := pow5_bits(base2) - pow5_bits(i)
+    corr := (pow5_inv_offsets(i / 16) >> to_u64((i % 16) * 2)) & 3
+    return shifted_sum(pow5_table(base2 - i), U128 { lo: mul.lo - 1, hi: mul.hi }, delta, 1 + corr)
+}
+
+fn pow5_table(i: int) -> uint64 {
+    return match i {
+        0 -> 1,
+        1 -> 5,
+        2 -> 25,
+        3 -> 125,
+        4 -> 625,
+        5 -> 3125,
+        6 -> 15625,
+        7 -> 78125,
+        8 -> 390625,
+        9 -> 1953125,
+        10 -> 9765625,
+        11 -> 48828125,
+        12 -> 244140625,
+        13 -> 1220703125,
+        14 -> 6103515625,
+        15 -> 30517578125,
+        16 -> 152587890625,
+        17 -> 762939453125,
+        18 -> 3814697265625,
+        19 -> 19073486328125,
+        20 -> 95367431640625,
+        21 -> 476837158203125,
+        22 -> 2384185791015625,
+        23 -> 11920928955078125,
+        24 -> 59604644775390625,
+        _ -> 298023223876953125,
+    }
+}
+
+fn pow5_split2(i: int) -> U128 {
+    return match i {
+        0 -> U128 { lo: 0, hi: 1152921504606846976 },
+        1 -> U128 { lo: 0, hi: 1490116119384765625 },
+        2 -> U128 { lo: 1032610780636961552, hi: 1925929944387235853 },
+        3 -> U128 { lo: 7910200175544436838, hi: 1244603055572228341 },
+        4 -> U128 { lo: 16941905809032713930, hi: 1608611746708759036 },
+        5 -> U128 { lo: 13024893955298202172, hi: 2079081953128979843 },
+        6 -> U128 { lo: 6607496772837067824, hi: 1343575221513417750 },
+        7 -> U128 { lo: 17332926989895652603, hi: 1736530273035216783 },
+        8 -> U128 { lo: 13037379183483547984, hi: 2244412773384604712 },
+        9 -> U128 { lo: 1605989338741628675, hi: 1450417759929778918 },
+        10 -> U128 { lo: 9630225068416591280, hi: 1874621017369538693 },
+        11 -> U128 { lo: 665883850346957067, hi: 1211445438634777304 },
+        _ -> U128 { lo: 14931890668723713708, hi: 1565756531257009982 },
+    }
+}
+
+fn pow5_offsets(i: int) -> uint64 {
+    return match i {
+        0 -> 0x00000000,
+        1 -> 0x00000000,
+        2 -> 0x00000000,
+        3 -> 0x00000000,
+        4 -> 0x40000000,
+        5 -> 0x59695995,
+        6 -> 0x55545555,
+        7 -> 0x56555515,
+        8 -> 0x41150504,
+        9 -> 0x40555410,
+        10 -> 0x44555145,
+        11 -> 0x44504540,
+        12 -> 0x45555550,
+        13 -> 0x40004000,
+        14 -> 0x96440440,
+        15 -> 0x55565565,
+        16 -> 0x54454045,
+        17 -> 0x40154151,
+        18 -> 0x55559155,
+        19 -> 0x51405555,
+        _ -> 0x00000105,
+    }
+}
+
+fn pow5_inv_split2(i: int) -> U128 {
+    return match i {
+        0 -> U128 { lo: 1, hi: 2305843009213693952 },
+        1 -> U128 { lo: 5955668970331000884, hi: 1784059615882449851 },
+        2 -> U128 { lo: 8982663654677661702, hi: 1380349269358112757 },
+        3 -> U128 { lo: 7286864317269821294, hi: 2135987035920910082 },
+        4 -> U128 { lo: 7005857020398200553, hi: 1652639921975621497 },
+        5 -> U128 { lo: 17965325103354776697, hi: 1278668206209430417 },
+        6 -> U128 { lo: 8928596168509315048, hi: 1978643211784836272 },
+        7 -> U128 { lo: 10075671573058298858, hi: 1530901034580419511 },
+        8 -> U128 { lo: 597001226353042382, hi: 1184477304306571148 },
+        9 -> U128 { lo: 1527430471115325346, hi: 1832889850782397517 },
+        10 -> U128 { lo: 12533209867169019542, hi: 1418129833677084982 },
+        11 -> U128 { lo: 5577825024675947042, hi: 2194449627517475473 },
+        12 -> U128 { lo: 11006974540203867551, hi: 1697873161311732311 },
+        13 -> U128 { lo: 10313493231639821582, hi: 1313665730009899186 },
+        _ -> U128 { lo: 12701016819766672773, hi: 2032799256770390445 },
+    }
+}
+
+fn pow5_inv_offsets(i: int) -> uint64 {
+    return match i {
+        0 -> 0x54544554,
+        1 -> 0x04055545,
+        2 -> 0x10041000,
+        3 -> 0x00400414,
+        4 -> 0x40010000,
+        5 -> 0x41155555,
+        6 -> 0x00000454,
+        7 -> 0x00010044,
+        8 -> 0x40000000,
+        9 -> 0x44000041,
+        10 -> 0x50454450,
+        11 -> 0x55550054,
+        12 -> 0x51655554,
+        13 -> 0x40004000,
+        14 -> 0x01000001,
+        15 -> 0x00010500,
+        16 -> 0x51515411,
+        17 -> 0x05555554,
+        _ -> 0x00000000,
+    }
+}
+
+# A natural number for `rounded`: word 0 counts the 32-bit limbs in use, least significant
+# first from word 1. 40 limbs hold the largest value `rounded` builds (under 1150 bits:
+# a 53-bit mantissa times 10^324, then times 10 and 2).
+fn big(v: int) -> rawptr {
+    b := gc_alloc(41 * 8, 0)
+    n := 0
+    x := v
+    while x > 0 {
+        set_limb(b, n, x & 0xFFFF_FFFF)
+        x = x >> 32
+        n += 1
+    }
+    unsafe { store(b, n) }
+    return b
+}
+
+fn big_len(b: rawptr) -> int {
+    n: int = unsafe { load(b) }
+    return n
+}
+
+fn limb(b: rawptr, i: int) -> int {
+    v: int = unsafe { load(offset(b, 8 + i * 8)) }
     return v
 }
 
-# Mode 0 asks for the shortest round-trip digits.
-pub fn shortest(f: float) -> Shortest {
-    return dtoa(f, 0, 0)
+fn set_limb(b: rawptr, i: int, v: int) {
+    if i >= 40 { panic("fmt: big number overflow") }
+    unsafe { store(offset(b, 8 + i * 8), v) }
 }
 
-# The value rounded to `n` significant digits (mode 2), trailing zeros dropped.
-pub fn rounded(f: float, n: int) -> Shortest {
-    return dtoa(f, 2, n)
+# b *= k for 0 < k <= 2^30: a limb times k plus a carry stays below 2^63.
+fn big_mul(b: rawptr, k: int) {
+    n := big_len(b)
+    carry := 0
+    for i in 0..n {
+        x := limb(b, i) * k + carry
+        set_limb(b, i, x & 0xFFFF_FFFF)
+        carry = x >> 32
+    }
+    if carry > 0 {
+        set_limb(b, n, carry)
+        unsafe { store(b, n + 1) }
+    }
 }
 
-# The digits live in memory `__dtoa` allocated, so they are copied into a gc str before it
-# is freed.
-fn dtoa(f: float, mode: int, n: int) -> Shortest {
-    out := gc_alloc(8, 0)
-    sign := gc_alloc(8, 0)
-    p := unsafe { __dtoa(f, mode, n, out, sign, offset(0, 0)) }
-    digits := os.from_cstr(p)
-    unsafe { __freedtoa(p) }
-    return Shortest { digits: digits, point: load_i32(out), neg: load_i32(sign) != 0 }
+# b *= base^e for base 2 or 10, in steps that keep big_mul's k at most 2^30.
+fn big_mul_pow(b: rawptr, base: int, e: int) {
+    step := 30
+    if base == 10 { step = 9 }
+    full := 1
+    for _ in 0..step {
+        full *= base
+    }
+    left := e
+    while left >= step {
+        big_mul(b, full)
+        left -= step
+    }
+    k := 1
+    for _ in 0..left {
+        k *= base
+    }
+    if k > 1 { big_mul(b, k) }
+}
+
+fn big_cmp(a: rawptr, b: rawptr) -> int {
+    n := big_len(a)
+    m := big_len(b)
+    if n != m {
+        if n > m { return 1 }
+        return -1
+    }
+    i := n - 1
+    while i >= 0 {
+        x := limb(a, i)
+        y := limb(b, i)
+        if x != y {
+            if x > y { return 1 }
+            return -1
+        }
+        i -= 1
+    }
+    return 0
+}
+
+# a -= b for a >= b.
+fn big_sub(a: rawptr, b: rawptr) {
+    n := big_len(a)
+    m := big_len(b)
+    borrow := 0
+    for i in 0..n {
+        y := 0
+        if i < m { y = limb(b, i) }
+        x := limb(a, i) - y - borrow
+        borrow = 0
+        if x < 0 {
+            x += 0x1_0000_0000
+            borrow = 1
+        }
+        set_limb(a, i, x)
+    }
+    while n > 0 && limb(a, n - 1) == 0 {
+        n -= 1
+    }
+    unsafe { store(a, n) }
+}
+
+fn put_digit(buf: rawptr, at: int, d: int) {
+    unsafe { store_byte(text.window(buf, at, 1), 48 + d) }
+}
+
+fn digit_at(buf: rawptr, at: int) -> int {
+    return unsafe { load_byte(text.window(buf, at, 1)) } - 48
 }
 
 # The float `s` spells, or none unless strtod reads all of it. strtod skips leading
