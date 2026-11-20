@@ -131,8 +131,7 @@ pub const IrResult = union(enum) {
     err: EmitError,
 };
 
-/// The SERIAL relink tail (every build, uncached): append referenced hand-emitted
-/// builtin bodies, intern strings program-wide (deterministic: fn source order
+/// The SERIAL relink tail (every build, uncached): intern strings program-wide (deterministic: fn source order
 /// then in-fn literal order), rewrite `.cstr` hashes to offsets, then link and
 /// rebase cross-segment relocs. `slots` is consumed (each FnCode freed).
 fn relink(
@@ -174,9 +173,8 @@ fn relink(
     return .{ .ok = lp };
 }
 
-/// Shared back half of both paths: append any referenced hand-emitted builtin bodies,
-/// intern strings deterministically, rewrite `.cstr` targets, then `Link.link`. CONSUMES
-/// `fns` (frees each FnCode and any appended builtin body). Returns a LinkedProgram
+/// Shared back half of both paths: intern strings deterministically, rewrite `.cstr`
+/// targets, then `Link.link`. CONSUMES `fns` (frees each FnCode). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
 fn linkAndTail(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
     const lk = try link.linkProgram(io, gpa, backend, fns, names[entry_fn], desc_plan, debug);

@@ -25,8 +25,13 @@ const EnumLayout = Typecheck.EnumLayout;
 const DeriveRecipe = Typecheck.DeriveRecipe;
 
 pub fn freeAdapters(gpa: std.mem.Allocator, adapters: []const Closure.Adapter) void {
-    for (adapters) |a| gpa.free(a.name);
+    for (adapters) |a| freeAdapter(gpa, a);
     gpa.free(adapters);
+}
+
+fn freeAdapter(gpa: std.mem.Allocator, a: Closure.Adapter) void {
+    gpa.free(a.name);
+    if (a.ownsParams()) gpa.free(a.sig.params);
 }
 
 /// The adapter table, sorted by `(kind, key)` and deduped: one `.fn_value` thunk per fn a
@@ -90,7 +95,7 @@ pub fn buildAdapters(
                 .sig = .{ .params = sigs[k.key].params, .ret = sigs[k.key].ret },
             },
             .bound_copy, .bound_box, .bound_ref, .assoc_value => a.* = try methodAdapter(gpa, k.kind, k.key, methods, derives, instances, fns, sigs),
-            .c_fn, .c_lambda, .c_assoc => unreachable,
+            .c_fn, .c_lambda, .c_assoc, .c_call => unreachable,
         }
         built += 1;
     }
@@ -126,7 +131,8 @@ fn methodAdapter(
 /// to an extern's fn-typed param: `.c_fn` for a named fn, `.c_assoc` for an associated fn
 /// (keyed by its method row), `.c_lambda` for a lambda or local
 /// fn, keyed by its unit, so after the lambda units. The checker let only these through
-/// (T0080). Their kinds sort after every other, so appending keeps the table sorted. On
+/// (T0080). Then one `.c_call` adapter per extern that may call back (`Sig.calls_back`)
+/// a body calls. Their kinds sort after every other, so appending keeps the table sorted. On
 /// success the old slice is freed into the new one; on failure the caller still owns it.
 pub fn appendCallbackAdapters(
     gpa: std.mem.Allocator,
@@ -142,14 +148,19 @@ pub fn appendCallbackAdapters(
     adapters: []Closure.Adapter,
 ) ![]Closure.Adapter {
     const any = for (fns, sigs) |f, sg| {
-        if (f.kind == .import and for (sg.params) |p| {
-            if (Closure.isFnType(p, layouts)) break true;
-        } else false) break true;
+        if (f.kind == .import and sg.calls_back) break true;
     } else false;
     if (!any) return adapters;
     const Key = struct { kind: Closure.AdapterKind, key: u32 };
     var keys: std.ArrayList(Key) = .empty;
     defer keys.deinit(gpa);
+    // One `.c_call` adapter per extern that may call back and, for a variadic one, per list
+    // of vararg types, in first-call order; its key is its place in this list.
+    var calls: std.ArrayList(CCall) = .empty;
+    defer {
+        for (calls.items) |c| gpa.free(c.extra);
+        calls.deinit(gpa);
+    }
     for (bodies.items, 0..) |b, bi| {
         const mc = &graph.mods[b.mod];
         const V = struct {
@@ -163,6 +174,7 @@ pub fn appendCallbackAdapters(
             units: []const Closure.LambdaUnit,
             layouts: []const Layout,
             keys: *std.ArrayList(Key),
+            calls: *std.ArrayList(CCall),
             pub fn on(self: *@This(), ev: Walk.Event) error{OutOfMemory}!void {
                 const e = switch (ev) {
                     .enter => |e| e,
@@ -176,15 +188,25 @@ pub fn appendCallbackAdapters(
                 };
                 if (self.fns[gid].kind != .import) return;
                 const sig = self.sigs[gid];
+                if (!sig.calls_back) return;
                 const args = SigMod.fixedArgs(Ast.Index, Ast.rangeSlice(self.tree, n.rhs.int()), sig.params.len, sig.variadic) orelse return;
                 for (args, sig.params) |arg, p| {
                     if (!Closure.isFnType(p, self.layouts)) continue;
-                    if (Closure.callbackKey(self.tree, self.resolutions, self.body.nodes, self.owner, self.units, arg)) |k|
+                    if (Closure.callbackKey(self.tree, self.resolutions, self.body.nodes, self.owner, self.units, arg)) |k| {
                         try self.keys.append(self.gpa, .{ .kind = k.kind, .key = k.key });
+                    }
                 }
+                const all = Ast.rangeSlice(self.tree, n.rhs.int());
+                const extra = try self.gpa.alloc(Type, all.len - args.len);
+                defer self.gpa.free(extra);
+                for (all[args.len..], extra) |arg, *t| t.* = self.body.nodes.typeOf(arg);
+                for (self.calls.items) |c| {
+                    if (c.ext == gid and Typecheck.eqlTypeVec(c.extra, extra)) return;
+                }
+                try self.calls.append(self.gpa, .{ .ext = gid, .extra = try self.gpa.dupe(Type, extra) });
             }
         };
-        var v: V = .{ .gpa = gpa, .tree = mc.tree, .resolutions = mc.resolutions, .body = b, .owner = @intCast(bi), .fns = fns, .sigs = sigs, .units = units, .layouts = layouts, .keys = &keys };
+        var v: V = .{ .gpa = gpa, .tree = mc.tree, .resolutions = mc.resolutions, .body = b, .owner = @intCast(bi), .fns = fns, .sigs = sigs, .units = units, .layouts = layouts, .keys = &keys, .calls = &calls };
         try Walk.walk(.{ .tree = mc.tree, .tokens = mc.tokens, .source = mc.source }, b.decl, &v);
     }
     std.mem.sort(Key, keys.items, {}, struct {
@@ -199,10 +221,15 @@ pub fn appendCallbackAdapters(
         keys.items[n] = k;
         n += 1;
     }
+    if (calls.items.len > 0) {
+        try keys.resize(gpa, n + calls.items.len);
+        for (calls.items, 0..) |_, i| keys.items[n + i] = .{ .kind = .c_call, .key = @intCast(i) };
+        n += calls.items.len;
+    }
     const out = try gpa.alloc(Closure.Adapter, adapters.len + n);
     var built: usize = 0;
     errdefer {
-        for (out[adapters.len..][0..built]) |a| gpa.free(a.name);
+        for (out[adapters.len..][0..built]) |a| freeAdapter(gpa, a);
         gpa.free(out);
     }
     for (keys.items[0..n], out[adapters.len..]) |k, *a| {
@@ -222,6 +249,7 @@ pub fn appendCallbackAdapters(
                 .sig = units[k.key].sig,
             },
             .c_assoc => try methodAdapter(gpa, .c_assoc, k.key, methods, derives, instances, fns, sigs),
+            .c_call => try cCallAdapter(gpa, graph, k.key, calls.items[k.key], fns, sigs, layouts),
             else => unreachable,
         };
         built += 1;
@@ -229,6 +257,43 @@ pub fn appendCallbackAdapters(
     @memcpy(out[0..adapters.len], adapters);
     gpa.free(adapters);
     return out;
+}
+
+/// An extern that may call back, with the types of a variadic call's varargs.
+const CCall = struct { ext: u32, extra: []const Type };
+
+/// The `.c_call` adapter of `c`: it takes the extern's params, then the varargs.
+fn cCallAdapter(
+    gpa: std.mem.Allocator,
+    graph: *const Typecheck.GraphCtx,
+    key: u32,
+    c: CCall,
+    fns: []const Typecheck.GraphFnInput,
+    sigs: []const Sig,
+    layouts: []const Layout,
+) !Closure.Adapter {
+    const sig = sigs[c.ext];
+    // An extern's name is its bare C symbol, which two modules may each declare, so the
+    // adapter takes its declaring module's name: the runtime's are then runtime units.
+    const module = graph.mods[fns[c.ext].module].path;
+    const base = if (sig.variadic)
+        try std.fmt.allocPrint(gpa, "{s}.{s}$v{d}", .{ module, fns[c.ext].name, key })
+    else
+        try std.fmt.allocPrint(gpa, "{s}.{s}", .{ module, fns[c.ext].name });
+    defer gpa.free(base);
+    const name = try Mangle.adapter(gpa, base, .c_call);
+    errdefer gpa.free(name);
+    return .{
+        .kind = .c_call,
+        .key = key,
+        .name = name,
+        .target = .{ .kind = fns[c.ext].kind, .name = fns[c.ext].name },
+        .sig = .{ .params = if (sig.variadic) try std.mem.concat(gpa, Type, &.{ sig.params, c.extra }) else sig.params, .ret = sig.ret },
+        .by_ptr = sig.mut_mask | Closure.callbackMask(sig.params, layouts),
+        .ext = c.ext,
+        .c_params = sig.params,
+        .variadic = sig.variadic,
+    };
 }
 
 /// Append the `(kind, method)` adapter key of every bound method value in body `b` (its

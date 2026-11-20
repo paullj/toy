@@ -64,6 +64,14 @@ pub const RuntimeFn = enum {
     collections,
     span_count,
     stack_guard,
+    int_to_str,
+    uint_to_str,
+    str_concat,
+    panic,
+    c_enter,
+    c_leave,
+    c_link,
+    c_unlink,
 
     pub fn name(f: RuntimeFn) []const u8 {
         return switch (f) {
@@ -74,14 +82,25 @@ pub const RuntimeFn = enum {
             .collections => "core/rt/gc.collections",
             .span_count => "core/rt/gc.span_count",
             .stack_guard => "core/rt/stack.guard",
+            .int_to_str => "core/rt/str.int_to_str",
+            .uint_to_str => "core/rt/str.uint_to_str",
+            .str_concat => "core/rt/str.str_concat",
+            .panic => "core/rt/panic.panic",
+            .c_enter => "core/rt/frames.enter",
+            .c_leave => "core/rt/frames.leave",
+            .c_link => "core/rt/frames.link",
+            .c_unlink => "core/rt/frames.unlink",
         };
     }
 
-    /// The collector's entries: a call to one may run a collection. They are the only
-    /// `core/rt` fns that reach the collector, so T0082 counts a call to one as an
-    /// allocation, and every call to one is a safepoint.
+    /// The collector's entries, and the str builders that allocate: a call to one may run
+    /// a collection. They are the only `core/rt` fns that reach the collector, so T0082
+    /// counts a call to one as an allocation, and every call to one is a safepoint.
     pub fn collects(f: RuntimeFn) bool {
-        return f == .alloc or f == .alloc_slow or f == .collect;
+        return switch (f) {
+            .alloc, .alloc_slow, .collect, .int_to_str, .uint_to_str, .str_concat => true,
+            .str_eq, .collections, .span_count, .stack_guard, .panic, .c_enter, .c_leave, .c_link, .c_unlink => false,
+        };
     }
 
     /// The allocation fast path (#211): a unit built with the inliner splices each call to
@@ -259,6 +278,8 @@ const core_replacements = std.StaticStringMap([]const u8).initComptime(.{
     .{ "core/rt/str", "std/str" },
     .{ "core/rt/gc", "std/gc" },
     .{ "core/rt/stack", "std/os" },
+    .{ "core/rt/panic", "std/os" },
+    .{ "core/rt/frames", "std/os" },
 });
 
 /// The std module holding a builtin scalar's `impl` of a protocol, keyed `"<type> has

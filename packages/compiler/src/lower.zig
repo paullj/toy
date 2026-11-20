@@ -1780,17 +1780,9 @@ pub fn hashStrAtPtr(b: *Builder, base: Ir.ValueId) error{OutOfMemory}!Ir.ValueId
     return try b.emit(.{ .load = .{ .addr = ha_f, .ty = int_ty } }, int_ty);
 }
 
-/// The `__int_to_str` builtin's stable symbol identity — renders an i64 into a fresh
-/// `gc_alloc`'d packed byte buffer and returns the str reg-pair {ptr,len} (x0:x1).
-const int_to_str_sym: Link.SymName = .{ .kind = .builtin, .name = "__int_to_str" };
-
-/// The `__uint_to_str` builtin's stable symbol identity — `__int_to_str`'s unsigned twin
-/// for the 64-bit unsigned types, whose top bit would otherwise render as a sign.
-const uint_to_str_sym: Link.SymName = .{ .kind = .builtin, .name = "__uint_to_str" };
-
-/// The `__str_concat` builtin's stable symbol identity — joins two str values into a fresh
-/// `gc_alloc`'d packed byte buffer and returns the str reg-pair {ptr,len} (x0:x1).
-const str_concat_sym: Link.SymName = .{ .kind = .builtin, .name = "__str_concat" };
+const int_to_str_sym: Link.SymName = runtimeSym(.int_to_str);
+const uint_to_str_sym: Link.SymName = runtimeSym(.uint_to_str);
+const str_concat_sym: Link.SymName = runtimeSym(.str_concat);
 
 /// The slot ADDRESS of a str operand's `{ptr@0,len@8}`. The note-and-zero fallback keeps a
 /// mis-lowered operand from becoming a wild pointer (a well-typed program never hits it).
@@ -1804,7 +1796,7 @@ fn strBase(b: *Builder, node: Ast.Index) error{OutOfMemory}!Ir.ValueId {
     return try b.emit(.{ .slot_addr = slot }, Typecheck.Type.int);
 }
 
-/// `lhs.concat(rhs)`: hand the two operands' `{ptr,len}` to the out-of-line `__str_concat`
+/// `lhs.concat(rhs)`: hand the two operands' `{ptr,len}` to the out-of-line `str_concat`
 /// builtin, which `gc_alloc`s exactly `len_lhs+len_rhs` packed bytes and copies both in.
 /// The four scalar args are read from the operands' frame slots BEFORE the call — a raw
 /// heap pointer is never held across the call (its sole safepoint), while the operand str
@@ -1856,11 +1848,11 @@ pub fn emitStrLiteralSlot(b: *Builder, bytes: []const u8) error{OutOfMemory}!Ir.
 
 /// Append `{add_ptr, add_len}` to the growable `str` accumulator slot `acc`, IN PLACE:
 /// load `acc`'s current `{ptr,len}`, hand all four scalars to the out-of-line
-/// `__str_concat` builtin, and write its fresh `gc_alloc`'d result back into `acc` (the
+/// `str_concat` builtin, and write its fresh `gc_alloc`'d result back into `acc` (the
 /// `ret_slot` IS `acc`). Generalizes `lowerStrConcat`'s tail into a reused-slot loop step
 /// so a structural render costs ONE 16-byte str slot for the whole accumulator (not one
 /// live temp per field — the frame-capacity fix). Reading the old `acc` as input and
-/// writing the new `acc` as output does not alias: `__str_concat` reads+saves its four
+/// writing the new `acc` as output does not alias: `str_concat` reads+saves its four
 /// scalar args before its `gc_alloc`, then returns a fresh buffer that `placeResult` stores
 /// into `acc` only AFTER the call. The old `acc` buffer + the `add` buffer stay slot-rooted
 /// across the collection the alloc may trigger.
@@ -1908,8 +1900,8 @@ pub fn appendPiece(b: *Builder, acc: Ir.SlotId, piece: Ir.SlotId) error{OutOfMem
 /// The SOLE producer of a value's `str` rendering — the authority `to_string` (and the
 /// derive `display` emitters) consume. `op` is `ty`'s already-lowered operand. Returns a `str` slot:
 ///   * str    -> the operand's own slot (identity, no alloc).
-///   * int    -> `__int_to_str` into a fresh cell (i64::MIN-correct never-negate render);
-///     a 64-bit unsigned int goes to `__uint_to_str` instead.
+///   * int    -> `int_to_str` into a fresh cell (i64::MIN-correct never-negate render);
+///     a 64-bit unsigned int goes to `uint_to_str` instead.
 ///   * bool   -> `cond_br` selecting the const-data `"true"`/`"false"` literal.
 ///   * unit   -> the const-data `"()"` literal (no alloc).
 ///   * a fn value -> the const-data `"<fn>"` literal (no witness: no impl can name its type).
@@ -2296,6 +2288,8 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
             if (nm.kind == .builtin) if (Intrinsic.lookup(nm.name)) |ik| {
                 if (try lowerIntrinsicCall(b, node_idx, n, ik)) |op| return op;
                 if (collectorFn(ik)) |f| callee = runtimeSym(f);
+            } else if (std.mem.eql(u8, nm.name, "panic")) {
+                callee = panic_sym;
             };
             callee_gid = gid;
         },
@@ -2340,10 +2334,7 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
     const arg_mut = Modes.argMask(b.in.bodyView(), b.in.programView(), node_idx);
     // An extern's fn-typed param is a C function pointer, passed like a `mut` struct's
     // address: one pointer word.
-    var callbacks: u64 = 0;
-    if (callee.kind == .import and callee_gid < b.in.sigs.len) for (b.in.sigs[callee_gid].params, 0..) |p, i| {
-        if (i < 64 and Closure.isFnType(p, b.in.layouts)) callbacks |= @as(u64, 1) << @intCast(i);
-    };
+    const callbacks: u64 = if (callee.kind == .import and callee_gid < b.in.sigs.len) Closure.callbackMask(b.in.sigs[callee_gid].params, b.in.layouts) else 0;
     for (arg_nodes, 0..) |arg, i| {
         if (Modes.isMut(callbacks, i)) {
             args[self_n + i] = try closure.lowerCallbackAddr(b, arg);
@@ -2359,7 +2350,23 @@ fn lowerCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node) error{OutOfMemory}!I
         } else args[self_n + i] = try lowerExpr(b, arg);
     }
 
-    const target: CallTarget = if (callee.kind == .import and callee_gid < b.in.sigs.len)
+    // A C call that may call back goes through its `.c_call` adapter, whose frame a stack
+    // walk steps over the C frames to. Calling the extern directly would leave the walk
+    // no way past C, so a missing adapter is an internal error, not a plain call.
+    const c_call: ?u32 = if (callee.kind == .import and callee_gid < b.in.sigs.len and b.in.sigs[callee_gid].calls_back) blk: {
+        const fixed = b.in.sigs[callee_gid].params.len;
+        const extra = try b.gpa.alloc(Typecheck.Type, arg_nodes.len -| fixed);
+        defer b.gpa.free(extra);
+        for (extra, arg_nodes[arg_nodes.len - extra.len ..]) |*t, arg| t.* = b.in.nodes.typeOf(arg);
+        break :blk Closure.findCCall(b.in.closure.adapters, @intCast(callee_gid), extra) orelse {
+            try b.note(callee_node.main_token, "no C call adapter for an extern that may call back in lower");
+            b.gpa.free(args);
+            return .none;
+        };
+    } else null;
+    const target: CallTarget = if (c_call) |ai|
+        .{ .direct = .{ .kind = .user_fn, .name = b.in.closure.adapters[ai].name } }
+    else if (callee.kind == .import and callee_gid < b.in.sigs.len)
         .{ .import = .{ .sym = callee, .params = b.in.sigs[callee_gid].params, .by_ptr = b.in.sigs[callee_gid].mut_mask | callbacks, .variadic = b.in.sigs[callee_gid].variadic } }
     else
         .{ .direct = callee };
@@ -2431,8 +2438,8 @@ pub fn runtimeSym(f: StdNames.RuntimeFn) Link.SymName {
     return .{ .kind = .user_fn, .name = f.name() };
 }
 
-/// A call of intrinsic `ik` lowered in place, or null for one that is called by a symbol
-/// (`panic`, `text_base`, or a `core/rt` collector fn).
+/// A call of intrinsic `ik` lowered in place, or null for one that calls a `core/rt`
+/// collector fn.
 fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrinsic.Kind) error{OutOfMemory}!?Ir.Operand {
     switch (ik) {
         .store => {
@@ -2512,7 +2519,9 @@ fn lowerIntrinsicCall(b: *Builder, node_idx: Ast.Index, n: Ast.Node, ik: Intrins
         },
         .control_block => return .{ .value = try b.emit(.{ .data_addr = 0 }, Typecheck.Type.int) },
         .frame_address => return .{ .value = try b.emit(.frame_addr, Typecheck.Type.int) },
+        .text_base => return .{ .value = try b.emit(.text_base, Typecheck.Type.int) },
         .stack_map => return .{ .value = try b.emit(.{ .cstr_ptr = Link.gc_stackmap_base_hash }, Typecheck.Type.int) },
+        .symbol_table => return .{ .value = try b.emit(.{ .cstr_ptr = Link.symtab_base_hash }, Typecheck.Type.int) },
         .gc_stress => return .{ .value = try b.emit(.{ .bconst = b.in.gc_stress }, Typecheck.Type.bool) },
         .ref_new => return try lowerRefNew(b, Ast.rangeSlice(b.in.tree, (n.rhs).int())[0], n.main_token),
         .ref_get => {
@@ -2731,8 +2740,8 @@ noinline fn lowerBuiltinMethod(b: *Builder, node_idx: Ast.Index, n: Ast.Node, k:
         },
         .scalar_to_string => {
             // The `displayToSlot` renderer. `str` is identity (share the immutable receiver,
-            // no alloc); int/bool/unit build a fresh str (via `__int_to_str` or
-            // `__uint_to_str` / the literal cond / the const-data `"()"`).
+            // no alloc); int/bool/unit build a fresh str (via `int_to_str` or
+            // `uint_to_str` / the literal cond / the const-data `"()"`).
             const recv_ty = b.in.nodes.typeOf(recv);
             if (recv_ty.kind == .str) return try lowerExpr(b, recv);
             const op = try lowerExpr(b, recv);
@@ -2872,7 +2881,7 @@ fn lowerOptionResultMethod(b: *Builder, n: Ast.Node, om: OptResultCall) error{Ou
     }
 }
 
-const panic_sym: Link.SymName = .{ .kind = .builtin, .name = "panic" };
+const panic_sym: Link.SymName = runtimeSym(.panic);
 
 /// The absent arm of `expect(msg)`: the message is evaluated only here, so building it
 /// costs nothing on the present path, and it reaches the same runtime `panic` a

@@ -4347,7 +4347,7 @@ pub const BodyChecker = struct {
                     },
                     // Addresses the runtime computes with, as ints: none is a heap
                     // reference, so no stack map names them.
-                    .text_base, .control_block, .frame_address, .stack_map => {
+                    .text_base, .control_block, .frame_address, .stack_map, .symbol_table => {
                         _ = try bc.checkArity(node_idx, args, 0);
                         bc.node_types[(node_idx).int()] = Type.int;
                         return Type.int;

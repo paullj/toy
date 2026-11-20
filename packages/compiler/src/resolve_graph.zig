@@ -558,8 +558,8 @@ const GraphResolve = struct {
         }
 
         // Seed every synthetic builtin off one ordered list (`seeded_builtins`). Each is a
-        // homeless `.builtin` (bodyless; the ones that need machine code are hand-emitted at
-        // link time). `panic` is global prelude (registered into every module's fn table
+        // homeless `.builtin` (bodyless; lowering calls core/rt for the ones that need
+        // code, as `panic`). `panic` is global prelude (registered into every module's fn table
         // unless shadowed); each `Intrinsic` name registers only into the bundled modules its
         // `Intrinsic.scope` admits — naming one elsewhere leaves the name unresolved, R0001.
         // The list's order fixes each id, so `panic` leads and no later append shifts an

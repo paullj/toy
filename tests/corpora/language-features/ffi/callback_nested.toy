@@ -1,0 +1,59 @@
+# expect: exit 0
+# expect: stdout "outer 1 2 3\ninner 4 5 6\nmain kept\n"
+# A callback that calls C again, which calls back once more: toy frames sit above, between
+# and below two runs of C frames. The inner comparator collects on every call, and each toy
+# frame holds a heap value only it reaches, so the collector must find the roots of every
+# toy frame while it steps over the C frames between them.
+import std/io
+import std/gc
+import std/vec
+
+extern struct I64 { v: int }
+extern struct Three { a: int, b: int, c: int }
+
+extern {
+    fn qsort(mut base: Three, n: int, size: int, cmp: fn(rawptr, rawptr) -> int32)
+    fn memcpy(mut dst: I64, src: rawptr, n: int) -> rawptr
+}
+
+fn read_int(p: rawptr) -> int {
+    cell := I64 { v: 0 }
+    unsafe { memcpy(cell, p, 8) }
+    cell.v
+}
+
+fn order(a: rawptr, b: rawptr) -> int32 {
+    x := read_int(a)
+    y := read_int(b)
+    if x < y { -1 } else if x > y { 1 } else { 0 }
+}
+
+fn inner(a: rawptr, b: rawptr) -> int32 {
+    junk: Vec[str] = []
+    junk.push("garbage ".concat("x"))
+    gc.collect()
+    order(a, b)
+}
+
+fn outer(a: rawptr, b: rawptr) -> int32 {
+    mine: Vec[str] = []
+    mine.push("outer ".concat("kept"))
+    ys := Three { a: 6, b: 4, c: 5 }
+    unsafe { qsort(ys, 3, 8, inner) }
+    if ys.a != 4 || ys.b != 5 || ys.c != 6 { io.println("inner unsorted") }
+    if mine[0] != "outer kept" { io.println("outer lost") }
+    order(a, b)
+}
+
+fn main() -> int {
+    keep: Vec[str] = []
+    keep.push("main ".concat("kept"))
+    xs := Three { a: 3, b: 1, c: 2 }
+    unsafe { qsort(xs, 3, 8, outer) }
+    io.println("outer ".concat(xs.a.to_string()).concat(" ").concat(xs.b.to_string()).concat(" ").concat(xs.c.to_string()))
+    ys := Three { a: 6, b: 4, c: 5 }
+    unsafe { qsort(ys, 3, 8, inner) }
+    io.println("inner ".concat(ys.a.to_string()).concat(" ").concat(ys.b.to_string()).concat(" ").concat(ys.c.to_string()))
+    io.println(keep[0])
+    return 0
+}

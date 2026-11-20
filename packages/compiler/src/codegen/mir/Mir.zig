@@ -37,8 +37,8 @@
 //! the IR slots and aggregate values (memory the map always names) that is the precise
 //! map of that call. Virtual registers the selector makes for its own temporaries
 //! are never live across a call (`tempsStayLocal`), so none holds a reference there.
-//! Every toy frame is precise this way; the collector scans a whole frame conservatively
-//! only for frames no toy fn owns (hand-written builtins, C code).
+//! Every toy frame is precise this way; the collector steps over C frames, never reading
+//! one (`core/rt/frames`).
 //! A loop back edge carries a `safepoint_poll` placeholder where a concurrent collector's
 //! poll goes (#83). It encodes to nothing now.
 //!

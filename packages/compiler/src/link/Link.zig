@@ -98,8 +98,7 @@ pub const FnCode = struct {
     relocs: []Reloc,
     literals: []Literal,
     /// The per-fn precise GC root map (`FrameLayout.encodeRoots`): `[u32 n][u32 sp_off × n]`.
-    /// Empty for a hand-emitted builtin or a fn that failed to lower — the collector reads
-    /// an empty map as "scan this frame conservatively". A pure function of the IR + layouts, so it rides
+    /// Empty only for a fn that failed to lower, or a test's hand-built one. A pure function of the IR + layouts, so it rides
     /// the content-fp cache. Owned like the other regions ("always own").
     root_bitmap: []u8 = &.{},
     /// More rows of the stack map, for a fn whose roots change from call to call (the MIR
@@ -280,17 +279,13 @@ const SymNameCtx = struct {
     }
 };
 
-/// A call from a hand-emitted builtin body, which is appended after `reachable` runs, to
-/// a fn that body needs kept.
-pub const BuiltinCall = struct { builtin: []const u8, callee: SymName };
-
 /// Which fns and descriptors the image keeps: the fns reachable from `entry` through
-/// `.func` relocs (calls and fn-address pairs alike) and `builtin_calls`, and the descriptors a kept fn
+/// `.func` relocs (calls and fn-address pairs alike), and the descriptors a kept fn
 /// names by a `.cstr` reloc on its `desc_hash`, whose hash/eq units are then
 /// walked like any callee. Codegen lowers every fn and plans a descriptor for every
 /// typechecked heap type, so without this every unused std/core fn, its strings, its
 /// imports and the GC runtime its heap types drag in would ride every binary.
-pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, descriptors: []const DescEntry, builtin_calls: []const BuiltinCall) !Reach {
+pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, descriptors: []const DescEntry) !Reach {
     const none = std.math.maxInt(u32);
     var heads: std.HashMapUnmanaged(SymName, u32, SymNameCtx, std.hash_map.default_max_load_percentage) = .empty;
     defer heads.deinit(gpa);
@@ -323,11 +318,7 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
         next: []const u32,
         keep: []bool,
         work: *std.ArrayList(u32),
-        builtin_calls: []const BuiltinCall,
         fn mark(m: @This(), a: std.mem.Allocator, s: SymName) !void {
-            if (s.kind == .builtin) for (m.builtin_calls) |bc| {
-                if (std.mem.eql(u8, bc.builtin, s.name)) try m.mark(a, bc.callee);
-            };
             var at = m.heads.get(s) orelse return;
             while (at != none) : (at = m.next[at]) {
                 if (m.keep[at]) continue;
@@ -336,7 +327,7 @@ pub fn reachable(gpa: std.mem.Allocator, fns: []const FnCode, entry: SymName, de
             }
         }
     };
-    const m: Marker = .{ .heads = &heads, .next = next, .keep = keep, .work = &work, .builtin_calls = builtin_calls };
+    const m: Marker = .{ .heads = &heads, .next = next, .keep = keep, .work = &work };
     try m.mark(gpa, entry);
     while (work.pop()) |at| {
         for (fns[at].relocs) |rl| switch (rl.target) {
@@ -379,8 +370,8 @@ pub const Linked = struct {
     desc_table: []u8 = &.{},
     /// The GC stack-map table (empty unless `link` was asked to emit it): a `buildSideTable`
     /// payload keyed by each fn's START text offset → its precise root bitmap (or the 4-byte
-    /// `0xFFFFFFFF` conservative marker for a row-less fn), plus a row at each offset a fn's
-    /// `safepoint_maps` names, rows ascending by off with a final `{text_size, conservative}`
+    /// `0xFFFFFFFF` no-row marker for a row-less fn), plus a row at each offset a fn's
+    /// `safepoint_maps` names, rows ascending by off with a final `{text_size, no row}`
     /// sentinel. The collector scans it for the greatest row off ≤
     /// an identifying frame offset. A pure function of the fn set (offsets are stable-sort-
     /// ranked; consumes only order-independent inputs), so it is `-jN` byte-identical. Owned
@@ -562,7 +553,7 @@ pub fn link(io: Io, gpa: std.mem.Allocator, patcher: *const Patcher, fns: []cons
     errdefer data_relocs.deinit(gpa);
     for (jobs) |j| try data_relocs.appendSlice(gpa, j.relocs.items);
 
-    // 4) BACKTRACE SYMBOLS: the (offset, name) table `__panic` scans. Built from the
+    // 4) BACKTRACE SYMBOLS: the (offset, name) table `core/rt/panic` scans. Built from the
     //    already-computed layout (`site_h[i]` is fn i's handle → `offsets`), so it is
     //    a pure function of the fn set.
     const sym_table: []u8 = if (emit_symtab) try buildSymTable(gpa, fns, site_h, offsets, cursor) else &.{};
@@ -595,16 +586,15 @@ pub fn link(io: Io, gpa: std.mem.Allocator, patcher: *const Patcher, fns: []cons
     };
 }
 
-/// The 4-byte conservative marker `0xFFFFFFFF`: a row-less fn's payload, telling the
-/// collector to fall back to a whole-frame scan for frames it maps (builtins and the
-/// sentinel past __text).
-const conservative_marker = [4]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
+/// The 4-byte no-row marker `0xFFFFFFFF`: the payload of the sentinel past __text, which
+/// tells the collector a return address is in C, and of a row-less fn.
+const no_row_marker = [4]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
 
 /// Build the GC stack-map table (see `Linked.stack_map`) as a `buildSideTable` payload:
-/// one row per fn `{fn-start offset, root_bitmap}` plus a final `{text_size, conservative}`
+/// one row per fn `{fn-start offset, root_bitmap}` plus a final `{text_size, no row}`
 /// sentinel, rows sorted ascending by off (fn starts are distinct; sentinel last). A fn
 /// with an empty `root_bitmap` (a builtin) contributes the 4-byte
-/// conservative marker instead. `site_h[i]` is fn i's handle (→ `offsets`).
+/// no-row marker instead. `site_h[i]` is fn i's handle (→ `offsets`).
 fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []const u32, offsets: []const u32, text_size: u32) ![]u8 {
     const SmEnt = struct { off: u64, payload: []const u8 };
     const ents = try gpa.alloc(SmEnt, stackMapRows(fns));
@@ -612,12 +602,12 @@ fn buildStackMapTable(gpa: std.mem.Allocator, fns: []const FnCode, site_h: []con
     var n: usize = 0;
     for (fns, 0..) |f, i| {
         const base = offsets[site_h[i]];
-        ents[n] = .{ .off = base, .payload = if (f.root_bitmap.len == 0) &conservative_marker else f.root_bitmap };
+        ents[n] = .{ .off = base, .payload = if (f.root_bitmap.len == 0) &no_row_marker else f.root_bitmap };
         n += 1;
         var it: SafepointRows = .{ .bytes = f.safepoint_maps };
         while (it.next()) |r| : (n += 1) ents[n] = .{ .off = base + r.code_off, .payload = r.payload };
     }
-    ents[n] = .{ .off = text_size, .payload = &conservative_marker };
+    ents[n] = .{ .off = text_size, .payload = &no_row_marker };
     std.debug.assert(n + 1 == ents.len);
     std.mem.sortUnstable(SmEnt, ents, {}, struct {
         fn less(_: void, a: SmEnt, b: SmEnt) bool {
@@ -732,7 +722,7 @@ fn symEntLess(_: void, a: SymEnt, b: SymEnt) bool {
 const SideRow = struct { off: u64, blob_off: u64 };
 
 /// Sole authority for the framing every side table `link` reserves in the signed,
-/// read-only __cstring blob and a hand-emitted builtin locates at runtime via a
+/// read-only __cstring blob and core/rt locates at runtime via a
 /// reserved base hash (today the backtrace symbols; a GC stack map would be a
 /// different `blob`/`rows` payload through this same builder, not a fork). Layout:
 /// `[u64 count][{u64 off, u64 payload_off}×count][blob]`. Each `blob_off` is
@@ -1375,7 +1365,7 @@ test "buildSymTable: header + (off,name) rows sorted, trailing text-size sentine
     try testing.expectEqualStrings("<C>", std.mem.sliceTo(tab[last_noff..], 0));
 }
 
-test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn + sentinel are conservative" {
+test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn + sentinel carry the no-row marker" {
     const gpa = testing.allocator;
     // Sizes 3,1,2 words → offsets 0, 12, 16; total __text 24.
     var fns = [_]FnCode{
@@ -1384,7 +1374,7 @@ test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn +
         try makeFn(gpa, 2, 2, &.{}),
     };
     defer freeFns(gpa, &fns);
-    // fn0: one root at sp-off 8. fn1: empty ⇒ conservative marker. fn2: mapped but
+    // fn0: one root at sp-off 8. fn1: empty ⇒ no-row marker. fn2: mapped but
     // root-less. Roots are u32 sp offsets.
     const rb0 = [_]u8{ 1, 0, 0, 0, 8, 0, 0, 0 };
     const rb2 = [_]u8{ 0, 0, 0, 0 };
@@ -1415,12 +1405,12 @@ test "buildStackMapTable: rows ascend by off, payloads round-trip, row-less fn +
             try testing.expectEqual(@as(u32, 1), n); // fn0's one root
             try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, tab[poff + 4 ..][0..4], .little)); // sp_off
         } else if (off == 12) {
-            try testing.expectEqual(@as(u32, 0xFFFFFFFF), n); // fn1 conservative
+            try testing.expectEqual(@as(u32, 0xFFFFFFFF), n); // fn1 has no row
         } else if (off == 16) {
             try testing.expectEqual(@as(u32, 0), n); // fn2 mapped, root-less
         }
     }
-    // Sentinel: last row at text_size, conservative marker.
+    // Sentinel: last row at text_size, no-row marker.
     const last_off = std.mem.readInt(u64, tab[8 + (count - 1) * 16 ..][0..8], .little);
     const last_poff = std.mem.readInt(u64, tab[8 + (count - 1) * 16 + 8 ..][0..8], .little);
     try testing.expectEqual(@as(u64, linked.text.len), last_off);
@@ -1457,7 +1447,7 @@ test "reachable: keeps the entry's transitive callees and drops the rest" {
         try makeFn(gpa, 4, 1, &.{.{ .site = 0, .target = .{ .func = fname(9) }, .kind = T.call }}),
     };
     defer freeFns(gpa, &fns);
-    const r = try reachable(gpa, &fns, fname(0), &.{}, &.{});
+    const r = try reachable(gpa, &fns, fname(0), &.{});
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{ true, false, true, true, false }, r.fns);
 }
@@ -1485,36 +1475,17 @@ test "reachable: a descriptor and its units are kept only when kept code names i
         .{ .desc_hash = d_used, .size = 8, .@"align" = 8, .size_class = 0, .hash_name = "f1", .eq_name = "f2" },
         .{ .desc_hash = d_elem, .size = 8, .@"align" = 8, .size_class = 0, .eq_name = "f3" },
     };
-    const r = try reachable(gpa, &fns, fname(0), &descs, &.{});
+    const r = try reachable(gpa, &fns, fname(0), &descs);
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{ true, true, true, true, false, false }, r.fns);
     try testing.expectEqualSlices(bool, &.{ false, true, true }, r.descs);
-}
-
-test "reachable: a kept call to a builtin keeps the fns that builtin's body calls" {
-    const gpa = testing.allocator;
-    const concat: SymName = .{ .kind = .builtin, .name = "__str_concat" };
-    var fns = [_]FnCode{
-        try makeFn(gpa, 0, 1, &.{.{ .site = 0, .target = .{ .func = concat }, .kind = T.call }}),
-        try makeFn(gpa, 1, 1, &.{.{ .site = 0, .target = .{ .func = fname(2) }, .kind = T.call }}),
-        try makeFn(gpa, 2, 1, &.{}),
-        try makeFn(gpa, 3, 1, &.{}),
-    };
-    defer freeFns(gpa, &fns);
-    const calls = [_]BuiltinCall{
-        .{ .builtin = "__str_concat", .callee = fname(1) },
-        .{ .builtin = "__int_to_str", .callee = fname(3) },
-    };
-    const r = try reachable(gpa, &fns, fname(0), &.{}, &calls);
-    defer r.deinit(gpa);
-    try testing.expectEqualSlices(bool, &.{ true, true, true, false }, r.fns);
 }
 
 test "reachable: a missing entry keeps nothing" {
     const gpa = testing.allocator;
     var fns = [_]FnCode{try makeFn(gpa, 0, 1, &.{})};
     defer freeFns(gpa, &fns);
-    const r = try reachable(gpa, &fns, fname(7), &.{}, &.{});
+    const r = try reachable(gpa, &fns, fname(7), &.{});
     defer r.deinit(gpa);
     try testing.expectEqualSlices(bool, &.{false}, r.fns);
 }

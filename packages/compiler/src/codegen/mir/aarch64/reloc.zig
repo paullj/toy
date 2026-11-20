@@ -14,7 +14,7 @@ const Image = @import("../../../link/Image.zig");
 ///                    into a `movz`/`movk` imm16 (low / high halfword). Intra-module.
 ///
 /// Only `.movw_g0`/`.movw_g1` read the addend: it names an instruction relative to the
-/// site (the `__panic` self-locate `adr`).
+/// site (the `text_base` self-locate `adr`).
 pub const Kind = enum(u8) {
     call26,
     adrp_page,

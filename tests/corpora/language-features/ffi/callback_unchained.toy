@@ -1,0 +1,31 @@
+# expect: exit 0
+# expect: stdout "42\nmain kept\n"
+# libdir: "@harness"
+# C calls back from a frame that is no link of a frame chain, as code built without frame
+# pointers does. A collection inside the callback steps over the C frame to main's, so it
+# still finds what main holds, and never reads the C frame.
+import std/io
+import std/gc
+import std/vec
+
+extern "toyffi" {
+    fn toyffi_call_unchained(cb: fn(int) -> int, x: int) -> int
+}
+
+fn churn(x: int) -> int {
+    junk: Vec[str] = []
+    junk.push("garbage ".concat(x.to_string()))
+    gc.collect()
+    x * 2
+}
+
+fn main() -> int {
+    keep: Vec[str] = []
+    keep.push("main ".concat("kept"))
+    r := unsafe { toyffi_call_unchained(churn, 21) }
+    other: Vec[str] = []
+    for i in 0..64 { other.push("reuse ".concat(i.to_string())) }
+    io.println(r)
+    io.println(keep[0])
+    return 0
+}

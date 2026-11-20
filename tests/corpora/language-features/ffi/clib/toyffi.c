@@ -302,3 +302,43 @@ long toyffi_va_map(long (*cb)(long), long n, ...) {
     va_end(ap);
     return s;
 }
+
+// Calls `cb` from a frame whose record is no link of a frame chain, as code built without
+// frame pointers leaves x29: it points at a record whose link is far up the address space
+// and whose return address is 0. A stack walk from the callback must step over this frame
+// to its toy caller rather than follow the chain.
+long toyffi_call_unchained(long (*cb)(long), long x) {
+#if defined(__aarch64__)
+    static long bogus[2] = {0x7ffffffffff0, 0};
+    long r;
+    __asm__ volatile(
+        "mov x0, %[x]\n"
+        "mov x16, %[cb]\n"
+        "stp x29, x30, [sp, #-16]!\n"
+        "mov x29, %[bogus]\n"
+        "blr x16\n"
+        "ldp x29, x30, [sp], #16\n"
+        "mov %[r], x0\n"
+        : [r] "=r"(r)
+        : [x] "r"(x), [cb] "r"(cb), [bogus] "r"(bogus)
+        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+          "x13", "x14", "x15", "x16", "x17", "x30", "v0", "v1", "v2", "v3", "v4", "v5", "v6",
+          "v7", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
+          "v27", "v28", "v29", "v30", "v31", "memory", "cc");
+    return r;
+#else
+    return cb(x);
+#endif
+}
+
+// Keeps `cb` for a later `toyffi_fire`, as a C API that registers a handler and runs it
+// from another call does: the call that runs it is passed no callback.
+static long (*toyffi_stored)(long);
+
+void toyffi_store(long (*cb)(long)) { toyffi_stored = cb; }
+
+// Not a tail call: the callback must return into this C frame.
+long toyffi_fire(long x) {
+    volatile long r = toyffi_stored(x);
+    return r;
+}

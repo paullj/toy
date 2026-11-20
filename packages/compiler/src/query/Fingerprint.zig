@@ -214,6 +214,8 @@ pub fn foldSigs(h: *std.hash.Wyhash, sigs: []const Sig) void {
             std.mem.writeInt(u64, &mb, s.mut_mask, .little);
             h.update(&mb);
         }
+        // It decides whether the caller calls the extern or its frame-recording adapter.
+        if (s.calls_back) h.update(&[_]u8{0xfe});
     }
 }
 
@@ -447,6 +449,17 @@ test "a callee's mut_mask changes the caller's key" {
     try testing.expect(keys[0] != keys[1] and keys[0] != keys[2] and keys[1] != keys[2]);
     // A sig with no `mut` param folds exactly what it folded before the field existed.
     try testing.expectEqual(keys[0], fingerprint(b.tree, b.tokens, b.source, decl, &plain, &.{}, &.{}, &.{}));
+}
+
+test "an extern that may call back changes its caller's key" {
+    const gpa = testing.allocator;
+    var b = try build(gpa, "fn main() -> int {\n return 1\n}\n");
+    defer b.deinit(gpa);
+    const decl = b.fnDecl(0);
+    const leaf = [_]Sig{.{ .kind = .import, .name = "g", .params = &.{.int}, .ret = .int }};
+    var back = leaf;
+    back[0].calls_back = true;
+    try testing.expect(fingerprint(b.tree, b.tokens, b.source, decl, &leaf, &.{}, &.{}, &.{}) != fingerprint(b.tree, b.tokens, b.source, decl, &back, &.{}, &.{}, &.{}));
 }
 
 test "callee kind folds in: builtin vs user_fn of an identical sig flips the hash" {

@@ -233,17 +233,23 @@ pointer, `x8` for a result). The adapter then calls the toy function. The pointe
 adapter's address in the program's code, so it stays valid for the whole run: C may keep
 it and call it later.
 
+**Stack walks.** A call of an extern a program declares goes through a second adapter,
+which records its own frame while C runs: C may run a callback it was handed earlier (a
+stored handler, a signal raised) from any call, not only from one that is passed a
+callback. The callback's adapter links its frame to the newest recorded one, so a stack
+walk steps over the C frames between them and never reads them: C code need not keep a
+frame chain (code built without frame pointers does not).
+
 **Panics.** A panic inside a callback ends the program as any panic does: the message and
 a backtrace go to stderr and the process exits with 1. It does not unwind through the C
-frames, so C code above it gets no chance to clean up. The backtrace names each C frame
-`<C>` and, like every backtrace, ends at `main`.
+frames, so C code above it gets no chance to clean up. The backtrace names the C frames
+between two toy frames as one `<C>` line and, like every backtrace, ends at `main`.
 
-**Collections.** A callback may allocate and collect. The collector walks the frame chain
-through the C frames (Apple's arm64 code keeps a frame record in every function), finds
-the toy frames below them by their return addresses, and scans the C frames
-conservatively, so what the toy caller of the extern holds stays alive. A pointer to the
-gc heap that only C keeps (in a register, or in its own memory after the call returns) is
-not a root: keep the value alive in toy code while C uses it.
+**Collections.** A callback may allocate and collect. The collector steps over the C frames
+to the toy frames below them, whose roots it finds precisely, so what the toy caller of
+the extern holds stays alive, its arguments to C included. A pointer to the gc heap that
+only C keeps (in a register, or in its own memory after the call returns) is not a root:
+keep the value alive in toy code while C uses it.
 
 ## Varargs
 

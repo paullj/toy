@@ -1,0 +1,19 @@
+# expect: exit 1
+# expect: stderr "unchained"
+# expect: stderr " callback_unchained_panic.boom$cfn\n0x0000000000000000 <C>\n0x"
+# expect: stderr " main\n"
+# libdir: "@harness"
+# A panic in a callback C calls from a frame that is no link of a frame chain: the
+# backtrace names the C frame `<C>` once, steps over it to main and ends there, never
+# following the C frame's record.
+extern "toyffi" {
+    fn toyffi_call_unchained(cb: fn(int) -> int, x: int) -> int
+}
+
+fn boom(_x: int) -> int {
+    panic("unchained")
+}
+
+fn main() -> int {
+    return unsafe { toyffi_call_unchained(boom, 1) }
+}

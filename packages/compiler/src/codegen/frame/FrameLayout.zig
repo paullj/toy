@@ -434,9 +434,8 @@ pub fn isWordRef(
 
 /// The ROOT MAP the runtime reads: `roots` as a count-prefixed packed list of sp offsets,
 /// `[u32 n][u32 sp_off × n]`, little-endian. A lowered toy fn always yields ≥4 bytes
-/// (`[u32 0]` when root-less); an empty payload is the collector's "treat this frame
-/// conservatively" signal, reserved for the frames no toy fn owns (hand-written builtins,
-/// C code) that never run this. Caller owns the result.
+/// (`[u32 0]` when root-less), so the stack map's no-row marker names only code outside
+/// the text: C. Caller owns the result.
 pub fn encodeRoots(gpa: std.mem.Allocator, roots: []const Root) error{OutOfMemory}![]u8 {
     const buf = try gpa.alloc(u8, 4 + roots.len * 4);
     std.mem.writeInt(u32, buf[0..4], @intCast(roots.len), .little);

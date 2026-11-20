@@ -25,6 +25,12 @@ pub const Sig = struct {
     /// with no extra args passes them as a plain call does, and extra args already
     /// change the caller's own walk.
     variadic: bool = false,
+    /// An extern a call of which may run toy code before it returns: one that takes a
+    /// callback, or one a program declares, whose C may run a callback it was given
+    /// earlier (a stored handler, a signal raised). Core's own externs are libc leaves.
+    /// Such a call records the caller's frame for a walk to step over C to
+    /// (`core/rt/frames`).
+    calls_back: bool = false,
     /// The fn declares type params. Not folded: they show in `params` and `ret`. A
     /// template whose type params sit only in its return type (`fn none[T]() ->
     /// Option[T]`) has no param to say so.

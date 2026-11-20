@@ -405,7 +405,7 @@ pub fn lowerBoundValue(b: *Builder, node_idx: Ast.Index, mi: u32, ty: Typecheck.
             return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, env);
         },
         .assoc_value => return try emitFnPair(b, b.in.closure.adapters[ai].name, ty, null),
-        .fn_value, .c_fn, .c_lambda, .c_assoc => unreachable,
+        .fn_value, .c_fn, .c_lambda, .c_assoc, .c_call => unreachable,
     }
 }
 

@@ -10,6 +10,7 @@
 //! from the current sources and flags (the linked image is never cached).
 
 const std = @import("std");
+const StdNames = @import("../symbols/StdNames.zig");
 const Io = std.Io;
 const Ast = @import("../ast/Ast.zig");
 const Graph = @import("Graph.zig");
@@ -23,7 +24,6 @@ const Sig = @import("../symbols/Sig.zig").Sig;
 const codes = @import("../diagnostics/codes.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 const model = @import("../diagnostics/model.zig");
-const runtime = @import("../codegen/runtime/runtime.zig");
 const literal = @import("../types/literal.zig");
 
 const sys = LibResolver.system_c_library;
@@ -364,7 +364,17 @@ pub fn collect(gpa: std.mem.Allocator, io: Io, graph: *const Graph.Graph, req: R
     // An import binds by bare C name, so the runtime's own imports are bound first: a
     // block that names one for another library would move the runtime's call there.
     var bound: std.StringArrayHashMapUnmanaged(Bound) = .empty;
-    for (runtime.libsystem_imports) |sym| try bound.put(a, sym, .{ .library = null, .lib = null, .site = null });
+    for (graph.modules) |*m| {
+        if (!StdNames.isRuntimeModule(m.path)) continue;
+        const tree = m.tree();
+        const prog = tree.nodes[Ast.root(tree.nodes).int()];
+        if (prog.tag != .program) continue;
+        for (Ast.rangeSlice(tree, prog.lhs.int())) |idx| {
+            const n = tree.nodes[idx.int()];
+            if (n.tag != .extern_fn_decl or Ast.externLibrary(tree, m.tokens, m.source, idx) != null) continue;
+            try bound.put(a, m.tokens[n.main_token].text(m.source), .{ .library = null, .lib = null, .site = null });
+        }
+    }
     var sites: std.ArrayList(Site) = .empty;
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     for (graph.modules, 0..) |*m, mi| {
@@ -601,12 +611,17 @@ test "a block that binds a symbol the runtime imports is R0018 at the block's ex
         \\fn main() -> int { 0 }
         \\
     ;
-    var g = try graphOfMods(gpa, &.{.{ .path = "main", .src = src }});
+    // The runtime's modules come after the entry's in a graph.
+    var g = try graphOfMods(gpa, &.{
+        .{ .path = "main", .src = src },
+        .{ .path = "core/rt/panic", .src = "extern fn write(fd: int, p: int, n: int) -> int\n", .bundled = true },
+    });
     defer freeGraphOfMods(gpa, &g);
     var r = try collect(gpa, io, &g, .{ .dirs = &.{dir} }, macho);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diags.len);
     try testing.expectEqual(codes.Code.R0018, r.diags[0].code);
+    try testing.expectEqual(@as(u32, 0), r.diags[0].scope);
     try testing.expectEqualStrings("write", src[r.diags[0].byte_offset..r.diags[0].end]);
     try testing.expect(std.mem.indexOf(u8, r.diags[0].message, "toy runtime") != null);
     try testing.expectEqual(@as(usize, 1), r.notes().of(r.diags[0]).len);

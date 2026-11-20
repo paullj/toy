@@ -18,7 +18,6 @@ const std = @import("std");
 const Aarch64 = @import("encode.zig");
 const Link = @import("../../../link/Link.zig");
 const Ir = @import("../../../ir/Ir.zig");
-const rt_emit = @import("runtime/emit.zig");
 const Reloc = @import("reloc.zig");
 const StdNames = @import("../../../symbols/StdNames.zig");
 const Mir = @import("../Mir.zig");
@@ -373,6 +372,19 @@ const E = struct {
                     },
                 }
             },
+            .text_base => |r| {
+                // PIE code has no absolute address of its own: `adr` gives this word's
+                // runtime address, and the linker bakes its text offset into the two moves
+                // (site-relative addends, no target), so the difference is the base.
+                const rd = r.hw();
+                const adr_at = e.here();
+                try e.word(Aarch64.adr(rd, 0));
+                inline for (.{ Reloc.Kind.movw_g0, Reloc.Kind.movw_g1 }, 0..) |kind, k| {
+                    try e.out.relocs.append(e.gpa, .{ .site = e.here(), .target = .none, .kind = Reloc.of(kind), .addend = @as(i64, adr_at) - @as(i64, e.here()) });
+                    try e.word(if (k == 0) Aarch64.movz(FO, 0, 0) else Aarch64.movk(FO, 0, 1));
+                }
+                try e.word(Aarch64.subReg(rd, rd, FO));
+            },
             .call => |o| switch (o.callee) {
                 .func => |s| {
                     const t = try e.funcTarget(s);
@@ -384,7 +396,15 @@ const E = struct {
                     try e.word(Aarch64.bl(0));
                 },
                 .import => |name| {
-                    try rt_emit.emitImportPreamble(&e.out.code, &e.out.relocs, e.gpa, name, 16);
+                    // The fn pointer from its GOT slot into x16, which no value lives in.
+                    inline for (.{ Reloc.Kind.adrp_page, Reloc.Kind.ldr_lo12 }) |kind| {
+                        const nm = try e.gpa.dupe(u8, name);
+                        e.reloc(.{ .import = .{ .kind = .import, .name = nm } }, kind) catch |err| {
+                            e.gpa.free(nm);
+                            return err;
+                        };
+                        try e.word(if (kind == .adrp_page) Aarch64.adrp(16, 0) else Aarch64.ldrRegUoff(16, 16, 0));
+                    }
                     try e.safepoint(o.safepoint);
                     try e.word(Aarch64.blr(16));
                 },
@@ -727,4 +747,32 @@ test "encode: a branch skips a block whose only code is its b, past instructions
     try testing.expectEqual(Aarch64.cbz(3, 3), wordAt(code, 2));
     try testing.expectEqual(Aarch64.b(-1), wordAt(code, 4));
     try testing.expectEqual(@as(usize, 7 * 4), code.len);
+}
+
+test "encode: text_base self-locates with adr and the two moves the linker bakes its offset into" {
+    const gpa = testing.allocator;
+    var f = try Func.init(gpa, 2);
+    defer f.deinit(gpa);
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .text_base = Reg.gp(3) } });
+    try f.blocks[0].insts.append(gpa, .{ .op = .{ .b = 1 } });
+    try f.blocks[1].insts.append(gpa, .{ .op = .ret });
+    var none = [_]u32{};
+    const frame: Mir.Frame = .{ .layout = .{ .frame = 0, .out_base = 0, .stack_align = 16, .sret_save_off = 0, .slot_off = &none, .value_off = &none } };
+    var out: Out = .{};
+    defer out.deinit(gpa);
+    try encode(gpa, &f, &frame, Ir.no_line, false, &out);
+    const code = out.code.items;
+    // After the 2-word prologue: adr x3, . ; movz x14 ; movk x14, lsl 16 ; sub x3, x3, x14.
+    try testing.expectEqual(Aarch64.adr(3, 0), wordAt(code, 2));
+    try testing.expectEqual(Aarch64.movz(FO, 0, 0), wordAt(code, 3));
+    try testing.expectEqual(Aarch64.movk(FO, 0, 1), wordAt(code, 4));
+    try testing.expectEqual(Aarch64.subReg(3, 3, FO), wordAt(code, 5));
+    try testing.expectEqual(@as(usize, 2), out.relocs.items.len);
+    for (out.relocs.items, [_]Reloc.Kind{ .movw_g0, .movw_g1 }, [_]u32{ 12, 16 }) |r, kind, site| {
+        try testing.expectEqual(Reloc.of(kind), r.kind);
+        try testing.expectEqual(site, r.site);
+        // Each addend names the adr at byte 8 relative to its own site.
+        try testing.expectEqual(@as(i64, 8) - @as(i64, site), r.addend);
+        try testing.expect(r.target == .none);
+    }
 }

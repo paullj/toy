@@ -15,3 +15,91 @@ pub fn str_eq(a: rawptr, a_len: int, b: rawptr, b_len: int) -> bool {
     }
     return true
 }
+
+# The fns below build a str, so unlike the rest of core/rt they allocate: each is a
+# collector entry, and a call to one is a safepoint. Bytes 128..176 of the control block
+# are theirs: a str's {ptr, len} at 128, then the digits of a number, written backward
+# from 176.
+
+# `n` in decimal. A digit is taken from each remainder rather than from `-n`, which would
+# overflow for the least int.
+pub fn int_to_str(n: int) -> str {
+    end := control_block() + 176
+    at := digits(end, n)
+    if n < 0 {
+        at -= 1
+        set_byte(at, 45)
+    }
+    buf := gc_alloc(end - at, 0)
+    copy(buf, unsafe { offset(at, 0) }, end - at)
+    return parts(buf, end - at)
+}
+
+# `n`'s 64 bits as an unsigned number. Past the int range the first digit comes from a
+# halving, so no step divides a negative int.
+pub fn uint_to_str(n: int) -> str {
+    end := control_block() + 176
+    at := end
+    v := n
+    if v < 0 {
+        half := (v >> 1) & 9223372036854775807
+        q := half / 5
+        at -= 1
+        set_byte(at, 48 + (half - q * 5) * 2 + (v & 1))
+        v = q
+    }
+    at = digits(at, v)
+    buf := gc_alloc(end - at, 0)
+    copy(buf, unsafe { offset(at, 0) }, end - at)
+    return parts(buf, end - at)
+}
+
+# `a` then `b`, each passed as its pointer and length.
+pub fn str_concat(a: rawptr, a_len: int, b: rawptr, b_len: int) -> str {
+    buf := gc_alloc(a_len + b_len, 0)
+    copy(buf, a, a_len)
+    copy(unsafe { offset(buf, a_len) }, b, b_len)
+    return parts(buf, a_len + b_len)
+}
+
+# The digits of `v` written backward ending before `end`; returns the first.
+fn digits(end: int, v: int) -> int {
+    at := end
+    loop {
+        q := v / 10
+        r := v - q * 10
+        if r < 0 { r = -r }
+        at -= 1
+        set_byte(at, 48 + r)
+        v = q
+        if v == 0 { return at }
+    }
+}
+
+fn parts(buf: rawptr, n: int) -> str {
+    header := control_block() + 128
+    unsafe {
+        store(header, buf)
+        store(header + 8, n)
+    }
+    r: str = unsafe { load(header) }
+    return r
+}
+
+# Whole words first: an unaligned word load or store is as cheap as an aligned one.
+fn copy(to: rawptr, from: rawptr, n: int) {
+    i := 0
+    while i + 8 <= n {
+        w: int = unsafe { load(offset(from, i)) }
+        unsafe { store(offset(to, i), w) }
+        i += 8
+    }
+    while i < n {
+        unsafe { store_byte(offset(to, i), load_byte(offset(from, i))) }
+        i += 1
+    }
+}
+
+fn set_byte(at: int, v: int) {
+    unsafe { store_byte(at, v) }
+}

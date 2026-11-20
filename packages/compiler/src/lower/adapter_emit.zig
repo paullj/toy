@@ -11,13 +11,19 @@ const Ir = @import("../ir/Ir.zig");
 const Typecheck = @import("../types.zig");
 const Link = @import("../link/Link.zig");
 const Closure = @import("../symbols/Closure.zig");
+const StdNames = @import("../symbols/StdNames.zig");
 const Diagnostic = @import("../diagnostics/Diagnostic.zig").Diagnostic;
 
 /// Lower adapter `a` to `sym`: param 0 is the env, the rest are the value signature's
 /// params, forwarded to a direct call of `a.target`. A `.fn_value` or `.assoc_value` thunk
 /// ignores the env; a bound adapter first passes the receiver the env holds as `self`. A C
 /// callback has no env param and is called in the C convention; it passes a lambda unit
-/// the null env the checker proved it has.
+/// the null env the checker proved it has. A `.c_call` adapter takes the extern's args as
+/// its call site lowered them and makes the C call.
+///
+/// The two C kinds keep stack walks off the C frames between them: a `.c_call` adapter
+/// records its own frame as the toy frame below C for the time of the call, and a C
+/// callback points its frame record's link at that frame while it runs (`core/rt/frames`).
 pub fn lowerAdapter(
     gpa: std.mem.Allocator,
     in: L.Inputs,
@@ -30,14 +36,14 @@ pub fn lowerAdapter(
 
     var params: std.ArrayList(Ir.SlotId) = .empty;
     errdefer params.deinit(gpa);
-    const env_n: usize = @intFromBool(!a.kind.isC());
+    const env_n: usize = @intFromBool(!a.kind.isC() and a.kind != .c_call);
     if (env_n == 1) try params.append(gpa, try b.addSlot(Typecheck.Type.rawptr));
-    for (a.sig.params) |p| try params.append(gpa, try b.addSlot(p));
+    for (a.sig.params, 0..) |p, i| try params.append(gpa, try b.addSlot(argType(a, p, i)));
 
     const blocks = try L.openBodyBlocks(&b, a.sig.ret);
 
     const lead_n: usize = switch (a.kind) {
-        .fn_value, .assoc_value, .c_fn, .c_assoc => 0,
+        .fn_value, .assoc_value, .c_fn, .c_assoc, .c_call => 0,
         .bound_copy, .bound_box, .bound_ref, .c_lambda => 1,
     };
     const args = try gpa.alloc(Ir.Operand, lead_n + a.sig.params.len);
@@ -45,13 +51,44 @@ pub fn lowerAdapter(
     if (a.kind == .c_lambda) {
         args[0] = .{ .value = try b.emit(.{ .iconst = 0 }, Typecheck.Type.rawptr) };
     } else if (lead_n == 1) args[0] = try receiverOperand(&b, a, params.items[0]);
-    for (a.sig.params, params.items[env_n..], lead_n..) |p, sid, i| args[i] = try L.slotOperand(&b, sid, p);
-    const result = try L.emitCall(&b, .{ .direct = a.target }, args, a.sig.ret, 0);
+    for (a.sig.params, params.items[env_n..], lead_n..) |p, sid, i| args[i] = try L.slotOperand(&b, sid, argType(a, p, i - lead_n));
 
-    if (!b.termSet()) try L.brTo(&b, blocks.exit, if (b.ret_param == Ir.none_value) .none else result);
+    const frame = if (a.kind.isC() or a.kind == .c_call) try b.emit(.frame_addr, Typecheck.Type.int) else Ir.none_value;
+    const restore = if (a.kind == .c_call)
+        try runtimeCall(&b, .c_enter, &.{frame}, Typecheck.Type.int)
+    else if (a.kind.isC())
+        try runtimeCall(&b, .c_link, &.{frame}, Typecheck.Type.int)
+    else
+        Ir.none_value;
+    const target: L.CallTarget = if (a.kind == .c_call)
+        .{ .import = .{ .sym = a.target, .params = a.c_params, .by_ptr = a.by_ptr, .variadic = a.variadic } }
+    else
+        .{ .direct = a.target };
+    const result = try L.emitCall(&b, target, args, a.sig.ret, 0);
+    if (!b.termSet()) {
+        if (a.kind == .c_call) {
+            _ = try runtimeCall(&b, .c_leave, &.{restore}, Typecheck.Type.unit);
+        } else if (a.kind.isC()) _ = try runtimeCall(&b, .c_unlink, &.{ frame, restore }, Typecheck.Type.unit);
+        try L.brTo(&b, blocks.exit, if (b.ret_param == Ir.none_value) .none else result);
+    }
     var func = try L.finishFn(&b, gpa, sym, &params, blocks.entry, blocks.exit);
     func.c_abi = a.kind.isC();
     return func;
+}
+
+/// A `.c_call` adapter takes an arg C gets as a pointer as that address.
+fn argType(a: Closure.Adapter, p: Typecheck.Type, i: usize) Typecheck.Type {
+    return if (a.kind == .c_call and i < 64 and (a.by_ptr >> @intCast(i)) & 1 != 0) Typecheck.Type.int else p;
+}
+
+fn runtimeCall(b: *L.Builder, f: StdNames.RuntimeFn, vals: []const Ir.ValueId, ret: Typecheck.Type) error{OutOfMemory}!Ir.ValueId {
+    const args = try b.gpa.alloc(Ir.Operand, vals.len);
+    errdefer b.gpa.free(args);
+    for (vals, args) |v, *o| o.* = .{ .value = v };
+    return switch (try L.emitCall(b, .{ .direct = L.runtimeSym(f) }, args, ret, 0)) {
+        .value => |v| v,
+        else => Ir.none_value,
+    };
 }
 
 /// The `self` a bound adapter passes: the address of the receiver for a `mut self`
@@ -120,7 +157,7 @@ test "a fn-value thunk takes the env first and forwards its params to a direct c
     try testing.expect(std.mem.indexOf(u8, text, "ret %") != null);
 }
 
-test "a C callback takes no env: a named fn's calls it directly, a lambda's passes a null env" {
+test "a C callback takes no env: a named fn's calls it directly, a lambda's passes a null env; both link their frame past C" {
     const gpa = testing.allocator;
     var diags: std.ArrayList(Diagnostic) = .empty;
     defer diags.deinit(gpa);
@@ -139,8 +176,11 @@ test "a C callback takes no env: a named fn's calls it directly, a lambda's pass
         \\  %2 = load %1 : rawptr
         \\  %3 = slot_addr s1
         \\  %4 = load %3 : rawptr
-        \\  %5 = call @main.cmp(%2, %4)
-        \\  br b1(%5)
+        \\  %5 = frame_addr
+        \\  %6 = call @core/rt/frames.link(%5)
+        \\  %7 = call @main.cmp(%2, %4)
+        \\  call @core/rt/frames.unlink(%5, %6)
+        \\  br b1(%7)
         \\b1(%0:int):
         \\  ret %0
         \\}
@@ -154,6 +194,54 @@ test "a C callback takes no env: a named fn's calls it directly, a lambda's pass
     try testing.expect(std.mem.indexOf(u8, try renderFn(&f2, in, &buf), "%1 = iconst 0\n") != null);
     try testing.expect(std.mem.indexOf(u8, try renderFn(&f2, in, &buf), "call @main.main$l0(%1, %") != null);
     try testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "a C call adapter takes a pointer arg as its address and records its frame around the call" {
+    const gpa = testing.allocator;
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(gpa);
+    const in = adapterInputs(&.{});
+    const params = [_]Typecheck.Type{ Typecheck.Type.rawptr, Typecheck.Type.int, Typecheck.Type.int };
+    const a: Closure.Adapter = .{
+        .kind = .c_call,
+        .key = 1,
+        .name = "qsort$ccall",
+        .target = .{ .kind = .import, .name = "qsort" },
+        .sig = .{ .params = &params, .ret = Typecheck.Type.unit },
+        .by_ptr = 0b100,
+        .c_params = &params,
+    };
+    var func = try lowerAdapter(gpa, in, a, .{ .kind = .user_fn, .name = a.name }, &diags);
+    defer func.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
+    try testing.expect(!func.c_abi);
+    var buf: [2048]u8 = undefined;
+    try testing.expectEqualStrings(
+        \\fn qsort$ccall(s0, s1, s2) -> unit {
+        \\  slots: s0:rawptr s1:int s2:int
+        \\b0:
+        \\  %0 = slot_addr s0
+        \\  %1 = load %0 : rawptr
+        \\  %2 = slot_addr s1
+        \\  %3 = load %2 : int
+        \\  %4 = slot_addr s2
+        \\  %5 = load %4 : int
+        \\  %6 = frame_addr
+        \\  %7 = call @core/rt/frames.enter(%6)
+        \\  call @qsort(%1, %3, %5)
+        \\  call @core/rt/frames.leave(%7)
+        \\  br b1
+        \\b1:
+        \\  ret
+        \\}
+        \\
+    , try renderFn(&func, in, &buf));
+    const call = for (func.blocks[0].instrs) |ins| switch (ins.op) {
+        .call => |c| if (std.mem.eql(u8, c.callee.name, "qsort")) break c,
+        else => {},
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 0b100), call.by_ptr);
+    try testing.expectEqual(Typecheck.Kind.rawptr, call.params[0].kind);
 }
 
 test "a unit-returning thunk returns nothing" {

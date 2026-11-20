@@ -62,7 +62,9 @@ declares its own externs as `ffi.md` describes.
 | `core/fmt` | the Darwin-private `__dtoa`/`__freedtoa` and the `strtod` externs: `shortest(f)` (the shortest round-trip digits, their decimal point and sign) and `parse(s)` |
 | `core/text` | raw `str` parts: `slice`, the `alloc`/`put`/`window`/`take` buffer that builds a str once, and `join` over it |
 | `core/mem_selftest`, `core/desc_selftest` | heap and descriptor self-checks |
-| `core/rt/str` | the runtime for `str` operators: `str_eq` |
+| `core/rt/str` | the runtime for `str` operators: `str_eq`, and the str builders `int_to_str`, `uint_to_str` and `str_concat` |
+| `core/rt/panic` | `panic`: the message, a backtrace from the frame records and the symbol table, then `_exit(1)` |
+| `core/rt/frames` | the stack as the runtime walks it: `caller`, `return_address` and `caller_sp`, and the link a walk steps over C frames by, which the adapters of an extern call and of a callback keep |
 | `core/rt/gc` | the collector: `alloc`, `collect`, and the `collections` and `span_count` counters; it traces each object by the layout it was allocated with |
 | `core/rt/stack` | the stack overflow handler: `guard`, which `main` calls first, maps a signal stack for it and installs it |
 
@@ -71,13 +73,15 @@ carries these modules, and the linker keeps only the fns something calls. No fn 
 `core/rt/` may reach a GC allocation, directly or through calls (T0082): after type
 checking, the compiler walks the call graph from each one and reports the call path to
 any allocation. A call to a runtime fn therefore never lets the collector run, except a
-call to the collector's entries, `core/rt/gc` `alloc`, `alloc_slow` and `collect`: the
-rule counts a call to any of them as an allocation, and lowered code calls `alloc` and
-`collect` where `gc_alloc` and `gc_collect` stand. A build with the inliner on splices
+call to the collector's entries, `core/rt/gc` `alloc`, `alloc_slow` and `collect`, and to
+the str builders, which allocate the str they return: the rule counts a call to any of
+them as an allocation, and lowered code calls `alloc` and `collect` where `gc_alloc` and
+`gc_collect` stand. A build with the inliner on splices
 `alloc` into each caller once that caller is optimized, so the allocation fast path, a
 freelist pop, costs no call, and only its slow path, `alloc_slow`, is called. The fns have
 plain names; nothing marks them but their module. They build with the release profile
-whatever the program's, as the hand-written machine code they replace did.
+whatever the program's. Each ISA gives them two intrinsics, `frame_address()` and
+`text_base()`, and nothing else: the runtime holds no machine code of its own.
 
 ## std
 

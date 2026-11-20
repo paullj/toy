@@ -43,12 +43,13 @@ const LowerProgramResult = Codegen.LowerProgramResult;
 const testing = std.testing;
 
 /// Test-only: lower an already-`.check`ed single-file `FileResult` through the SAME
-/// whole-graph codegen orchestration the production `-o` build drives. A lone file IS
-/// the trivial one-module graph, so we wrap it in `Graph.single` and feed its existing
-/// whole-graph `resolve`/`typecheck` results (graph-of-one == program-wide tables) to
-/// `lowerGraphProgram` — there is ONE codegen path, exercised here too. `io == null` to
-/// `lowerGraphProgram` would block on the pool; tests pass a real threaded `io`. Caller
-/// owns the result on `.ok`.
+/// whole-graph codegen orchestration the production `-o` build drives. The file is
+/// discovered as the production build discovers it, so the program carries the runtime
+/// (`core/rt`) its lowered code calls; `r` only names the file. `io == null` to
+/// `lowerGraphProgram` would block on the pool; tests pass a real threaded `io`. The unit
+/// counts leave out the runtime's units, which every program carries and which are all
+/// compiled or all cached together in a cache of one profile, so a test counts its own
+/// fns. Caller owns the result on `.ok`.
 fn lowerSingleFile(
     gpa: std.mem.Allocator,
     io: Io,
@@ -58,9 +59,132 @@ fn lowerSingleFile(
     mode: Engine.Mode,
     profile: toyc.Profile,
 ) !LowerProgramResult {
+    const rt = try runtimeUnits(gpa, io, target);
+    var out = try lowerFile(gpa, io, cache, target, r.path, mode, profile);
+    switch (out) {
+        // A cache shared across profiles can hold some runtime units and not others; no
+        // test that counts units does that.
+        .ok => |*lp| if (lp.codegen_cached >= rt) {
+            lp.codegen_cached -= rt;
+        } else {
+            lp.codegen_compiled -|= rt;
+        },
+        .err => {},
+    }
+    return out;
+}
+
+/// Lower `r`'s own checked tables as a graph of its one module, with no runtime: for a test
+/// that edits those tables to make lowering fail, which stops before the link.
+fn lowerCheckedModule(gpa: std.mem.Allocator, io: Io, cache: Cache, target: toyc.Target, r: *const FileResult, mode: Engine.Mode, profile: toyc.Profile) !LowerProgramResult {
     var graph = try Graph.single(gpa, "main", r.path, r.source, r.tokens, r.nodes, r.extra, r.pub_bits);
     defer graph.deinit(gpa);
     return lowerGraphProgram(gpa, io, cache, target, &graph, &r.resolve.?, &r.typecheck.?, mode, profile, true, null, null, 0);
+}
+
+/// The build runs on the general-purpose allocator and only its result moves to `gpa`: the
+/// testing allocator's per-allocation bookkeeping made building the runtime's modules for
+/// every lowering dominate the suite.
+fn lowerFile(gpa: std.mem.Allocator, io: Io, cache: Cache, target: toyc.Target, path: []const u8, mode: Engine.Mode, profile: toyc.Profile) !LowerProgramResult {
+    const fe = std.heap.smp_allocator;
+    var graph = try Graph.discover(fe, io, cache, target, path, .{});
+    defer graph.deinit(fe);
+    var res = try toyc.ResolveGraph.resolveGraph(fe, &graph);
+    defer res.deinit(fe);
+    var tc = try toyc.TypecheckGraph.checkGraph(fe, &graph, &res, io, 0);
+    defer tc.deinit(fe);
+    var out = try lowerGraphProgram(fe, io, cache, target, &graph, &res, &tc, mode, profile, true, null, null, 0);
+    return switch (out) {
+        .ok => |*lp| blk: {
+            defer lp.deinit(fe);
+            break :blk .{ .ok = try copyLinked(gpa, lp) };
+        },
+        // The message may live in the build's own memory, gone by now.
+        .err => |e| .{ .err = .{ .message = "", .span = e.span, .module = e.module } },
+    };
+}
+
+fn copyLinked(gpa: std.mem.Allocator, lp: *const LinkedProgram) !LinkedProgram {
+    const text = try gpa.dupe(u8, lp.text);
+    errdefer gpa.free(text);
+    const cstrings = try gpa.dupe(u8, lp.cstrings);
+    errdefer gpa.free(cstrings);
+    // A diagnostic's message may be one of `owned_msgs`; the copy points at its own copy.
+    const msgs = try gpa.alloc([]u8, lp.owned_msgs.len);
+    var nmsgs: usize = 0;
+    errdefer {
+        for (msgs[0..nmsgs]) |m| gpa.free(m);
+        gpa.free(msgs);
+    }
+    for (lp.owned_msgs, msgs) |m, *c| {
+        c.* = try gpa.dupe(u8, m);
+        nmsgs += 1;
+    }
+    const diags = try gpa.dupe(@TypeOf(lp.diags[0]), lp.diags);
+    errdefer gpa.free(diags);
+    for (diags) |*d| for (lp.owned_msgs, msgs) |m, c| {
+        if (d.message.ptr == m.ptr) d.message = c;
+    };
+    const relocs = try gpa.dupe(toyc.Link.Reloc, lp.data_relocs);
+    var nrelocs: usize = 0;
+    errdefer {
+        for (relocs[0..nrelocs]) |rl| if (rl.target.name()) |nm| gpa.free(nm);
+        gpa.free(relocs);
+    }
+    for (relocs) |*rl| {
+        switch (rl.target) {
+            .import => |sn| rl.target = .{ .import = .{ .kind = sn.kind, .name = try gpa.dupe(u8, sn.name) } },
+            .func => |sn| rl.target = .{ .func = .{ .kind = sn.kind, .name = try gpa.dupe(u8, sn.name) } },
+            else => {},
+        }
+        nrelocs += 1;
+    }
+    const symbols = try toyc.Image.Symbols.build(gpa, lp.debug.symbols.list);
+    errdefer symbols.deinit(gpa);
+    const d = lp.debug.dwarf;
+    var dwarf: @TypeOf(d) = .{};
+    errdefer dwarf.deinit(gpa);
+    dwarf.info = try gpa.dupe(u8, d.info);
+    dwarf.abbrev = try gpa.dupe(u8, d.abbrev);
+    dwarf.line = try gpa.dupe(u8, d.line);
+    dwarf.str = try gpa.dupe(u8, d.str);
+    dwarf.info_addrs = try gpa.dupe(u32, d.info_addrs);
+    dwarf.line_addrs = try gpa.dupe(u32, d.line_addrs);
+    var out = lp.*;
+    out.text = text;
+    out.cstrings = cstrings;
+    out.owned_msgs = msgs;
+    out.diags = diags;
+    out.data_relocs = relocs;
+    out.debug = .{ .symbols = symbols, .dwarf = dwarf };
+    return out;
+}
+
+var runtime_units: ?usize = null;
+
+/// The units of the runtime alone: those of a program whose `main` is its only fn.
+fn runtimeUnits(gpa: std.mem.Allocator, io: Io, target: toyc.Target) !usize {
+    if (runtime_units) |n| return n;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [96]u8 = undefined;
+    const dir = std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path}) catch unreachable;
+    var pbuf: [128]u8 = undefined;
+    const path = std.fmt.bufPrint(&pbuf, "{s}/main.toy", .{dir}) catch unreachable;
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fn main() -> int {\n    return 0\n}\n" });
+    var cbuf: [128]u8 = undefined;
+    const cache = try Cache.init(io, std.fmt.bufPrint(&cbuf, "{s}/cc", .{dir}) catch unreachable);
+    var out = try lowerFile(gpa, io, cache, target, path, .force, .debug);
+    defer switch (out) {
+        .ok => |*lp| lp.deinit(gpa),
+        .err => {},
+    };
+    const n = switch (out) {
+        .ok => |lp| lp.codegen_compiled - 1,
+        .err => return error.TestUnexpectedResult,
+    };
+    runtime_units = n;
+    return n;
 }
 
 test "cold then warm parse: 2nd run hits cache and renders identically" {
@@ -5032,7 +5156,7 @@ test "a lowering diagnostic reaches the build result with its text and span" {
     var ck = try checkWithBlankedMethods(gpa, io, dir_name, lower_diag_src, &blankAll);
     defer ck.r.deinit(gpa);
 
-    var out = try lowerSingleFile(gpa, io, ck.cache, Driver.default_target, &ck.r, .force, .debug);
+    var out = try lowerCheckedModule(gpa, io, ck.cache, Driver.default_target, &ck.r, .force, .debug);
     defer if (out == .ok) out.ok.deinit(gpa);
     try testing.expect(out == .err);
     try testing.expectEqualStrings("call target unsupported in lower", out.err.message);

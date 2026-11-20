@@ -230,6 +230,9 @@ pub const Op = union(enum) {
     /// The current fn's frame record address (its frame pointer) → int value. Pure, no operands; a
     /// fn that reads it is never inlined, as its frame would vanish.
     frame_addr,
+    /// The runtime address of the first byte of the image's text: a code offset plus it is
+    /// that code's address. Pure, no operands.
+    text_base,
 
     /// A debug build's overflow test before a `+`/`-`/`*`, which branches to a panic. Pure.
     overflow: Overflow,
@@ -615,6 +618,7 @@ fn renderInstr(
         .fn_addr => |f| try out.print("fn_addr @{s}\n", .{f.name}),
         .data_addr => |off| try out.print("data_addr +{d}\n", .{off}),
         .frame_addr => try out.writeAll("frame_addr\n"),
+        .text_base => try out.writeAll("text_base\n"),
         .overflow => |o| {
             try out.print("overflow {t} %{d}, %{d} : ", .{ o.kind, o.lhs, o.rhs });
             try renderType(out, o.ty, layouts, enum_layouts);

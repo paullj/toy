@@ -1,0 +1,112 @@
+# A panic: the message and a backtrace on stderr, then exit status 1. Every `panic(msg)`,
+# and every check lowered code makes (a bounds check, a division by zero), calls `panic`.
+# It must not allocate: it runs when the heap may be what failed.
+#
+# A backtrace line is `0x<16 hex digits> <name>`: the call site's offset in the text, which
+# `atos` reads, and the fn holding it. A return address in C prints as `<C>` at offset 0, as
+# its address moves with ASLR, and the walk (`core/rt/frames`) steps over the C frames. It
+# starts at panic's caller and stops after `main`, or after 64 frames with a `...` line, so
+# a cut-off trace does not pass for a whole one.
+#
+# Bytes 176..216 of the control block are this module's: the message's {ptr, len} at 176,
+# then the line buffer.
+
+import core/rt/frames
+
+extern fn write(fd: int, p: int, n: int) -> int
+extern fn _exit(code: int32) -> never
+
+pub fn panic(msg: str) -> never {
+    at := control_block() + 176
+    unsafe { store(at, msg) }
+    put(word(at), word(at + 8))
+    newline()
+    backtrace(frame_address())
+    unsafe { _exit(1) }
+}
+
+fn backtrace(fp: int) {
+    text := text_base()
+    table := symbol_table()
+    rows := word(table)
+    # The last row is a sentinel at the end of the text, named `<C>`.
+    text_end := word(row(table, rows - 1))
+    frame := fp
+    cap := 64
+    while frame != 0 && cap != 0 {
+        at := frames.call_site(frame) - text
+        in_c := at < 0 || at >= text_end
+        name := name_of(table, rows - 1)
+        if in_c { at = 0 } else { name = name_of(table, row_at(table, rows, at)) }
+        line(at, name)
+        if is_main(name) { return }
+        frame = frames.caller(frame, in_c)
+        cap -= 1
+    }
+    if frame != 0 { put(offset_of("...\n"), 4) }
+}
+
+# The last row whose fn starts at or before text offset `at`; rows ascend.
+fn row_at(table: int, rows: int, at: int) -> int {
+    low := 0
+    high := rows
+    while high - low > 1 {
+        mid := (low + high) / 2
+        if word(row(table, mid)) <= at { low = mid } else { high = mid }
+    }
+    return low
+}
+
+fn row(table: int, i: int) -> int { return table + 8 + i * 16 }
+
+fn name_of(table: int, i: int) -> int { return table + word(row(table, i) + 8) }
+
+fn line(at: int, name: int) {
+    buf := control_block() + 192
+    set_byte(buf, 48)
+    set_byte(buf + 1, 120)
+    i := 0
+    while i < 16 {
+        nibble := (at >> (60 - i * 4)) & 15
+        if nibble < 10 { set_byte(buf + 2 + i, 48 + nibble) } else { set_byte(buf + 2 + i, 87 + nibble) }
+        i += 1
+    }
+    set_byte(buf + 18, 32)
+    put(buf, 19)
+    n := 0
+    while byte(name + n) != 0 { n += 1 }
+    if n > 0 { put(name, n) }
+    newline()
+}
+
+fn is_main(name: int) -> bool {
+    return byte(name) == 109 && byte(name + 1) == 97 && byte(name + 2) == 105 && byte(name + 3) == 110 && byte(name + 4) == 0
+}
+
+fn newline() {
+    buf := control_block() + 192
+    set_byte(buf, 10)
+    put(buf, 1)
+}
+
+fn offset_of(s: str) -> int {
+    at := control_block() + 176
+    unsafe { store(at, s) }
+    return word(at)
+}
+
+fn put(p: int, n: int) {
+    unsafe { write(2, p, n) }
+}
+
+fn word(at: int) -> int {
+    return unsafe { load(at) }
+}
+
+fn byte(at: int) -> int {
+    return unsafe { load_byte(at) }
+}
+
+fn set_byte(at: int, v: int) {
+    unsafe { store_byte(at, v) }
+}

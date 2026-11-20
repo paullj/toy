@@ -77,6 +77,8 @@ pub const Op = union(enum) {
     /// `size` bytes, rounded up to whole words, with no branch in between.
     copy: struct { dst: Mem, src: Mem, size: u32 },
     sym_addr: struct { rd: Reg, target: SymTarget },
+    /// rd = the runtime address of the first byte of the text (`Ir.Op.text_base`).
+    text_base: Reg,
     /// Reads the physical registers in `uses`, writes those in `defs`, clobbers every
     /// caller-saved register. A safepoint unless the callee is known never to reach the
     /// collector.
@@ -243,6 +245,7 @@ pub fn operands(inst: *Inst, buf: *[Mir.max_operands]Mir.Operand) []Mir.Operand 
             B.mem(buf, &n, &o.src);
         },
         .sym_addr => |*o| B.add(buf, &n, &o.rd, .def),
+        .text_base => |*r| B.add(buf, &n, r, .def),
         .call => |*o| switch (o.callee) {
             .reg => |*r| B.add(buf, &n, r, .use),
             .func, .import => {},

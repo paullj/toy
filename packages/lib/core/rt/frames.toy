@@ -1,0 +1,82 @@
+# The stack as the runtime walks it: the collector's root scan and a panic's backtrace go
+# from frame to frame through these fns alone, so they hold what a frame is on this target.
+# A native target walks the frame records the ISA's `frame_address()` names: a record is
+# the caller's record and the return address into the caller, and the caller's stack
+# pointer at the call is just above it. wasm will walk a shadow stack behind the same fns.
+#
+# The walk reads toy frames only: C code need not keep a frame chain, and a C frame has no
+# stack map. A call to C that can call back into toy goes through a `$ccall` adapter, which
+# records its own frame for the time of the call in the slot at byte 120 of the control
+# block (per thread once there are threads); that frame's record names the toy caller and
+# the call site, as any callee's does. A callback's `$cfn` adapter, which C calls, points
+# its own record's link at the recorded frame, marked with bit 0 (records are 16-byte
+# aligned), and puts the C caller's frame back before it returns. So a walk that reaches a
+# frame whose return address is in C follows a marked link over the C frames, and stops at
+# any other.
+
+# The return address `frame` saved: an address in its caller's code.
+pub fn return_address(frame: int) -> int {
+    return word(frame + 8)
+}
+
+# The address of the call `frame` returns from, which keys its caller's stack-map row and
+# names the line in a backtrace. A native call here is one 4-byte instruction.
+pub fn call_site(frame: int) -> int {
+    return return_address(frame) - 4
+}
+
+# Make `frame` read as called from `site` in the fn whose frame is `caller`, as a signal
+# handler does to go on from the code it interrupted.
+pub fn redirect(frame: int, caller: int, site: int) {
+    set_word(frame, caller)
+    set_word(frame + 8, site + 4)
+}
+
+# The caller's stack pointer at the call `frame` returns to, which its stack map's
+# offsets count from.
+pub fn caller_sp(frame: int) -> int {
+    return frame + 16
+}
+
+# The frame of `frame`'s caller, or 0 where the walk ends. `in_c`: the return address is in
+# C, so the caller is reached over the C frames on a callback's link, if any.
+pub fn caller(frame: int, in_c: bool) -> int {
+    next := word(frame)
+    if !in_c { return next }
+    if (next & 1) == 0 { return 0 }
+    return next - 1
+}
+
+# Called by a `$ccall` adapter with its own frame; returns the frame it replaces, for
+# `leave`, so nested calls into C unwind in order.
+pub fn enter(frame: int) -> int {
+    slot := control_block() + 120
+    prev := word(slot)
+    set_word(slot, frame)
+    return prev
+}
+
+pub fn leave(prev: int) {
+    set_word(control_block() + 120, prev)
+}
+
+# Called by a `$cfn` adapter with its own frame; returns the C caller's frame, for
+# `unlink`. A callback C makes outside any recorded call (an atexit handler, say) links to
+# no frame, which ends a walk there.
+pub fn link(frame: int) -> int {
+    saved := word(frame)
+    set_word(frame, word(control_block() + 120) | 1)
+    return saved
+}
+
+pub fn unlink(frame: int, saved: int) {
+    set_word(frame, saved)
+}
+
+fn word(at: int) -> int {
+    return unsafe { load(at) }
+}
+
+fn set_word(at: int, v: int) {
+    unsafe { store(at, v) }
+}
