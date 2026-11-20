@@ -1,0 +1,16 @@
+# `INT_MIN / -1` and `INT_MIN % -1` made only of constants are T0034 at every signed
+# width: computed while compiling, they would panic in a debug run (the quotient does
+# not fit), as a constant `+` past the type's range does.
+M8: int8 =: -128
+M32: int32 =: -2147483648
+MIN :=: -9223372036854775808
+
+pub Q8 :=: M8 / -1  #~ ERROR [T0034] constant value 128 out of range for type 'int8'
+pub R8 :=: M8 % -1  #~ ERROR [T0034] constant value 128 out of range for type 'int8'
+pub R32 :=: M32 % -1  #~ ERROR [T0034] constant value 2147483648 out of range for type 'int32'
+
+fn main() -> int {
+    q := MIN / -1  #~ ERROR [T0034] constant value 9223372036854775808 out of range for type 'int'
+    r := MIN % -1  #~ ERROR [T0034] constant value 9223372036854775808 out of range for type 'int'
+    return q + r
+}

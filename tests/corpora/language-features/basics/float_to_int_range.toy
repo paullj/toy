@@ -1,0 +1,27 @@
+# Feature: `try_into` from a float to an int gives Err (here the fallback 7) for NaN,
+# the infinities and every value outside the int range, and truncates toward zero
+# inside it: both ends, a fraction, and a float32.
+# expect: stdout "7\n7\n7\n7\n-9223372036854775808\n9223372036854774784\n-3\n3\n0\n16777216\n"
+import std/io
+
+fn conv(f: float) -> int {
+    v: int = f.try_into().or(7)
+    v
+}
+
+fn main() {
+    zero := 0.0
+    inf := 1.0 /. zero
+    io.println(conv(zero /. zero))
+    io.println(conv(inf))
+    io.println(conv(zero -. inf))
+    io.println(conv(9223372036854775808.0))
+    io.println(conv(zero -. 9223372036854775808.0))
+    io.println(conv(9223372036854774784.0))
+    io.println(conv(zero -. 3.9))
+    io.println(conv(3.9))
+    io.println(conv(zero -. 0.5))
+    s: float32 = 16777216.0
+    d: int = s.try_into().or(7)
+    io.println(d)
+}

@@ -319,6 +319,8 @@ fn binary(c: *const Ctx, node: Ast.Index, n: Ast.Node, ty: Type) Error!Folded {
         },
         .plus, .minus, .star, .slash, .percent, .amp, .pipe, .caret, .plus_percent, .minus_percent, .star_percent, .lt_lt, .gt_gt => {
             if (a != .int or b != .int or !ty.isInteger()) return .{ .not_const = node };
+            // `INT_MIN % -1` is 0, but a debug run panics on it, as its quotient does not fit.
+            if (op == .percent and b.int == -1 and !Literal.fitsValue(-a.int, ty)) return .{ .overflow = .{ .node = node, .v = -a.int, .ty = ty } };
             const v = intBinary(op, a.int, b.int, ty) orelse return .{ .not_const = node };
             return checked(node, v, ty);
         },
@@ -622,6 +624,26 @@ test "a computed value out of range is named as one, not as a literal" {
     try testing.expectEqual(@as(usize, 2), r.result.diags.len);
     try testing.expectEqualStrings("constant value 256 out of range for type 'uint8'", r.result.diags[0].message);
     try testing.expectEqualStrings("literal out of range for type 'uint8'", r.result.diags[1].message);
+}
+
+test "INT_MIN / -1 and INT_MIN % -1 overflow every signed width, as a debug run panics on them" {
+    const C = @import("../diagnostics/codes.zig").Code;
+    const cases = [_][]const u8{
+        "M: int8 =: -128\nN :=: M / -1\n",
+        "M: int8 =: -128\nN :=: M % -1\n",
+        "M: int16 =: -32768\nN :=: M % -1\n",
+        "M: int32 =: -2147483648\nN :=: M % -1\n",
+        "M :=: -9223372036854775808\nN :=: M / -1\n",
+        "M :=: -9223372036854775808\nN :=: M % -1\n",
+        "M :=: -9223372036854775808\nfn f() -> int { M % -1 }\n",
+    };
+    for (cases) |src| try Typecheck.expectDiagCodes(src, &.{C.T0034});
+    var r = try Typecheck.checkSource("M: int8 =: -128\nN :=: M % -1\n");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("constant value 128 out of range for type 'int8'", r.result.diags[0].message);
+    var ok = try lastValue("M: int8 =: -127\nN :=: M % -1\n");
+    defer ok.owned.deinit(testing.allocator);
+    try testing.expect(valueEql(ok.value, .{ .int = 0 }));
 }
 
 test "a str const owns its decoded bytes and a char const its codepoint" {

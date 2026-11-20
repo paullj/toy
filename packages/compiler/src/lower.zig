@@ -1074,16 +1074,16 @@ fn emitOverflowGuard(b: *Builder, kind: Ir.Overflow.Kind, lhs: Ir.ValueId, rhs: 
     try panicIf(b, over, reason);
 }
 
-/// Panic when signed `lhs / rhs` is `min / -1`, the one quotient that does not fit `ty`
-/// (the machine `sdiv` gives `min`). Built from plain compares so no `Overflow.Kind`
-/// needs a division case that only this guard would use.
-fn emitDivOverflowGuard(b: *Builder, lhs: Ir.ValueId, rhs: Ir.ValueId, ty: Typecheck.Type) error{OutOfMemory}!void {
+/// Panic when signed `lhs / rhs` (or `lhs % rhs`) is `min / -1`, the one quotient that
+/// does not fit `ty`; a release build wraps it to `min` (remainder 0). Built from plain
+/// compares so no `Overflow.Kind` needs a division case that only this guard would use.
+fn emitDivOverflowGuard(b: *Builder, lhs: Ir.ValueId, rhs: Ir.ValueId, ty: Typecheck.Type, reason: Ir.Terminator.PanicReason) error{OutOfMemory}!void {
     const min = try b.emit(.{ .iconst = @as(i64, std.math.minInt(i64)) >> @intCast(64 - ty.intBits()) }, ty);
     const neg_one = try b.emit(.{ .iconst = -1 }, ty);
     const is_min = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = lhs, .rhs = min } }, Typecheck.Type.bool);
     const is_neg_one = try b.emit(.{ .icmp = .{ .cc = .eq, .lhs = rhs, .rhs = neg_one } }, Typecheck.Type.bool);
     const both = try b.emit(.{ .band = .{ .lhs = is_min, .rhs = is_neg_one } }, Typecheck.Type.bool);
-    try panicIf(b, both, .div_overflow);
+    try panicIf(b, both, reason);
 }
 
 fn panicIf(b: *Builder, cond: Ir.ValueId, reason: Ir.Terminator.PanicReason) error{OutOfMemory}!void {
@@ -1131,7 +1131,7 @@ fn lowerBinOp(b: *Builder, op_tok: u32, op: TokenTag, lhs_node: Ast.Index, rhs_n
             if (op == .slash) {
                 try emitZeroGuard(b, rhs, lt, .div_by_zero);
                 if (lt.isUnsignedInt()) return .{ .value = try b.emit(.{ .udiv = bin }, lt) };
-                if (b.in.trap_overflow) try emitDivOverflowGuard(b, lhs, rhs, lt);
+                if (b.in.trap_overflow) try emitDivOverflowGuard(b, lhs, rhs, lt, .div_overflow);
                 return .{ .value = try b.emit(.{ .sdiv = bin }, lt) };
             }
             const kind: Ir.Overflow.Kind = switch (op) {
@@ -1199,8 +1199,9 @@ fn lowerBinOp(b: *Builder, op_tok: u32, op: TokenTag, lhs_node: Ast.Index, rhs_n
             const rhs = operandValue(try lowerExpr(b, rhs_node));
             try emitZeroGuard(b, rhs, lt, .rem_by_zero);
             const bin: Ir.Bin = .{ .lhs = lhs, .rhs = rhs };
-            const ir_op: Ir.Op = if (lt.isUnsignedInt()) Ir.Op{ .umod = bin } else Ir.Op{ .smod = bin };
-            return .{ .value = try b.emit(ir_op, lt) };
+            if (lt.isUnsignedInt()) return .{ .value = try b.emit(.{ .umod = bin }, lt) };
+            if (b.in.trap_overflow) try emitDivOverflowGuard(b, lhs, rhs, lt, .rem_overflow);
+            return .{ .value = try b.emit(.{ .smod = bin }, lt) };
         },
         .plus_dot, .minus_dot, .star_dot, .slash_dot => {
             const lhs = operandValue(try lowerExpr(b, lhs_node));

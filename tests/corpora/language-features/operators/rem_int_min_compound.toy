@@ -1,0 +1,12 @@
+# Feature: `%=` checks `INT_MIN % -1` like `%`, at every signed width (int32 here).
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "integer overflow in '%'"
+import std/io
+
+fn main() {
+    x: int32 = -2147483648
+    d: int32 = -1
+    x %= d
+    io.println(x)
+}

@@ -148,6 +148,10 @@ pub const Op = union(enum) {
     add: Bin,
     sub: Bin,
     mul: Bin,
+    /// Integer quotient and remainder, truncating toward zero (`docs/typesystem.md`). A zero
+    /// divisor never reaches them: lower guards it with a panic first. Signed `INT_MIN / -1`
+    /// is `INT_MIN` and `INT_MIN % -1` is 0 (a debug build checks for it before), as AArch64
+    /// SDIV gives; an ISA whose divide traps there (x86 IDIV, wasm `i64.div_s`) needs a fix-up.
     sdiv: Bin,
     udiv: Bin,
     smod: Bin,
@@ -212,8 +216,10 @@ pub const Op = union(enum) {
     fcmp: struct { cc: FCond, lhs: ValueId, rhs: ValueId },
     /// Signed i64 value → f64 value (SCVTF). Lossless in range; rounds |x|>2^53 to nearest. Pure.
     scvtf: ValueId,
-    /// f64 value → signed i64 value, truncating toward zero (FCVTZS). Pure. Emitted ONLY inside the
-    /// range-guarded float→int witness, so the hardware saturation is never observable.
+    /// f64 value → signed i64 value, truncating toward zero. Pure. Out of range it saturates to
+    /// the result's min/max and NaN gives 0 (`docs/typesystem.md`), so every ISA gives one value:
+    /// AArch64 FCVTZS does this itself, an x86 CVTTSD2SI needs a fix-up. Lower emits it only
+    /// with an `int` result, inside the range-guarded `try_into` witness.
     fcvtzs: ValueId,
     /// Between `float` and `float32` (FCVT), the direction from the operand and result types:
     /// to `float` exact, to `float32` rounding to nearest. Pure.
@@ -274,6 +280,7 @@ pub const Terminator = union(enum) {
         mul_overflow,
         div_overflow,
         neg_overflow,
+        rem_overflow,
 
         pub fn message(r: PanicReason) []const u8 {
             return switch (r) {
@@ -285,6 +292,7 @@ pub const Terminator = union(enum) {
                 .mul_overflow => "integer overflow in '*'",
                 .div_overflow => "integer overflow in '/'",
                 .neg_overflow => "integer overflow in negation",
+                .rem_overflow => "integer overflow in '%'",
             };
         }
     };

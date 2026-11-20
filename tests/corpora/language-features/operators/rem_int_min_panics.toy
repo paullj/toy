@@ -1,0 +1,12 @@
+# Feature: `INT_MIN % -1` panics in a debug build like `INT_MIN / -1`, though the
+# remainder 0 fits: it is the quotient that overflows. A release build gives 0.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "integer overflow in '%'"
+import std/io
+
+fn rem(a: int, b: int) -> int { a % b }
+
+fn main() {
+    io.println(rem(-9223372036854775808, -1))
+}
