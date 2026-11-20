@@ -1,0 +1,11 @@
+# Feature: an integer remainder by zero panics in every profile, unsigned widths too.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "remainder by zero"
+import std/io
+
+fn rem(a: uint8, b: uint8) -> uint8 { a % b }
+
+fn main() {
+    io.println(rem(7, 0))
+}

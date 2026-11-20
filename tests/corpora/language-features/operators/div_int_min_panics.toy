@@ -1,0 +1,12 @@
+# Feature: `INT_MIN / -1` does not fit, so a debug build panics; a release build wraps
+# it to INT_MIN (profiles test). Every signed width: here int8's -128.
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "integer overflow in '/'"
+import std/io
+
+fn quot(a: int8, b: int8) -> int8 { a / b }
+
+fn main() {
+    io.println(quot(-128, -1))
+}

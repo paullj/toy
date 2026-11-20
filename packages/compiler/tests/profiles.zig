@@ -292,6 +292,12 @@ const overflow_prog =
     \\fn rem8(a: int8, b: int8) -> int8 { a % b }
     \\fn div(a: int, b: int) -> int { a / b }
     \\fn divby16(mut x: int16, d: int16) { x /= d }
+    \\fn rem(a: int, b: int) -> int { a % b }
+    \\fn remby16(mut x: int16, d: int16) { x %= d }
+    \\fn div32(a: int32, b: int32) -> int32 { a / b }
+    \\fn rem32(a: int32, b: int32) -> int32 { a % b }
+    \\fn divu8(a: uint8, b: uint8) -> uint8 { a / b }
+    \\fn remu(a: uint, b: uint) -> uint { a % b }
     \\fn folded() -> int {
     \\    a := 4
     \\    x := a * 4611686018427387904
@@ -343,13 +349,26 @@ const overflow_prog =
     \\    if c == 25 { io.println(div8(-128, 1)) }
     \\    if c == 26 { io.println(div(-9223372036854775807, -1)) }
     \\    if c == 27 { io.println(rem8(-128, -1)) }
+    \\    if c == 28 { io.println(rem(-9223372036854775808, -1)) }
+    \\    if c == 29 {
+    \\        x: int16 = -32768
+    \\        remby16(x, -1)
+    \\        io.println(x)
+    \\    }
+    \\    if c == 30 { io.println(div32(-2147483648, -1)) }
+    \\    if c == 31 { io.println(rem32(-2147483648, -1)) }
+    \\    if c == 32 { io.println(rem(-9223372036854775807, -1)) }
+    \\    if c == 33 { io.println(div(5, 0)) }
+    \\    if c == 34 { io.println(rem(-5, 0)) }
+    \\    if c == 35 { io.println(divu8(5, 0)) }
+    \\    if c == 36 { io.println(remu(5, 0)) }
     \\}
     \\
 ;
 
-/// Each case's panic message in a debug build (null: it does not overflow) and its output
-/// in a release build, which wraps.
-const overflow_cases = [_]struct { panic: ?[]const u8, wraps_to: []const u8 }{
+/// Each case's overflow panic in a debug build (null: it does not overflow) and its output
+/// in a release build, which wraps; or the panic it gives in every profile.
+const overflow_cases = [_]struct { panic: ?[]const u8 = null, wraps_to: []const u8 = "", always: ?[]const u8 = null }{
     .{ .panic = "'+'", .wraps_to = "-128" },
     .{ .panic = "'-'", .wraps_to = "127" },
     .{ .panic = "'*'", .wraps_to = "-128" },
@@ -377,7 +396,16 @@ const overflow_cases = [_]struct { panic: ?[]const u8, wraps_to: []const u8 }{
     .{ .panic = "'/'", .wraps_to = "-32768" },
     .{ .panic = null, .wraps_to = "-128" },
     .{ .panic = null, .wraps_to = "9223372036854775807" },
+    .{ .panic = "'%'", .wraps_to = "0" },
+    .{ .panic = "'%'", .wraps_to = "0" },
+    .{ .panic = "'%'", .wraps_to = "0" },
+    .{ .panic = "'/'", .wraps_to = "-2147483648" },
+    .{ .panic = "'%'", .wraps_to = "0" },
     .{ .panic = null, .wraps_to = "0" },
+    .{ .always = "division by zero" },
+    .{ .always = "remainder by zero" },
+    .{ .always = "division by zero" },
+    .{ .always = "remainder by zero" },
 };
 
 fn runCase(gpa: std.mem.Allocator, io: Io, exe: []const u8, case: usize) !Out {
@@ -392,7 +420,7 @@ fn runCase(gpa: std.mem.Allocator, io: Io, exe: []const u8, case: usize) !Out {
     return .{ .out = out, .err = err, .term = try child.wait(io) };
 }
 
-test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps (#155)" {
+test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps; a zero divisor panics in both (#155, #428)" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -416,8 +444,8 @@ test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps (
             const res = try runCase(gpa, io, exe, i);
             defer freeOut(gpa, res);
             errdefer std.debug.print("{s} case {d}: exit {any} stdout '{s}' stderr '{s}'\n", .{ b.sub, i, res.term, res.out, res.err });
-            if (b.traps and c.panic != null) {
-                const want = try std.fmt.allocPrint(gpa, "integer overflow in {s}\n", .{c.panic.?});
+            if (c.always != null or (b.traps and c.panic != null)) {
+                const want = if (c.always) |m| try std.fmt.allocPrint(gpa, "{s}\n", .{m}) else try std.fmt.allocPrint(gpa, "integer overflow in {s}\n", .{c.panic.?});
                 defer gpa.free(want);
                 try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, res.term);
                 try testing.expect(std.mem.startsWith(u8, res.err, want));

@@ -1,32 +1,29 @@
 //! Exact constant-fold arithmetic for the opt stage.
 //!
-//! These helpers MUST replicate what the instruction selector (`codegen/mir/aarch64/
-//! Isel.zig`, `alu`) emits bit-for-bit, otherwise opt-on diverges from opt-off (the
-//! differential test is the backstop, but correctness lives here). Verified against
-//! that selection:
-//!   add/sub/mul : 64-bit two's-complement WRAPPING (`+%`/`-%`/`*%`).
-//!   sdiv        : SIGNED. aarch64 hardware does NOT trap: /0 yields 0,
-//!                 INT_MIN / -1 yields INT_MIN. Zig `@divTrunc` TRAPS on both
-//!                 in safe builds, so they are special-cased BEFORE it.
-//!   neg         : `0 -% v` (so neg(INT_MIN) == INT_MIN, matching hardware).
-//!   bnot        : logical "== 0" on a BOOL (cmp #0 + cset eq), i.e. `!b`.
+//! These helpers compute what the language defines (`docs/typesystem.md`, #60 D11), and
+//! every ISA's selector must give the same bits, otherwise opt-on diverges from opt-off
+//! (the differential test is the backstop). The rules:
+//!   add/sub/mul : 64-bit two's-complement WRAPPING (`+%`/`-%`/`*%`); a debug build's
+//!                 overflow test is a separate `overflow` instruction.
+//!   div/rem     : truncate toward zero; a remainder takes the dividend's sign. A zero
+//!                 divisor has no value: lowering panics before every divide, so `divide`
+//!                 returns null and the op is left for that guard. `INT_MIN / -1` wraps to
+//!                 `INT_MIN` and `INT_MIN % -1` is 0 (release; debug panics first).
+//!   neg         : `0 -% v` (so neg(INT_MIN) == INT_MIN).
+//!   bnot        : logical "== 0" on a BOOL, i.e. `!b`.
 //!   icmp        : SIGNED i64 comparison → bool.
 
 const std = @import("std");
 const Ir = @import("../ir/Ir.zig");
 
-pub const BinKind = enum { add, sub, mul, sdiv, udiv, smod, umod, band, bor, bxor };
+pub const BinKind = enum { add, sub, mul, band, bor, bxor };
 
-/// Fold a binary integer op on two constant i64 operands, matching aarch64.
+/// Fold a binary integer op on two constant i64 operands.
 pub fn foldBin(kind: BinKind, l: i64, r: i64) i64 {
     return switch (kind) {
         .add => l +% r,
         .sub => l -% r,
         .mul => l *% r,
-        .sdiv => sdiv(l, r),
-        .udiv => udiv(l, r),
-        .smod => smod(l, r),
-        .umod => umod(l, r),
         .band => l & r,
         .bor => l | r,
         .bxor => l ^ r,
@@ -55,47 +52,26 @@ pub fn foldShift(kind: ShiftKind, l: i64, r: i64, width: u16) i64 {
     };
 }
 
-/// Bitwise complement matching aarch64 `mvn` (full 64-bit `~`); the caller
-/// width-normalizes via `wrapTo`.
+/// Bitwise complement over the full 64 bits; the caller width-normalizes via `wrapTo`.
 pub fn bcompl(v: i64) i64 {
     return ~v;
 }
 
-/// SIGNED division matching aarch64 `sdiv`: /0 → 0, INT_MIN/-1 → INT_MIN, else
-/// truncate-toward-zero. The two special cases MUST come before `@divTrunc`
-/// (which traps on both in safe builds).
-pub fn sdiv(l: i64, r: i64) i64 {
-    if (r == 0) return 0;
-    if (l == std.math.minInt(i64) and r == -1) return std.math.minInt(i64);
-    return @divTrunc(l, r);
+pub const DivKind = enum { sdiv, udiv, smod, umod };
+
+/// A division or remainder on two constant i64 operands (an unsigned one reads them as
+/// `u64`), or null for a zero divisor, which has no value.
+pub fn divide(kind: DivKind, l: i64, r: i64) ?i64 {
+    if (r == 0) return null;
+    return switch (kind) {
+        .sdiv => if (r == -1) 0 -% l else @divTrunc(l, r),
+        .smod => if (r == -1) 0 else @rem(l, r),
+        .udiv => @bitCast(@as(u64, @bitCast(l)) / @as(u64, @bitCast(r))),
+        .umod => @bitCast(@as(u64, @bitCast(l)) % @as(u64, @bitCast(r))),
+    };
 }
 
-/// UNSIGNED division matching aarch64 `udiv`: /0 → 0, else unsigned truncate. No
-/// INT_MIN/-1 case (that overflow is signed-only). Operands are the raw 64-bit bit
-/// patterns reinterpreted as `u64`.
-pub fn udiv(l: i64, r: i64) i64 {
-    if (r == 0) return 0;
-    return @bitCast(@as(u64, @bitCast(l)) / @as(u64, @bitCast(r)));
-}
-
-/// SIGNED remainder matching aarch64 `sdiv`+`msub` (r = a - (a/b)*b): sign of the
-/// dividend, truncated. /0 -> 0 and INT_MIN%-1 -> 0 (the msub cancels:
-/// INT_MIN -% (INT_MIN *% -1) == 0), both special-cased before `@rem` (which traps
-/// on them). /0 is caller-gated (fold skips it), so this stays total like `sdiv`.
-pub fn smod(l: i64, r: i64) i64 {
-    if (r == 0) return 0;
-    if (l == std.math.minInt(i64) and r == -1) return 0;
-    return @rem(l, r);
-}
-
-/// UNSIGNED remainder matching aarch64 `udiv`+`msub`. /0 -> 0 (caller-gated).
-/// Operands are the raw 64-bit bit patterns reinterpreted as `u64`.
-pub fn umod(l: i64, r: i64) i64 {
-    if (r == 0) return 0;
-    return @bitCast(@as(u64, @bitCast(l)) % @as(u64, @bitCast(r)));
-}
-
-/// Unary negate matching aarch64 `sub xd, xzr, xm` (wrapping).
+/// Wrapping negate.
 pub fn neg(v: i64) i64 {
     return 0 -% v;
 }
@@ -142,12 +118,12 @@ pub fn overflows(kind: Ir.Overflow.Kind, l: i64, r: i64, ty: Ir.Type) bool {
     };
 }
 
-/// Logical not on a bool (matches `cmp #0; cset eq`).
+/// Logical not on a bool.
 pub fn bnot(b: bool) bool {
     return !b;
 }
 
-/// Comparison → bool, matching `cmp` + `cset cc`. Signedness rides on `cc` (the
+/// Signed or unsigned comparison → bool. Signedness rides on `cc` (the
 /// `u*` conds compare the operands as `u64`), so this stays correct under
 /// operand-rewriting opt passes.
 pub fn icmp(cc: Ir.Cond, l: i64, r: i64) bool {
@@ -167,37 +143,42 @@ pub fn icmp(cc: Ir.Cond, l: i64, r: i64) bool {
 
 // Tests — the fold-divergence edge cases (run under std.testing.allocator).
 
-test "sdiv by zero is 0 (no trap)" {
-    try std.testing.expectEqual(@as(i64, 0), sdiv(5, 0));
-    try std.testing.expectEqual(@as(i64, 0), sdiv(-7, 0));
-    try std.testing.expectEqual(@as(i64, 0), sdiv(0, 0));
+test "divide: a zero divisor has no value, for every kind" {
+    for ([_]DivKind{ .sdiv, .udiv, .smod, .umod }) |k| {
+        try std.testing.expectEqual(@as(?i64, null), divide(k, 5, 0));
+        try std.testing.expectEqual(@as(?i64, null), divide(k, 0, 0));
+        try std.testing.expectEqual(@as(?i64, null), divide(k, std.math.minInt(i64), 0));
+    }
 }
 
-test "INT_MIN / -1 is INT_MIN (no overflow trap)" {
+test "divide: INT_MIN / -1 wraps to INT_MIN and INT_MIN % -1 is 0" {
     const min = std.math.minInt(i64);
-    try std.testing.expectEqual(min, sdiv(min, -1));
+    try std.testing.expectEqual(@as(?i64, min), divide(.sdiv, min, -1));
+    try std.testing.expectEqual(@as(?i64, 0), divide(.smod, min, -1));
+    // A narrow width computes on its sign-extended value; wrapTo gives the width's INT_MIN.
+    try std.testing.expectEqual(@as(i64, -128), wrapTo(Ir.Type.int8, divide(.sdiv, -128, -1).?));
+    try std.testing.expectEqual(@as(i64, 0), wrapTo(Ir.Type.int8, divide(.smod, -128, -1).?));
+    try std.testing.expectEqual(@as(i64, -32768), wrapTo(Ir.Type.int16, divide(.sdiv, -32768, -1).?));
+    try std.testing.expectEqual(@as(i64, -2147483648), wrapTo(Ir.Type.int32, divide(.sdiv, -2147483648, -1).?));
 }
 
-test "smod: sign of the dividend, truncated (matches sdiv+msub)" {
-    try std.testing.expectEqual(@as(i64, -2), smod(-17, 5));
-    try std.testing.expectEqual(@as(i64, 2), smod(17, -5));
-    try std.testing.expectEqual(@as(i64, 2), smod(17, 5));
-    try std.testing.expectEqual(@as(i64, 0), smod(std.math.minInt(i64), -1)); // msub cancels
-    try std.testing.expectEqual(@as(i64, 0), smod(5, 0)); // caller-gated; total fn
+test "divide: truncates toward zero; a remainder takes the dividend's sign" {
+    try std.testing.expectEqual(@as(?i64, -2), divide(.sdiv, -7, 3));
+    try std.testing.expectEqual(@as(?i64, 2), divide(.sdiv, 7, 3));
+    try std.testing.expectEqual(@as(?i64, -2), divide(.sdiv, 7, -3));
+    try std.testing.expectEqual(@as(?i64, 7), divide(.sdiv, -7, -1));
+    try std.testing.expectEqual(@as(?i64, -2), divide(.smod, -17, 5));
+    try std.testing.expectEqual(@as(?i64, 2), divide(.smod, 17, -5));
+    try std.testing.expectEqual(@as(?i64, 2), divide(.smod, 17, 5));
 }
 
-test "umod: unsigned remainder (raw bit patterns)" {
-    try std.testing.expectEqual(@as(i64, 1), umod(7, 2));
-    try std.testing.expectEqual(@as(i64, 0), umod(8, 2));
-    // top-bit-set operand: as u64, 0x8000_0000_0000_0000 % 3 == 2.
-    try std.testing.expectEqual(@as(i64, 2), umod(std.math.minInt(i64), 3));
-    try std.testing.expectEqual(@as(i64, 0), umod(5, 0)); // caller-gated
-}
-
-test "sdiv truncates toward zero" {
-    try std.testing.expectEqual(@as(i64, -2), sdiv(-7, 3));
-    try std.testing.expectEqual(@as(i64, 2), sdiv(7, 3));
-    try std.testing.expectEqual(@as(i64, -2), sdiv(7, -3));
+test "divide: unsigned reads the raw bit patterns" {
+    const two_63 = std.math.minInt(i64);
+    try std.testing.expectEqual(@as(?i64, 0x4000000000000000), divide(.udiv, two_63, 2));
+    try std.testing.expectEqual(@as(?i64, 3), divide(.udiv, 7, 2));
+    try std.testing.expectEqual(@as(?i64, 0), divide(.udiv, 5, -1));
+    try std.testing.expectEqual(@as(?i64, 1), divide(.umod, 7, 2));
+    try std.testing.expectEqual(@as(?i64, 2), divide(.umod, two_63, 3));
 }
 
 test "neg(INT_MIN) == INT_MIN" {
@@ -226,13 +207,6 @@ test "signed icmp on negatives" {
 test "bnot" {
     try std.testing.expect(bnot(false));
     try std.testing.expect(!bnot(true));
-}
-
-test "udiv is unsigned: /0 is 0; 2^63/2 == 2^62 (bit63 set)" {
-    try std.testing.expectEqual(@as(i64, 0), udiv(5, 0));
-    const two_63 = std.math.minInt(i64); // 0x8000_0000_0000_0000 bit pattern
-    try std.testing.expectEqual(@as(i64, 0x4000000000000000), udiv(two_63, 2));
-    try std.testing.expectEqual(@as(i64, 3), udiv(7, 2));
 }
 
 test "wrapTo normalizes narrow widths (mirrors codegen)" {

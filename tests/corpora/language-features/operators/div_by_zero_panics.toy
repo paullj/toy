@@ -1,0 +1,12 @@
+# Feature: an integer division by zero panics in every profile, whatever the ISA's
+# divide instruction gives (AArch64 `sdiv` gives 0).
+# expect: exit 1
+# expect: stdout ""
+# expect: stderr "division by zero"
+import std/io
+
+fn quot(a: int, b: int) -> int { a / b }
+
+fn main() {
+    io.println(quot(7, 0))
+}

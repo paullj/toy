@@ -50,9 +50,10 @@ fn big(n: int) -> int { n * 4611686018427387904 }
 
 `big(4)` panics with `integer overflow in '*'` in a debug build and returns `0` in a
 release build, which wraps at the operand width as two's complement. Unary `-` on an
-unsigned type does not compile (T0087); `0 -% u` wraps in both profiles. Signed `/` and `/=` panic
-on the one quotient that does not fit, the type's minimum divided by -1; `%` never
-overflows, as `min % -1` is 0.
+unsigned type does not compile (T0087); `0 -% u` wraps in both profiles. Signed `/`, `%`, `/=` and `%=`
+panic on the one quotient that does not fit, the type's minimum divided by -1; a release
+build gives the minimum for `/` and 0 for `%`. A zero divisor panics in both profiles
+(see `typesystem.md`).
 
 The wrapping operators `+%`, `-%` and `*%`, and their compound forms `+%=`, `-%=` and
 `*%=`, wrap in both profiles. They take integers only and bind like `+`, `-` and `*`.

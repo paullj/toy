@@ -70,7 +70,7 @@ takes that width, as a bare literal does (`b + -1` and `b += 1 + 2` with `b: int
 `int8`). An integer expression made only of literals and [constants](#constants) is
 computed while compiling, and each step must fit its type: `c: int8 = 100 + 100`,
 `x := 9223372036854775807 + 1` and, with `A: uint8 =: 250`, `n := A + 10` are T0034,
-not a panic when the program runs. On values, `+`, `-`, `*`, `/` and unary `-` panic on overflow in a
+not a panic when the program runs. On values, `+`, `-`, `*`, `/`, `%` and unary `-` panic on overflow in a
 debug build and wrap at the operand width in a release build (see `profiles.md`), so
 two `int8` 100s add to -56 in release. Unary `-` on an unsigned value or constant is
 an error (**T0087**); `0 -% u` is the negation that wraps (`u: uint8 = 1` then
@@ -78,6 +78,29 @@ an error (**T0087**); `0 -% u` is the negation that wraps (`u: uint8 = 1` then
 (and `+%=`, `-%=`, `*%=`) wrap in every profile; they take two integers of one type
 (**T0044** otherwise), and a constant built with them folds wrapping, so
 `c: int8 = 100 +% 100` is -56.
+
+## Division, shifts and conversions: one meaning on every target
+
+These rules are the language's, not a machine's: the constant folder, the optimizer and
+every ISA give the same value, and a target whose instruction differs emits fix-up code.
+
+* **Division and remainder by zero** panic in every profile (`division by zero`,
+  `remainder by zero`), for every integer width, signed or unsigned. A division
+  truncates toward zero, and a remainder takes the sign of the dividend: `-7 / 2` is -3
+  and `-7 % 2` is -1.
+* **`INT_MIN / -1` and `INT_MIN % -1`**, for every signed width (`int8`'s -128 up to
+  `int`'s -2^63), panic in a debug build (`integer overflow in '/'`, `integer overflow
+  in '%'`): the quotient does not fit. A release build wraps: `INT_MIN / -1` is
+  `INT_MIN` and `INT_MIN % -1` is 0. Made only of constants, either is **T0034**, as a
+  constant `+` past its type's range is, in every profile.
+* **Shifts** never panic. The bits shifted out are dropped, and an amount out of range
+  (negative, or at least the width) gives 0, or -1 for a negative value shifted right.
+* **Float to integer**: a float converts to an integer only with `try_into`, which is
+  Err for NaN, the infinities and every value outside the target's range, and otherwise
+  truncates toward zero; a `float32` converts as the `float` it widens to exactly. The
+  conversion every target implements beneath it truncates toward zero, saturates to the
+  target type's minimum or maximum, and gives 0 for NaN, so it has one value on every
+  ISA wherever a later conversion exposes it.
 
 ## Floats: `float` and `float32`
 

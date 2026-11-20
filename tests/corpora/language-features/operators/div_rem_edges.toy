@@ -1,0 +1,29 @@
+# Feature: division truncates toward zero and a remainder takes the dividend's sign; a
+# divisor of -1 on any value but INT_MIN, and unsigned operands with the top bit set,
+# give the exact result at every width.
+# expect: stdout "-3\n-1\n1\n-3\n127\n0\n2147483647\n0\n9223372036854775807\n0\n9223372036854775807\n1\n"
+import std/io
+
+fn divs(a: int, b: int) -> int { a / b }
+fn rems(a: int, b: int) -> int { a % b }
+fn div8(a: int8, b: int8) -> int8 { a / b }
+fn rem8(a: int8, b: int8) -> int8 { a % b }
+fn div32(a: int32, b: int32) -> int32 { a / b }
+fn rem32(a: int32, b: int32) -> int32 { a % b }
+fn divu(a: uint, b: uint) -> uint { a / b }
+fn remu(a: uint, b: uint) -> uint { a % b }
+
+fn main() {
+    io.println(divs(-7, 2))
+    io.println(rems(-7, 2))
+    io.println(rems(7, -2))
+    io.println(divs(7, -2))
+    io.println(div8(-127, -1))
+    io.println(rem8(-127, -1))
+    io.println(div32(-2147483647, -1))
+    io.println(rem32(-2147483647, -1))
+    io.println(divs(-9223372036854775807, -1))
+    io.println(rems(-9223372036854775807, -1))
+    io.println(divu(18446744073709551615, 2))
+    io.println(remu(18446744073709551615, 2))
+}

@@ -6,9 +6,9 @@
 //! new nor the displaced op owns a nested slice, so this is leak-free and
 //! allocation-free — see Opt.zig memory strategy (a)).
 //!
-//! Exact aarch64 arithmetic comes from `arith.zig` (wrapping add/sub/mul; sdiv
-//! /0=0 and INT_MIN/-1=INT_MIN; signed icmp; neg wraps; bnot is logical-not on a
-//! bool). Diverging here would break the opt-on≡opt-off differential.
+//! The language's arithmetic comes from `arith.zig` (wrapping add/sub/mul; a zero
+//! divisor has no value; INT_MIN/-1=INT_MIN; signed icmp; neg wraps; bnot is
+//! logical-not on a bool). Diverging here would break the opt-on≡opt-off differential.
 //!
 //! Propagation is transitive within a single forward pass: rewriting a def to an
 //! `iconst` AND recording it in the indexed `known` table lets later same-pass
@@ -77,29 +77,22 @@ pub fn run(gpa: std.mem.Allocator, func: *Ir.Function, stats: *Opt.Stats) error{
                     }
                     const l = constInt(known, bin.lhs) orelse continue;
                     const r = constInt(known, bin.rhs) orelse continue;
-                    // A constant-0 divisor must NOT fold: the op has to survive so
-                    // codegen's runtime guard fires the panic. Folding it would make
-                    // -O1 yield a value while -O0 aborts (an -O0!=-O1 divergence AND a
-                    // silent non-panic at -O1). This makes the abort a LOCAL guarantee
-                    // (guard + this skip), not an emergent product of branch-fold+DCE.
-                    switch (ins.op) {
-                        .sdiv, .udiv, .smod, .umod => if (r == 0) continue,
-                        else => {},
-                    }
-                    const kind: arith.BinKind = switch (ins.op) {
-                        .add => .add,
-                        .sub => .sub,
-                        .mul => .mul,
-                        .sdiv => .sdiv,
-                        .udiv => .udiv,
-                        .smod => .smod,
-                        .umod => .umod,
-                        .band => .band,
-                        .bor => .bor,
-                        .bxor => .bxor,
+                    // A constant-0 divisor has no value, so the op survives for the
+                    // zero guard lowered before it to panic, as -O0 does.
+                    const folded = switch (ins.op) {
+                        .sdiv => arith.divide(.sdiv, l, r),
+                        .udiv => arith.divide(.udiv, l, r),
+                        .smod => arith.divide(.smod, l, r),
+                        .umod => arith.divide(.umod, l, r),
+                        .add => arith.foldBin(.add, l, r),
+                        .sub => arith.foldBin(.sub, l, r),
+                        .mul => arith.foldBin(.mul, l, r),
+                        .band => arith.foldBin(.band, l, r),
+                        .bor => arith.foldBin(.bor, l, r),
+                        .bxor => arith.foldBin(.bxor, l, r),
                         else => unreachable,
-                    };
-                    commitFoldedInt(func, known, ins, res, arith.foldBin(kind, l, r));
+                    } orelse continue;
+                    commitFoldedInt(func, known, ins, res, folded);
                     stats.consts_folded += 1;
                     changed = true;
                 },
