@@ -1089,3 +1089,53 @@ test "gc: a pooled span reused by another kind keeps every live cell" {
         try std.testing.expectEqual(@as(u8, 1), code);
     }
 }
+
+test "gc: the page map resolves 48-bit addresses and spans align on 4 KiB-page mappings" {
+    // macOS maps nothing above 2^47 and nothing off a 16 KiB boundary, so the map is fed
+    // Linux arm64 addresses it never reads through, and `trim_spans` and `align_spans` a
+    // 4 KiB-offset mapping. macOS cannot unmap at a 4 KiB offset, so only the unmapped
+    // tails are checked; msync fails on any page that is not mapped.
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const src =
+        \\import core/rt/gc
+        \\extern fn msync(addr: int, len: int, flags: int) -> int
+        \\fn mapped(at: int, len: int) -> bool { return unsafe { msync(at, len, 1) } == 0 }
+        \\fn main() -> int {
+        \\    root := gc.new_page_map()
+        \\    high := 0xffff_8000_0000
+        \\    gc.set_pages(root, high, 32768, 7)
+        \\    if gc.page_owner(root, high) != 7 { return 1 }
+        \\    if gc.page_owner(root, high + 16384 + 5) != 7 { return 2 }
+        \\    if gc.page_owner(root, high + 32768) != 0 { return 3 }
+        \\    if gc.page_owner(root, high - 1) != 0 { return 4 }
+        \\    if gc.page_owner(root, 0x1_0000_4000) != 0 { return 5 }
+        \\    top := 0xffff_ffff_c000
+        \\    gc.set_pages(root, top, 16384, 9)
+        \\    if gc.page_owner(root, 0xffff_ffff_ffff) != 9 { return 6 }
+        \\    if gc.page_owner(root, high) != 7 { return 7 }
+        \\    gc.set_pages(root, high, 32768, 0)
+        \\    if gc.page_owner(root, high + 16384) != 0 { return 8 }
+        \\    span := 16384
+        \\    at := gc.map_spans(4 * span)
+        \\    if at % span != 0 { return 9 }
+        \\    if gc.trim_spans(at + 4096, span) != at + span { return 10 }
+        \\    if gc.trim_spans(at + span, span) != at + span { return 11 }
+        \\    if !mapped(at + span, span) { return 12 }
+        \\    if mapped(at + 2 * span, span) { return 13 }
+        \\    fresh := gc.map_spans(2 * span)
+        \\    moved := gc.align_spans(fresh + 4096, 2 * span)
+        \\    if moved % span != 0 { return 14 }
+        \\    if !mapped(moved, 2 * span) { return 15 }
+        \\    if mapped(moved + 2 * span, span) { return 16 }
+        \\    return 42
+        \\}
+        \\
+    ;
+    for ([_][]const u8{ "-O0", "-O1" }) |opt| {
+        const code = try buildAndRunWith(gpa, io, ".toy-test-gc-page-map", src, &.{ harness.dev_core_imports, opt });
+        try std.testing.expectEqual(@as(u8, 42), code);
+    }
+}
