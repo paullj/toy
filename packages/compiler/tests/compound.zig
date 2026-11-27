@@ -11,7 +11,7 @@ test "compound: every compound run case compiles to the same code as its hand-ex
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectTwins(gpa, io, .{
         .cases_dir = "tests/corpora/language-features/operators",
         .twins_dir = "packages/compiler/tests/compound_twins",

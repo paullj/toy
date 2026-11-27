@@ -36,6 +36,10 @@ pub const Request = struct {
 
 /// A problem with a `-l` value: a usage error, since it is not in any source file.
 /// `note` says what the message's neutral words are on the target.
+/// Every code the library checks report. They need a reader of the target's libraries,
+/// so a target without one cannot report them.
+pub const library_codes = [_]codes.Code{ .R0015, .R0016, .R0017, .R0018, .R0019 };
+
 pub const CliError = struct { code: codes.Code, message: []const u8, note: ?[]const u8 };
 
 /// Everything is allocated in `arena`, so one `deinit` frees it.

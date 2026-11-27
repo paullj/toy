@@ -40,4 +40,6 @@ test {
     _ = @import("profiles.zig");
     _ = @import("fuzz_diff.zig");
     _ = @import("fmt.zig");
+    _ = @import("runner.zig");
+    _ = @import("harness.zig");
 }

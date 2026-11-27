@@ -65,6 +65,7 @@ pub const Dylib = @import("link/Dylib.zig");
 pub const Image = @import("link/Image.zig");
 pub const LibResolver = @import("link/LibResolver.zig");
 pub const CodeSign = @import("link/CodeSign.zig");
+pub const ObjRead = @import("link/ObjRead.zig");
 pub const link = @import("link/emit.zig");
 pub const version = @import("version.zig");
 pub const term = struct {
@@ -136,6 +137,7 @@ test {
     _ = Image;
     _ = LibResolver;
     _ = CodeSign;
+    _ = ObjRead;
     _ = link; // discovers emit.zig's boundary test
     _ = term.ansi;
     _ = term.Style;

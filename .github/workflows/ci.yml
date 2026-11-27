@@ -10,9 +10,13 @@ concurrency:
   # The newest run deploys Pages too, so an older main run is safe to cancel.
   cancel-in-progress: true
 
-# The backend emits arm64 macOS Mach-O executables and ad-hoc code-signs them;
-# the run/emit tests SkipZigTest on anything but macos+aarch64. Every job therefore
-# runs on an Apple-Silicon macOS runner, or the whole backend would silently no-op.
+# The backend emits only arm64 macOS Mach-O executables so far, so a job that builds
+# and runs toy programs (the full Zig suite, the cache and opt gates, GC stress, the
+# differential fuzzer) needs an Apple-Silicon macOS runner. Everything else runs on
+# Linux, which costs a tenth as much and queues faster: fmt and the release build, the
+# front-end fuzzer, the bench script tests and the docs site (its editors use the wasm
+# language server, never a native toy). On Linux the suite still runs, and every test
+# that builds and runs a program skips with its reason (tests/runner.zig).
 # Tools come from mise (pinned in mise.toml).
 jobs:
   # A push that only records bench history needs the site rebuilt, not the Zig suite.
@@ -58,8 +62,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
-        os: [macos-15]
+        # On Linux the integration and corpus suites skip the binaries they would run.
+        os: [macos-15, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -67,8 +71,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-test-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-test-${{ runner.os }}-
+          key: zig-cache-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-test-${{ runner.os }}-${{ runner.arch }}-
       # Unit, cli, lsp, integration and corpus suites. The integration tests drive the toy
       # this step builds and installs; the corpus harness builds every tests/corpora fixture
       # in --verify mode, so it is also the determinism gate.
@@ -82,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
+        # Runs built binaries, so macOS only until toy emits Linux code.
         os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
@@ -91,8 +95,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-gates-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-gates-${{ runner.os }}-
+          key: zig-cache-gates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-gates-${{ runner.os }}-${{ runner.arch }}-
       # Edit scenarios across separate toy runs sharing one on-disk cache: a warm rebuild
       # must match a cold build's __text and recompile less than a full build.
       - name: Incremental cache soundness
@@ -100,6 +104,16 @@ jobs:
       # -O0 against -O1 over the corpus (exit code and stdout), and each opt pass's win.
       - name: Opt-level differential
         run: bash bench/opt-check.sh
+
+  # Bash and jq over canned results and generator output; nothing is built.
+  bench-scripts:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Bench script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
       # When `mise run bench` appends to bench/history.jsonl, on a scratch repo.
       - name: Bench history rules
         run: bash bench/record-test.sh
@@ -113,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
+        # Runs built binaries, so macOS only until toy emits Linux code.
         os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
@@ -122,21 +136,44 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-gc-stress-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-gc-stress-${{ runner.os }}-
+          key: zig-cache-gc-stress-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-gc-stress-${{ runner.os }}-${{ runner.arch }}-
       # Every corpus program built with --gc-stress (a collection before each allocation)
       # at -O0 and -O1 must still meet its # expect: lines.
       - name: GC stress corpus
         run: mise run test:gc-stress
 
+  fuzz-frontend:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Front-end fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - uses: actions/cache@v6
+        with:
+          path: .zig-cache
+          key: zig-cache-fuzz-frontend-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-fuzz-frontend-${{ runner.os }}-${{ runner.arch }}-
+      # Seeded + bounded (FUZZ_SEED / FUZZ_ITERS), so the run terminates in seconds and
+      # reproducibly. Forced to Debug by build.zig so the parser invariants fire. The
+      # differential phase builds and runs programs, so the fuzz job runs it.
+      - name: Front-end fuzzer
+        run: zig build fuzz
+        env:
+          FUZZ_SEED: "1"
+          FUZZ_ITERS: "5000"
+          FUZZ_DIFF_ITERS: "0"
+
   fuzz:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    name: Bounded fuzz (${{ matrix.os }})
+    name: Differential fuzz (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
+        # Runs built binaries, so macOS only until toy emits Linux code.
         os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
@@ -145,50 +182,39 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-fuzz-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-fuzz-${{ runner.os }}-
-      # Seeded + bounded (FUZZ_SEED / FUZZ_ITERS / FUZZ_DIFF_ITERS), so the run terminates
-      # in a few minutes and reproducibly. Forced to Debug by build.zig so the parser
-      # invariants fire. The differential phase builds each program at every level, with
-      # and without GC stress.
-      - name: Front-end and differential fuzzer
+          key: zig-cache-fuzz-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-fuzz-${{ runner.os }}-${{ runner.arch }}-
+      # Each generated program built at every level, with and without GC stress, must
+      # agree in exit code and stdout. Seeded + bounded (FUZZ_SEED / FUZZ_DIFF_ITERS); the
+      # front-end phase runs in fuzz-frontend.
+      - name: Differential fuzzer
         run: zig build fuzz
         env:
           FUZZ_SEED: "1"
-          FUZZ_ITERS: "5000"
+          FUZZ_ITERS: "0"
           FUZZ_DIFF_ITERS: "200"
 
   lint:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    name: fmt + release build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
-        os: [macos-15]
-    runs-on: ${{ matrix.os }}
+    name: fmt + release build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-lint-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-lint-${{ runner.os }}-
+          key: zig-cache-lint-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-lint-${{ runner.os }}-${{ runner.arch }}-
       - name: Format check
         run: zig fmt --check packages build.zig build.zig.zon
       - name: Release build
         run: zig build -Doptimize=ReleaseFast
 
   site:
-    name: Docs site (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # TODO: add ubuntu-latest and windows-latest once the backend targets Linux/Windows.
-        os: [macos-15]
-    runs-on: ${{ matrix.os }}
+    name: Docs site
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: packages/site
@@ -198,8 +224,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .zig-cache
-          key: zig-cache-site-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
-          restore-keys: zig-cache-site-${{ runner.os }}-
+          key: zig-cache-site-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig', 'build.zig.zon', 'packages/**/*.zig', 'packages/lib/**/*.toy') }}
+          restore-keys: zig-cache-site-${{ runner.os }}-${{ runner.arch }}-
       # Run once here; the site:test / site:e2e tasks would each rebuild it.
       - name: Build wasm language server
         run: mise run site:wasm
@@ -207,8 +233,9 @@ jobs:
         run: pnpm check
       - name: Unit tests
         run: pnpm test
+      # A fresh Ubuntu runner lacks some of the system libraries Chromium loads.
       - name: Install Chromium
-        run: pnpm exec playwright install chromium
+        run: pnpm exec playwright install --with-deps chromium
       - name: End-to-end tests
         run: pnpm e2e
       # After e2e: its preview build has no base path and would overwrite this one.
@@ -228,7 +255,7 @@ jobs:
     # Skipped Zig jobs (a history-only push) must not block the deploy; failed ones must.
     # A cancelled site job counts as neither, but leaves no Pages artifact to deploy.
     if: ${{ !cancelled() && !failure() && needs.site.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: [changes, test, gates, gc-stress, fuzz, lint, site]
+    needs: [changes, test, gates, bench-scripts, gc-stress, fuzz-frontend, fuzz, lint, site]
     runs-on: ubuntu-latest
     permissions:
       actions: read

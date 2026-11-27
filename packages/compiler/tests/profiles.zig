@@ -3,9 +3,11 @@
 //! the default output folder.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
 const harness = @import("harness.zig");
+const ObjRead = @import("toy_compiler").ObjRead;
 
 /// `fold` turns `2 + 3` into a constant, so a build that ran the passes has different IR.
 const prog =
@@ -19,22 +21,14 @@ const prog =
 const Out = harness.ToolOutput;
 
 fn toyIn(gpa: std.mem.Allocator, io: Io, cwd_abs: ?[]const u8, args: []const []const u8) !Out {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, harness.toy_exe);
-    try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{
-        .argv = argv.items,
-        .cwd = if (cwd_abs) |c| .{ .path = c } else .inherit,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 22));
-    errdefer gpa.free(out);
-    var erdr = child.stderr.?.readerStreaming(io, &.{});
-    const err = try erdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    return .{ .out = out, .err = err, .term = try child.wait(io) };
+    return harness.toyIn(gpa, io, cwd_abs, args);
+}
+
+/// A macOS tool (codesign, atos, lldb) run over a binary, or null when the host lacks it
+/// or the binary is not one this host runs.
+fn hostTool(gpa: std.mem.Allocator, io: Io, argv: []const []const u8) !?Out {
+    if ((try harness.config()).runner != .native) return null;
+    return harness.runTool(gpa, io, null, argv);
 }
 
 fn freeOut(gpa: std.mem.Allocator, o: Out) void {
@@ -47,7 +41,7 @@ test "profiles: release runs every pass, debug none, and -O overrides the profil
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     const dir = ".toy-test-profiles-ir";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -94,7 +88,7 @@ test "profiles: a bad or conflicting profile is a usage error, for check too (#1
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     const dir = ".toy-test-profiles-usage";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -163,7 +157,7 @@ test "profiles: core/target reads the target and the profile the build names (#3
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-profiles-target";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -212,7 +206,7 @@ test "profiles: debug and release never reuse each other's cache entries or outp
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const root = ".toy-test-profiles-cache";
     Io.Dir.cwd().deleteTree(io, root) catch {};
@@ -411,13 +405,8 @@ const overflow_cases = [_]struct { panic: ?[]const u8 = null, wraps_to: []const 
 fn runCase(gpa: std.mem.Allocator, io: Io, exe: []const u8, case: usize) !Out {
     var arg_buf: [8]u8 = undefined;
     const arg = try std.fmt.bufPrint(&arg_buf, "{d}", .{case});
-    var child = try std.process.spawn(io, .{ .argv = &.{ exe, arg }, .stdout = .pipe, .stderr = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(out);
-    var erdr = child.stderr.?.readerStreaming(io, &.{});
-    const err = try erdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    return .{ .out = out, .err = err, .term = try child.wait(io) };
+    const r = try harness.run(gpa, io, .{ .argv = &.{ exe, arg } });
+    return .{ .out = r.stdout, .err = r.stderr, .term = r.term };
 }
 
 test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps; a zero divisor panics in both (#155, #428)" {
@@ -425,7 +414,7 @@ test "profiles: debug panics on integer overflow at -O0 and -O1, release wraps; 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-profiles-overflow";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -476,12 +465,12 @@ const symtab_prog =
     \\
 ;
 
-test "profiles: a debug build lists its functions to nm and lldb, release has no symbols (#156)" {
+test "profiles: a debug build lists its functions in its symbol table and to lldb, release has no symbols (#156)" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-profiles-symtab";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -499,29 +488,37 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
         defer gpa.free(exe);
 
         try testing.expectEqual(@as(u8, 7), try harness.runExit(gpa, io, exe));
-        if (try harness.runTool(gpa, io, null, &.{ "codesign", "-v", exe })) |cs| {
+        if (try hostTool(gpa, io, &.{ "codesign", "-v", exe })) |cs| {
             defer freeOut(gpa, cs);
             errdefer std.debug.print("codesign: {s}\n", .{cs.err});
             try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs.term);
         }
 
-        const nm = (try harness.runTool(gpa, io, null, &.{ "nm", exe })) orelse return error.SkipZigTest;
-        defer freeOut(gpa, nm);
-        errdefer std.debug.print("{s} nm:\n{s}{s}\n", .{ c.name, nm.out, nm.err });
+        const bytes = try Io.Dir.cwd().readFileAlloc(io, exe, gpa, .unlimited);
+        defer gpa.free(bytes);
+        const syms = try ObjRead.symbols(try ObjRead.parse(bytes), gpa);
+        defer gpa.free(syms);
         if (!c.debug) {
-            try testing.expectEqualStrings("", nm.out);
+            try testing.expectEqual(@as(usize, 0), syms.len);
             continue;
         }
-        for ([_][]const u8{ " t _main\n", " t _main.apply\n", " t _util.sq\n", " t _util.ident$int\n", " t _main$l0\n" }) |want| {
-            try testing.expect(std.mem.indexOf(u8, nm.out, want) != null);
+        var sq_addr: ?u64 = null;
+        for ([_][]const u8{ "_main", "_main.apply", "_util.sq", "_util.ident$int", "_main$l0" }) |want| {
+            const sym = for (syms) |sym| {
+                if (std.mem.eql(u8, sym.name, want)) break sym;
+            } else {
+                std.debug.print("{s}: no symbol {s}\n", .{ c.name, want });
+                return error.TestExpectedSymbol;
+            };
+            // Local text symbols, as `nm` shows with `t`.
+            try testing.expect(sym.defined and !sym.external);
+            if (std.mem.eql(u8, want, "_util.sq")) sq_addr = sym.addr;
         }
 
         // Crash reports symbolicate as atos does, from the same table.
-        const sq_line = std.mem.indexOf(u8, nm.out, " t _util.sq\n").?;
-        const line_start = if (std.mem.lastIndexOfScalar(u8, nm.out[0..sq_line], '\n')) |n| n + 1 else 0;
-        const addr = try std.fmt.allocPrint(gpa, "0x{s}", .{nm.out[line_start..sq_line]});
+        const addr = try std.fmt.allocPrint(gpa, "0x{x}", .{sq_addr.?});
         defer gpa.free(addr);
-        if (try harness.runTool(gpa, io, null, &.{ "atos", "-o", exe, "-l", "0x100000000", addr })) |atos| {
+        if (try hostTool(gpa, io, &.{ "atos", "-o", exe, "-l", "0x100000000", addr })) |atos| {
             defer freeOut(gpa, atos);
             errdefer std.debug.print("atos {s}:\n{s}{s}\n", .{ addr, atos.out, atos.err });
             try testing.expect(std.mem.startsWith(u8, atos.out, "util.sq (in prog)"));
@@ -529,7 +526,7 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
 
         // lldb's '-n' splits a dotted name like a Swift 'module.fn' and finds nothing; '-F'
         // matches the full symbol name.
-        const lldb = (try harness.runTool(gpa, io, null, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -F util.sq", exe })) orelse {
+        const lldb = (try hostTool(gpa, io, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -F util.sq", exe })) orelse {
             lldb_broken = true;
             continue;
         };
@@ -541,8 +538,7 @@ test "profiles: a debug build lists its functions to nm and lldb, release has no
         errdefer std.debug.print("lldb:\n{s}{s}\n", .{ lldb.out, lldb.err });
         try testing.expect(std.mem.indexOf(u8, lldb.out, "prog`util.sq") != null);
     }
-    // Every other check ran; the skip marks that the lldb one could not.
-    if (lldb_broken) return error.SkipZigTest;
+    if (lldb_broken) return harness.runner.skip(io, "no working lldb on this host; every other check ran");
 }
 
 /// The profiles debug info is checked under: debug at its own -O0 and at -O1 (`-O` stays
@@ -581,26 +577,39 @@ const dwarf_prog =
     \\
 ;
 
-/// The address and line of every row of `exe`'s DWARF line table, from `dwarfdump`, or
-/// null when it is not installed.
-/// Each line-table row's address, line and file index.
-fn lineRows(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]const [3]u64 {
-    const dd = (try harness.runTool(gpa, io, null, &.{ "dwarfdump", "--debug-line", exe })) orelse return null;
-    defer freeOut(gpa, dd);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, dd.term);
-    var rows: std.ArrayList([3]u64) = .empty;
-    errdefer rows.deinit(gpa);
-    var it = std.mem.splitScalar(u8, dd.out, '\n');
-    while (it.next()) |l| {
-        if (!std.mem.startsWith(u8, l, "0x")) continue;
-        var f = std.mem.tokenizeScalar(u8, l, ' ');
-        const addr = try std.fmt.parseInt(u64, f.next().?[2..], 16);
-        const line = try std.fmt.parseInt(u64, f.next().?, 10);
-        _ = f.next(); // column
-        const file = try std.fmt.parseInt(u64, f.next().?, 10);
-        try rows.append(gpa, .{ addr, line, file });
+/// `exe`'s DWARF line table, or null when it carries none (caller deinits).
+fn lineTable(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?ObjRead.LineTable {
+    const bytes = try Io.Dir.cwd().readFileAlloc(io, exe, gpa, .unlimited);
+    defer gpa.free(bytes);
+    const t = (try ObjRead.lineTable(try ObjRead.parse(bytes), gpa)) orelse return null;
+    // The names point into `bytes`; keep copies past its free.
+    const files = try gpa.alloc([]const u8, t.files.len);
+    var n: usize = 0;
+    errdefer {
+        for (files[0..n]) |f| gpa.free(f);
+        gpa.free(files);
+        t.deinit(gpa);
     }
-    return try rows.toOwnedSlice(gpa);
+    for (t.files) |f| {
+        files[n] = try gpa.dupe(u8, f);
+        n += 1;
+    }
+    gpa.free(t.files);
+    return .{ .files = files, .rows = t.rows };
+}
+
+fn freeLineTable(gpa: std.mem.Allocator, t: ObjRead.LineTable) void {
+    for (t.files) |f| gpa.free(f);
+    t.deinit(gpa);
+}
+
+/// Each line-table row's address, line and file index, end-of-sequence rows included.
+fn lineRows(gpa: std.mem.Allocator, io: Io, exe: []const u8) !?[]const [3]u64 {
+    const t = (try lineTable(gpa, io, exe)) orelse return null;
+    defer freeLineTable(gpa, t);
+    const rows = try gpa.alloc([3]u64, t.rows.len);
+    for (t.rows, rows) |r, *out| out.* = .{ r.addr, r.line, r.file };
+    return rows;
 }
 
 test "profiles: a debug build maps code to toy lines in DWARF, release carries none (#157)" {
@@ -608,7 +617,7 @@ test "profiles: a debug build maps code to toy lines in DWARF, release carries n
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-profiles-dwarf";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -625,28 +634,35 @@ test "profiles: a debug build maps code to toy lines in DWARF, release carries n
         const exe = try harness.compile(gpa, io, sub, dwarf_prog, c.flags);
         defer gpa.free(exe);
         try testing.expectEqual(@as(u8, 0), try harness.runExit(gpa, io, exe));
-        if (try harness.runTool(gpa, io, null, &.{ "codesign", "-v", exe })) |cs| {
+        if (try hostTool(gpa, io, &.{ "codesign", "-v", exe })) |cs| {
             defer freeOut(gpa, cs);
             errdefer std.debug.print("codesign: {s}\n", .{cs.err});
             try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs.term);
         }
 
-        const otool = (try harness.runTool(gpa, io, null, &.{ "otool", "-l", exe })) orelse return error.SkipZigTest;
-        defer freeOut(gpa, otool);
-        const has_dwarf = std.mem.indexOf(u8, otool.out, "segname __DWARF") != null;
-        try testing.expectEqual(c.debug, has_dwarf);
-        if (!has_dwarf) continue;
-
-        if (try harness.runTool(gpa, io, null, &.{ "dwarfdump", "--verify", exe })) |v| {
+        const rows = (try lineRows(gpa, io, exe)) orelse {
+            try testing.expect(!c.debug);
+            continue;
+        };
+        defer gpa.free(rows);
+        try testing.expect(c.debug);
+        // ObjRead decodes only the line program; the system verifier, where there is one,
+        // checks the rest of the DWARF too.
+        if (builtin.os.tag == .macos) if (try hostTool(gpa, io, &.{ "dwarfdump", "--verify", exe })) |v| {
             defer freeOut(gpa, v);
             errdefer std.debug.print("dwarfdump --verify:\n{s}{s}\n", .{ v.out, v.err });
             try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, v.term);
             try testing.expect(std.mem.indexOf(u8, v.out, "No errors.") != null);
+        };
+        // Every row names a file of the table and a line of a source.
+        const t = (try lineTable(gpa, io, exe)).?;
+        defer freeLineTable(gpa, t);
+        for (rows) |r| {
+            try testing.expect(t.fileName(r[2]) != null);
+            try testing.expect(r[1] > 0);
         }
 
         // Every row symbolicates to its toy file and line, as a crash report would.
-        const rows = (try lineRows(gpa, io, exe)) orelse return error.SkipZigTest;
-        defer gpa.free(rows);
         var argv: std.ArrayList([]const u8) = .empty;
         defer {
             for (argv.items[5..]) |a| gpa.free(a);
@@ -654,7 +670,7 @@ test "profiles: a debug build maps code to toy lines in DWARF, release carries n
         }
         try argv.appendSlice(gpa, &.{ "atos", "-o", exe, "-l", "0x100000000" });
         for (rows) |r| try argv.append(gpa, try std.fmt.allocPrint(gpa, "0x{x}", .{r[0]}));
-        if (try harness.runTool(gpa, io, null, argv.items)) |atos| {
+        if (try hostTool(gpa, io, argv.items)) |atos| {
             defer freeOut(gpa, atos);
             errdefer std.debug.print("atos:\n{s}{s}\n", .{ atos.out, atos.err });
             for ([_][]const u8{ "main (in prog) (main.toy:2)", "main (in prog) (main.toy:3)", "main (in prog) (main.toy:4)", "main (in prog) (main.toy:5)", "util.sq (in prog) (util.toy:2)", "util.sq (in prog) (util.toy:3)" }) |want| {
@@ -662,7 +678,7 @@ test "profiles: a debug build maps code to toy lines in DWARF, release carries n
             }
         }
 
-        const lldb = (try harness.runTool(gpa, io, null, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -f util.toy -l 3", "-o", "run", "-o", "bt", exe })) orelse {
+        const lldb = (try hostTool(gpa, io, &.{ "lldb", "--batch", "--no-lldbinit", "-o", "breakpoint set -f util.toy -l 3", "-o", "run", "-o", "bt", exe })) orelse {
             lldb_broken = true;
             continue;
         };
@@ -676,8 +692,7 @@ test "profiles: a debug build maps code to toy lines in DWARF, release carries n
         try testing.expect(std.mem.indexOf(u8, lldb.out, "util.toy:3") != null);
         try testing.expect(std.mem.indexOf(u8, lldb.out, "main.toy:4") != null);
     }
-    // Every other check ran; the skip marks that the lldb one could not.
-    if (lldb_broken) return error.SkipZigTest;
+    if (lldb_broken) return harness.runner.skip(io, "no working lldb on this host; every other check ran");
 }
 
 const branch_prog =
@@ -701,31 +716,22 @@ const branch_prog =
     \\
 ;
 
-/// The line of every row `dwarfdump --debug-line` output `dd` lists in the file whose name
-/// ends in `/name`.
-fn fileLines(gpa: std.mem.Allocator, dd: []const u8, name: []const u8) ![]u64 {
-    const quoted = try std.fmt.allocPrint(gpa, "/{s}\"", .{name});
-    defer gpa.free(quoted);
-    var file: ?u64 = null;
-    var index: u64 = 0;
+/// The line of every row of `t` in the file whose name ends in `/name`.
+fn fileLines(gpa: std.mem.Allocator, t: ObjRead.LineTable, name: []const u8) ![]u64 {
+    const suffix = try std.fmt.allocPrint(gpa, "/{s}", .{name});
+    defer gpa.free(suffix);
+    const file: u64 = for (t.files, 1..) |f, i| {
+        if (std.mem.endsWith(u8, f, suffix)) break i;
+    } else return error.TestUnexpectedResult;
     var lines: std.ArrayList(u64) = .empty;
     errdefer lines.deinit(gpa);
-    var it = std.mem.splitScalar(u8, dd, '\n');
-    while (it.next()) |l| {
-        if (std.mem.startsWith(u8, l, "file_names[")) {
-            const close = std.mem.indexOfScalar(u8, l, ']').?;
-            index = try std.fmt.parseInt(u64, std.mem.trim(u8, l["file_names[".len..close], " "), 10);
-        } else if (std.mem.indexOf(u8, l, "name: ") != null and std.mem.endsWith(u8, l, quoted)) {
-            file = index;
-        } else if (std.mem.startsWith(u8, l, "0x")) {
-            var f = std.mem.tokenizeScalar(u8, l, ' ');
-            _ = f.next();
-            const line = try std.fmt.parseInt(u64, f.next().?, 10);
-            _ = f.next();
-            if (try std.fmt.parseInt(u64, f.next().?, 10) == file orelse return error.TestUnexpectedResult) try lines.append(gpa, line);
-        }
-    }
+    for (t.rows) |r| if (r.file == file) try lines.append(gpa, r.line);
     return lines.toOwnedSlice(gpa);
+}
+
+fn hasFile(t: ObjRead.LineTable, name: []const u8) bool {
+    for (t.files) |f| if (std.mem.eql(u8, f, name)) return true;
+    return false;
 }
 
 test "profiles: an else-if, a match arm and a fn's epilogue each sit on their own line (#157)" {
@@ -733,7 +739,7 @@ test "profiles: an else-if, a match arm and a fn's epilogue each sit on their ow
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-profiles-dwarf-branch";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -746,14 +752,13 @@ test "profiles: an else-if, a match arm and a fn's epilogue each sit on their ow
         defer gpa.free(exe);
         try testing.expectEqual(@as(u8, 0), try harness.runExit(gpa, io, exe));
 
-        const dd = (try harness.runTool(gpa, io, null, &.{ "dwarfdump", "--debug-line", exe })) orelse return error.SkipZigTest;
-        defer freeOut(gpa, dd);
-        errdefer std.debug.print("{s}:\n{s}\n", .{ c.name, dd.out });
+        const t = (try lineTable(gpa, io, exe)).?;
+        defer freeLineTable(gpa, t);
         // A bundled module has no file on disk, so it must not name one under the comp dir.
-        try testing.expect(std.mem.indexOf(u8, dd.out, "name: \"/<toy>/std/io.toy\"") != null);
-        try testing.expect(std.mem.indexOf(u8, dd.out, "name: \"std/io.toy\"") == null);
+        try testing.expect(hasFile(t, "/<toy>/std/io.toy"));
+        try testing.expect(!hasFile(t, "std/io.toy"));
 
-        const lines = try fileLines(gpa, dd.out, "main.toy");
+        const lines = try fileLines(gpa, t, "main.toy");
         defer gpa.free(lines);
         var seen = [_]bool{false} ** 32;
         for (lines) |l| seen[@min(l, seen.len - 1)] = true;
@@ -793,7 +798,7 @@ test "profiles: a warm debug build follows lines an edit moved, reusing the code
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const root = ".toy-test-profiles-lines";
     Io.Dir.cwd().deleteTree(io, root) catch {};
@@ -806,7 +811,7 @@ test "profiles: a warm debug build follows lines an edit moved, reusing the code
     const n = (try codegenStats(gpa, io, cwd, &.{ "-o", "p" }))[0];
     const exe = try std.fs.path.join(gpa, &.{ cwd, "p" });
     defer gpa.free(exe);
-    const before = (try rowLines(gpa, io, exe)) orelse return error.SkipZigTest;
+    const before = (try rowLines(gpa, io, exe)).?;
     defer gpa.free(before);
     // Each fn: its prologue, its statements, its epilogue on the closing brace (the exit
     // block follows the entry block), then the overflow checks' continuation and panic.

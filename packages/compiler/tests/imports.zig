@@ -76,18 +76,8 @@ test "warm cache: a re-exported struct whose layout changes rebuilds the fns tha
 
 /// Run the built `toy` with `args` in `cwd_abs`, capturing its output (caller frees).
 fn toyIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, args: []const []const u8) !struct { out: []u8, err: []u8, term: std.process.Child.Term } {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, harness.toy_exe);
-    try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .cwd = .{ .path = cwd_abs }, .stdout = .pipe, .stderr = .pipe });
-    var ro = child.stdout.?.readerStreaming(io, &.{});
-    const out = try ro.interface.allocRemaining(gpa, .limited(1 << 20));
-    errdefer gpa.free(out);
-    var re = child.stderr.?.readerStreaming(io, &.{});
-    const err = try re.interface.allocRemaining(gpa, .limited(1 << 20));
-    errdefer gpa.free(err);
-    return .{ .out = out, .err = err, .term = try child.wait(io) };
+    const r = try harness.toyIn(gpa, io, cwd_abs, args);
+    return .{ .out = r.out, .err = r.err, .term = r.term };
 }
 
 /// A fresh `root` with `files` written under it; returns its absolute path (owned).
@@ -108,7 +98,7 @@ test "search roots: -I resolves a sibling folder; a warm rebuild follows a chang
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-imports-roots";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try project(gpa, io, root, &.{
@@ -148,7 +138,7 @@ test "folder modules: a warm rebuild follows util.toy replaced by util/mod.toy a
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-imports-folder";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try project(gpa, io, root, &.{
@@ -186,7 +176,7 @@ test "search roots: --root starts import paths at another folder, and a missing 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-imports-rootopt";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try project(gpa, io, root, &.{

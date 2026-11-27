@@ -9,11 +9,10 @@
 //! observes. A `-j1`/`-j8` byte-identity case pins the new determinism surface.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -28,7 +27,7 @@ test "desc: descriptor_of + call_indirect on struct/str/int keys matches the inl
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-desc-selftest";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -36,13 +35,7 @@ test "desc: descriptor_of + call_indirect on struct/str/int keys matches the inl
 
     const prog = try compile(gpa, io, dir, selftest_src, &.{harness.dev_core_imports});
     defer gpa.free(prog);
-    var run = try std.process.spawn(io, .{ .argv = &.{prog} });
-    const term = try run.wait(io);
-    const code = switch (term) {
-        .exited => |c| c,
-        else => return error.ChildCrashed,
-    };
-    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expectEqual(@as(u8, 0), try harness.runExit(gpa, io, prog));
 }
 
 test "desc: the descriptor-table program is byte-identical at -j1 and -j8" {
@@ -50,7 +43,7 @@ test "desc: the descriptor-table program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // The descriptor table + erased units are pure functions of source (canonical order), so
     // codegen is `-jN` byte-identical.

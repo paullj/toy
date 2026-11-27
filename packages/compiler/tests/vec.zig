@@ -12,7 +12,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -23,7 +23,7 @@ test "vec: growth past the initial capacity reads back a post-grow element" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Push 10 elements (i) past the initial cap of 4, forcing >= 1 grow (the old backing
     // leaks). Read back element 7 (a post-grow slot) — it must survive the copy. 7 == 7.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-grow",
@@ -47,7 +47,7 @@ test "vec: `:=` shares the same growable (a push through one alias is seen throu
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // ys := xs copies the 8-byte handle, so both alias one GcArray. A value-copy would
     // leave xs.len() == 1 -> exit 1; sharing makes it 3 -> exit 3.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-share",
@@ -70,7 +70,7 @@ test "vec: `Vec[int].new()` and the empty-list literal build an identical empty 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Both constructors produce an empty Vec that grows past its initial cap identically;
     // the two lengths + a post-grow read must agree. (7*2 + 6) == 20 for each -> 40.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-ctors",
@@ -98,7 +98,7 @@ test "vec: get returns none for a negative or out-of-range index" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // A negative index must fall to `.none`, not read `elems + i*size` BEFORE the backing
     // (a bare upper-bound guard would let -1 through and SIGSEGV on a large negative). Both
     // the negative and the past-len index yield `.none`; the in-range read is `.some(5)`.
@@ -122,7 +122,7 @@ test "vec: a Vec[bool] round-trips scalar elements through get" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The second scalar element type: push/get of `bool` round-trips through the
     // `load`-returns-`expected` payload typing, and an out-of-range get is `.none`.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-bool",
@@ -148,7 +148,7 @@ test "vec: a scalar `[1,2,3]` literal is built and read via xs[i]" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The non-empty literal infers V=int from the first element and builds a populated
     // Vec[int]; bracket indexing reads each element in bounds. 2 + 5 + 7 = 14.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-lit-scalar",
@@ -167,7 +167,7 @@ test "vec: an aggregate `[P{..},..]` literal is read via xs[i] (struct element)"
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // V=P inferred from the first element; ga_push copies size_of[P] bytes per element and
     // xs[i] copies the struct out. (10+20) + (30+40) = 100.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-lit-agg",
@@ -189,7 +189,7 @@ test "vec: an aggregate element survives a regrow, read via xs[i] below the init
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Push 6 structs (past the initial cap of 4) so ga_grow copies the live prefix by
     // size_of[P] bytes; then read index 1 (< the initial cap) — it must survive the copy.
     // ps[1] = {x:1,y:2} -> 1+2 = 3, plus len 6 -> 9.
@@ -216,7 +216,7 @@ test "vec: Option[P] expect over an aggregate payload (get) yields the struct" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The SPIKE: get(1) -> Option[P], expect of an aggregate payload routes through a
     // result slot + copy. p.x + p.y = 3 + 4 = 7.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-opt-struct",
@@ -237,7 +237,7 @@ test "vec: Option[Vec[int]] expect round-trips a Vec payload" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The expect payload is a Vec[int] (a struct aggregate — the 8-byte handle rides the
     // result-slot copy). Build a Vec, wrap it in Option[Vec[int]], expect, and read back.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-opt-vec",
@@ -258,7 +258,7 @@ test "vec: Option[Ref[int]] expect rides the scalar/ref payload path" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // A managed-box payload is an 8-byte cell pointer, so expect keeps the scalar
     // block-arg join (byte-identical to HEAD). Read the unwrapped Ref: 42.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-opt-ref",
@@ -278,7 +278,7 @@ test "vec: or with an aggregate default returns the default on none" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // or's none-branch writes the aggregate default into the result slot via
     // lowerExprInto. An empty Vec's get(0) is none -> the default P{x:5,y:6} -> 11.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-or",
@@ -299,7 +299,7 @@ test "vec: .first() returns the head element" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     const code = try buildAndRun(gpa, io, ".toy-test-vec-first",
         \\import std/vec
         \\fn main() -> int {
@@ -319,7 +319,7 @@ test "vec: `for x in xs` over a Vec[int] sums each element" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `for x in xs` desugars to `it := xs.iter()` then a loop over `it.next()` until None,
     // binding `x` to each Some payload. VecIter[int] is a GENERIC conforming receiver of
     // Iterator[int]. 4 + 5 + 6 + 7 = 22.
@@ -343,7 +343,7 @@ test "vec: `for p in ps` over a Vec[P] binds the aggregate element (Some payload
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The Item is an aggregate P, so `next` yields Option[P] and the loop copies the whole
     // struct payload into the loop var (the aggregate-safe payload copy, not a scalar load).
     // (10+20) + (30+40) + (1+2) = 103.
@@ -368,7 +368,7 @@ test "vec: a Vec program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/vec
@@ -392,7 +392,7 @@ test "vec: xs[i].field reads a struct element's field in place (variable index)"
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `ps[i].x + ps[i].y` with a VARIABLE index exercises the value-headed bracketed-
     // postfix path (the parser cannot tell `ps[i].x` from a `Vec[int].new()` turbofish;
     // the checker reinterprets a value-resolved head as an index). 3 + 4 = 7.
@@ -414,7 +414,7 @@ test "vec: a := ps[0]; a.x workaround still reads the element field" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The pre-fix workaround (bind the element to a local, then access) must keep working.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-index-bind",
         \\import std/vec
@@ -434,7 +434,7 @@ test "vec: xs[i].method() dispatches an inherent method on the element" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `ps[i].sum()` with a variable index: the element read composes with instance-method
     // dispatch. 20 + 22 = 42.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-index-method",
@@ -456,7 +456,7 @@ test "vec: b.items[i].field indexes a Vec-typed struct FIELD and reads the eleme
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The field-headed value index: `b.items` is a `Vec[P]` struct FIELD, not a local. The
     // bracket head is a field_access, so the value-index predicate must walk to the LEFTMOST
     // identifier (`b` -> .local). Formerly misparsed as a qualified type ("unknown module
@@ -480,7 +480,7 @@ test "vec: b.items[i].method() dispatches an inherent method off a Vec-typed fie
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     const code = try buildAndRun(gpa, io, ".toy-test-vec-field-method",
         \\import std/vec
         \\struct P { x: int, y: int }
@@ -501,7 +501,7 @@ test "vec: v := b.items[i]; v.x workaround still reads a Vec-typed field element
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The pre-fix workaround for the field-headed case must keep working.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-field-bind",
         \\import std/vec
@@ -522,7 +522,7 @@ test "vec: indexing a non-indexable struct FIELD is a clean type error (not 'unk
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `b.n[i]` where `n: int`: the leftmost `b` is .local so this is treated as an index,
     // and indexing an int is rejected as a type error — NOT misrouted to a qualified-type
     // "unknown module 'b'" path, and NO crash. The compile fails cleanly.
@@ -545,7 +545,7 @@ test "vec: assigning to a field of an index element writes the element back (nev
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `b.items[i].x = 99` reads its element into a temp copy; the store must reach the
     // Vec through the write-back, not stop at the copy.
     const dir = ".toy-test-vec-index-assign";
@@ -572,7 +572,7 @@ test "vec: a managed-box element passed to a mut param or a mut self receiver is
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // A `Vec[int]` element is a one-word handle: its copy lives in a slot the callee writes
     // through, and the write-back stores the new handle into the outer Vec.
     const dir = ".toy-test-vec-elem-mut-box";
@@ -603,7 +603,7 @@ test "vec: indexing a non-indexable value is a clean compile error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `n[0]` on an int must be rejected (not a spurious "unknown type 'n'"); the compile
     // fails cleanly.
     const dir = ".toy-test-vec-index-badtype";
@@ -623,7 +623,7 @@ test "vec: a float element round-trips through push/get (float as a monomorphiza
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `float` must be admitted as a generic type-argument (so Vec[float]/GcArray[float]
     // monomorphize), and the element store must carry the value's type.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-float",
@@ -644,7 +644,7 @@ test "vec: Vec[Vec[int]].new() nested container round-trips" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The outer element type is itself a generic instance (`Vec[int]`), so the outer
     // `new()` receiver `Vec[Vec[int]]` must resolve through the reified-arg -> App-form
     // inverse. A local for the expect avoids method-chaining on the inner handle.
@@ -668,7 +668,7 @@ test "vec: Vec[Ref[int]].new() round-trips managed-box elements" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The element is a managed box (`Ref[int]`, an `isRefPayload` type). `Ref.new(x)` boxes
     // the value; `get(i).expect(..).get()` reads the boxed cell back.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-ref",
@@ -690,7 +690,7 @@ test "vec: Vec[Option[int]].new() constructs + round-trips an enum element" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The element is a generic enum instance (`Option[int]`), reaching the same
     // reified-arg -> App-form inverse via the `enumT` id-space.
     const code = try buildAndRun(gpa, io, ".toy-test-vec-opt-elem",
@@ -710,7 +710,7 @@ test "vec: a nested-generic-container program is byte-identical at -j1 and -j8" 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/ref
@@ -732,7 +732,7 @@ test "vec: a .field off a call/method result materializes the aggregate rvalue" 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // A `.field` off an expression with no named place — `get(i).expect(..).field`, a
     // nested `.expect(..).i.x`, a direct `mk().x` — must materialize the aggregate rvalue
     // into a temp once and read the field from the copy. Regression: the lowerer had no
@@ -761,7 +761,7 @@ test "vec: a program's own Vec method wins over std's of the same name, whatever
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The library's `each` walks backwards, so the first element it hands over is 3.
     const lib =
         \\import std/vec
@@ -808,7 +808,7 @@ test "vec: a program's own Vec and Option methods never change what std's method
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // std's `split`, `map` and `join` call `push`, `len`, `get` and `or`, `sort`
     // calls `sort_by`, and a `for` walks with `get`: each keeps std's own method or the
     // builtin. The program's own calls reach its methods: `len` is 99, `get` finds nothing
@@ -851,7 +851,7 @@ test "vec: Vec closure methods keep their results across forced collections" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Every callback forces a collection while the method holds fresh strs only in its own
     // locals and buffers (the map's output, the sort's scratch array), so a missed root
     // shows up as a wrong str. The sort by length is stable: the 3-byte strs keep their
@@ -901,7 +901,7 @@ test "vec: sort_by is stable and sort agrees on 1000 elements" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Keys 0..9 from an LCG repeat about 100 times each, so stability is tested on long
     // runs of equal keys. `R`'s derived Ord compares `k` then `seq`, so `sort()` must give
     // exactly the order a stable sort by `k` gives; the ints are checked against an
@@ -970,7 +970,7 @@ test "vec: Vec closure methods are byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/vec

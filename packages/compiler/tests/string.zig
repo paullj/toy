@@ -9,7 +9,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -42,7 +42,7 @@ test "string: io.print(x) and io.print(x.to_string()) are byte-identical stdout 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     for (print_ts_cases) |c| {
         const src_print = try std.fmt.allocPrint(gpa, "import std/io\n{s}fn main() -> int {{ x := {s}\n io.print(x)\n return 0 }}\n", .{ c.defs, c.expr });
@@ -113,7 +113,7 @@ fn expectPass(dir: []const u8, src: []const u8) !void {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -233,7 +233,7 @@ test "string: a concat program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // The packed String codegen is a pure function of source.
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-string-determinism", det_src, &.{}, null);
@@ -257,7 +257,7 @@ test "string: a print/to_string program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-string-ts-determinism", ts_det_src, &.{}, null);
 }
@@ -267,7 +267,7 @@ test "string: split, trim and join results survive forced collections" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The parts share the concat'd parent's buffer through interior pointers, and the
     // parent itself is dead after `split`, so only those pointers keep it alive. 'x' = 120.
     const codes = try harness.exitAtBothLevels(gpa, io, ".toy-test-string-split-gc",
@@ -304,7 +304,7 @@ test "string: a join's buffer survives collections around it, over thousands of 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Each join holds its buffer only in a `rawptr` until the str is made, and the junk
     // between joins keeps the collector busy, so a buffer the collector lost shows up as
     // wrong bytes. 13890 part bytes + 2999 commas = 16889, and 16889 % 251 = 72.
@@ -364,7 +364,7 @@ test "string: chars decodes UTF-8 under for and a manual next, at -O0 and -O1" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-string-chars";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -386,7 +386,7 @@ test "string: a chars iterator keeps its string alive" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The iterator's copy of the str is the only reference to the concat'd buffer: under
     // `for` while each step forces a collection, and in a struct returned from a fn.
     const live = try harness.exitAtBothLevels(gpa, io, ".toy-test-string-chars-live",
@@ -448,7 +448,7 @@ test "string: str methods are byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The lambdas and Vec instances bring the unit count past the 64 at which Pass C and
     // codegen fan out.
     const src =
@@ -490,7 +490,7 @@ test "string: a program's len and byte_at on str steer its own calls, never trim
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Were std's calls to reach them, `trim` would take 100000 bytes from a 6-byte str and
     // print the heap past it.
     try harness.expectStdoutAtBothLevels(gpa, io, ".toy-test-string-shadow-len",
@@ -516,7 +516,7 @@ test "string: core/text panics on a range outside its str or buffer, at -O0 and 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // std/str computes in-range bounds, so only a program importing core/text itself can
     // pass a wrong one; each must stop with its message, not read or write past the bytes.
     const Case = struct { body: []const u8, msg: []const u8 };

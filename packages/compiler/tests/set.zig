@@ -10,7 +10,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -35,7 +35,7 @@ test "set: add de-duplicates in place (two add(1) -> len 1)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-set-dedup";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -64,7 +64,7 @@ test "set: contains hit/miss" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-set-contains";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -98,7 +98,7 @@ test "set: for-x iterates keys in insertion order across a grow" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-set-order";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -131,7 +131,7 @@ test "set: `n := s` shares the one table (single handle)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-set-share";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -171,7 +171,7 @@ test "set: Set[str] with owned keys survives a forced collection" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-set-str-collect";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -191,7 +191,7 @@ test "set: a Set program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // Set's mono instances + the shared descriptor table are pure functions of source, so
     // codegen is -jN byte-identical.
@@ -203,7 +203,7 @@ test "set: each, filter and map follow insertion order across a grow" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Ten keys cross a grow and two are added again; every walk must follow the first adds,
     // and `map` keeps the first place of the two keys whose tens digit collides.
     const codes = try harness.exitAtBothLevels(gpa, io, ".toy-test-set-walk-order",
@@ -247,7 +247,7 @@ test "set: Set closure methods are byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The lambdas and the Vec instances bring the unit count past the 64 at which Pass C and
     // codegen fan out.
     const src =

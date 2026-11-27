@@ -46,7 +46,7 @@ fn flipAt(root: []const u8, flags: []const []const u8, v1: []const File, v1_exit
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     Io.Dir.cwd().deleteTree(io, root) catch {};
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try makeDir(gpa, io, root, "w");
@@ -342,18 +342,11 @@ test "warm -O1: a generic method instance that stops keeping its fn param rebuil
 
 /// The diagnostics a `toy` run in `cwd_abs` that must fail prints (owned).
 fn buildErrIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, args: []const []const u8) ![]u8 {
-    const bin_abs = harness.toy_exe;
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .cwd = .{ .path = cwd_abs }, .stdout = .pipe, .stderr = .ignore });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const err = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(err);
-    const term = try child.wait(io);
-    if (term == .exited and term.exited == 0) return error.TestExpectedCompileError;
-    return err;
+    const r = try harness.toyIn(gpa, io, cwd_abs, args);
+    gpa.free(r.err);
+    errdefer gpa.free(r.out);
+    if (r.term == .exited and r.term.exited == 0) return error.TestExpectedCompileError;
+    return r.out;
 }
 
 test "warm: an imported fn that starts keeping its fn param makes a mut-param capture T0052, at either level" {
@@ -361,7 +354,7 @@ test "warm: an imported fn that starts keeping its fn param makes a mut-param ca
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-places-esc-legal";
     Io.Dir.cwd().deleteTree(io, root) catch {};
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
@@ -403,7 +396,7 @@ test "warm: a callee flip makes a bound method on a mut param T0052 and back" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-places-esc-bound";
     Io.Dir.cwd().deleteTree(io, root) catch {};
     defer Io.Dir.cwd().deleteTree(io, root) catch {};

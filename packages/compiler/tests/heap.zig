@@ -8,7 +8,6 @@
 //! result, and asserts the exit.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
@@ -21,35 +20,12 @@ pub fn buildAndRun(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, entry_s
 
 /// `buildAndRun` with extra build `flags`.
 pub fn buildAndRunWith(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, entry_src: []const u8, flags: []const []const u8) !u8 {
-    try harness.skipUnlessBackend(io);
-    const bin_abs = harness.toy_exe;
-
+    try harness.skipUnlessRunnable(io);
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir_name);
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
-
-    const main_path = try std.fmt.allocPrint(gpa, "{s}/main.toy", .{dir_name});
-    defer gpa.free(main_path);
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = main_path, .data = entry_src });
-
-    const out_bin = try std.fmt.allocPrint(gpa, "{s}/prog", .{dir_name});
-    defer gpa.free(out_bin);
-    {
-        const argv = try std.mem.concat(gpa, []const u8, &.{ &.{ bin_abs, "build", main_path, "-o", out_bin }, flags });
-        defer gpa.free(argv);
-        var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .pipe });
-        const term = try child.wait(io);
-        if (term != .exited or term.exited != 0) return error.CompileFailed;
-    }
-
-    const prog_abs = try Io.Dir.cwd().realPathFileAlloc(io, out_bin, gpa);
-    defer gpa.free(prog_abs);
-    var run = try std.process.spawn(io, .{ .argv = &.{prog_abs} });
-    const term = try run.wait(io);
-    return switch (term) {
-        .exited => |c| c,
-        else => error.ChildCrashed,
-    };
+    const prog = try harness.compile(gpa, io, dir_name, entry_src, flags);
+    defer gpa.free(prog);
+    return harness.runExit(gpa, io, prog);
 }
 
 /// The load-bearing precise-trace entry: 64 OWNED (heap `concat`-built) string keys inserted
@@ -205,7 +181,7 @@ test "dfe: a collection inside a kept fn works after the link drops an allocatin
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const codes = try harness.exitAtBothLevels(gpa, io, ".toy-test-dfe-gc",
         \\import std/gc
         \\import std/vec
@@ -244,7 +220,7 @@ test "dfe: a heap type only dropped code uses leaves the heap-free code unchange
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const dir = ".toy-test-dfe-desc";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -282,7 +258,7 @@ test "dfe: warm builds that drop then re-reach a cached fn match cold builds" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const dir = ".toy-test-dfe-warm";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -947,7 +923,7 @@ test "alloc: the inliner splices the fast path into the caller, which calls only
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
     const dir = ".toy-test-alloc-spliced";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     try Io.Dir.cwd().createDirPath(io, dir);

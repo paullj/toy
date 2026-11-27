@@ -13,6 +13,13 @@
 const std = @import("std");
 const Io = std.Io;
 const fuzz_program = @import("fuzz_program.zig");
+const runner = @import("runner.zig");
+
+/// The `toy` to build with, and the target and runner to build for and run on.
+pub const Toy = struct {
+    exe: []const u8,
+    cfg: runner.Config,
+};
 
 pub const Variant = struct {
     name: []const u8,
@@ -97,7 +104,7 @@ const run_timeout: Io.Duration = .fromSeconds(30);
 /// `work_dir/k`, its own toy cache, so the variants build and run at once. Binaries are
 /// named after `tag` so no two builds of a run share a path (macOS may kill a binary
 /// rewritten in place), and are deleted once run.
-pub fn check(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8, tag: []const u8, src: []const u8) !Verdict {
+pub fn check(gpa: std.mem.Allocator, io: Io, toy: Toy, work_dir: []const u8, tag: []const u8, src: []const u8) !Verdict {
     var results: [variants.len]anyerror!Result = undefined;
     var group: Io.Group = .init;
     for (0..variants.len) |k| group.async(io, variantInto, .{ gpa, io, toy, work_dir, tag, src, k, &results[k] });
@@ -142,11 +149,11 @@ const Result = union(enum) {
     }
 };
 
-fn variantInto(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8, tag: []const u8, src: []const u8, k: usize, slot: *anyerror!Result) void {
+fn variantInto(gpa: std.mem.Allocator, io: Io, toy: Toy, work_dir: []const u8, tag: []const u8, src: []const u8, k: usize, slot: *anyerror!Result) void {
     slot.* = variant(gpa, io, toy, work_dir, tag, src, k);
 }
 
-fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8, tag: []const u8, src: []const u8, k: usize) !Result {
+fn variant(gpa: std.mem.Allocator, io: Io, toy: Toy, work_dir: []const u8, tag: []const u8, src: []const u8, k: usize) !Result {
     var sub_buf: [16]u8 = undefined;
     const dir_path = try std.fs.path.join(gpa, &.{ work_dir, try std.fmt.bufPrint(&sub_buf, "{d}", .{k}) });
     defer gpa.free(dir_path);
@@ -156,8 +163,10 @@ fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ toy, "build", "main.toy", "-o", tag, "--color", "never", "--no-cache" });
+    try argv.appendSlice(gpa, &.{ toy.exe, "build", "main.toy", "-o", tag, "--color", "never", "--no-cache" });
     try argv.appendSlice(gpa, variants[k].flags);
+    var target_buf: [2][]const u8 = undefined;
+    try argv.appendSlice(gpa, toy.cfg.targetArgs(&target_buf));
     const res = try std.process.run(gpa, io, .{
         .argv = argv.items,
         .cwd = .{ .path = dir_path },
@@ -172,7 +181,7 @@ fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8
 
     const bin = try std.fs.path.join(gpa, &.{ dir_path, tag });
     defer gpa.free(bin);
-    const ran = std.process.run(gpa, io, .{
+    const ran = runner.run(toy.cfg.runner, gpa, io, .{
         .argv = &.{bin},
         .stdout_limit = .limited(1 << 20),
         .timeout = .{ .deadline = .fromNow(io, .{ .raw = run_timeout, .clock = .awake }) },
@@ -187,7 +196,7 @@ fn variant(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8
 /// Run `count` generated programs, the k-th from seed `seed +% k`. Returns false (after
 /// printing the program, every variant's outcome and where the program was saved) on
 /// the first that does not agree.
-pub fn fuzz(gpa: std.mem.Allocator, io: Io, toy: []const u8, work_dir: []const u8, seed: u64, count: usize) !bool {
+pub fn fuzz(gpa: std.mem.Allocator, io: Io, toy: Toy, work_dir: []const u8, seed: u64, count: usize) !bool {
     try Io.Dir.cwd().createDirPath(io, work_dir);
     // toy keeps its cache in its cwd, and opening a cache that earlier runs filled
     // costs more than a cold build of these programs.
@@ -260,13 +269,13 @@ test "each variant is held to its own profile's oracle" {
 
 test "generated programs build and agree across levels and gc stress" {
     const harness = @import("harness.zig");
-    try harness.skipUnlessBackend(std.testing.io);
+    try harness.skipUnlessRunnable(std.testing.io);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const work = "zig-out/fuzz-diff-test";
     Io.Dir.cwd().deleteTree(io, work) catch {};
     defer Io.Dir.cwd().deleteTree(io, work) catch {};
-    try std.testing.expect(try fuzz(gpa, io, harness.toy_exe, work, 1, 4));
+    try std.testing.expect(try fuzz(gpa, io, .{ .exe = harness.toy_exe, .cfg = try harness.config() }, work, 1, 4));
 }
 
 test {

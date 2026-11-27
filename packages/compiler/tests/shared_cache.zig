@@ -59,7 +59,7 @@ test "two programs with one for-in main share a cache dir and each calls its own
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-shared-cache";
     Io.Dir.cwd().deleteTree(io, root) catch {};
     defer Io.Dir.cwd().deleteTree(io, root) catch {};

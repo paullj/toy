@@ -18,7 +18,7 @@ test "io: read_line then read_all over more than 64 KiB of stdin" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-io-large-stdin";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -55,18 +55,13 @@ test "io: read_line then read_all over more than 64 KiB of stdin" {
         sum += patternByte(i);
     }
 
-    var child = try std.process.spawn(io, .{ .argv = &.{prog}, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
-    errdefer child.kill(io);
-    // The program reads all of stdin before it writes anything, so writing the whole
-    // input before reading its output cannot deadlock.
-    try child.stdin.?.writeStreamingAll(io, input.items);
-    child.stdin.?.close(io);
-    child.stdin = null;
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    // The program reads all of stdin before it writes anything, so the runner writing the
+    // whole input before reading its output cannot deadlock.
+    const res = try harness.run(gpa, io, .{ .argv = &.{prog}, .stdin = input.items, .stdout_limit = .limited(1 << 16) });
+    gpa.free(res.stderr);
+    const out = res.stdout;
     defer gpa.free(out);
-    const term = try child.wait(io);
-    try std.testing.expect(term == .exited and term.exited == 0);
+    try std.testing.expect(res.term == .exited and res.term.exited == 0);
 
     const want = try std.fmt.allocPrint(gpa, "{d} {d} {d} {d}\n", .{ line_len, patternByte(line_len - 1), rest_len, sum });
     defer gpa.free(want);

@@ -6,11 +6,10 @@
 //! the child's EXIT CODE (0 on success), except the Display case which observes stdout.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -23,7 +22,7 @@ test "unit: a () parameter round-trips (ABI zero-location)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // f consumes a () param (0 GPR / 0 NSAA); the surrounding int args keep their slots.
     const src =
@@ -39,7 +38,7 @@ test "unit: a () local binds (zero-sized)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\fn g() {}
@@ -58,7 +57,7 @@ test "unit: a struct with a () field round-trips (0-byte member)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\struct S { a: int, u: (), b: int }
@@ -76,7 +75,7 @@ test "unit: an enum variant with a () payload round-trips" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\enum E { V(()), W }
@@ -97,7 +96,7 @@ test "unit: structural Eq/Hash over a () field compares by the sized fields only
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // The `()` field contributes `true` to the eq AND-fold, so equality tracks `a`.
     const src =
@@ -120,7 +119,7 @@ test "unit: structural Display renders a () field as ()" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-unit-display";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -136,11 +135,10 @@ test "unit: structural Display renders a () field as ()" {
     const prog = try compile(gpa, io, dir, src, &.{});
     defer gpa.free(prog);
 
-    var run = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .pipe });
-    var rdr = run.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 20));
+    const res = try harness.run(gpa, io, .{ .argv = &.{prog} });
+    gpa.free(res.stderr);
+    const got = res.stdout;
     defer gpa.free(got);
-    _ = try run.wait(io);
     // The `u` member renders as the literal `()`.
     try std.testing.expect(std.mem.indexOf(u8, got, "()") != null);
 }
@@ -150,7 +148,7 @@ test "unit: a bare () is a usable Map key / Set element (zero-sized key witnesse
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // A `()` key is zero-sized: its erased hash folds the seed and its erased eq is
     // always true, so a `Set[()]` collapses to at most one element and a `Map[(), V]`
@@ -184,7 +182,7 @@ test "unit: a ()-value program (a () param + Map[int,()]) is byte-identical at -
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/map

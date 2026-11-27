@@ -84,6 +84,16 @@ run = "bash bench/peers/run.sh"
 description = "Run the corpus with a collection before every allocation"
 run = "zig build test-bin && TOY_GC_STRESS=1 ./zig-out/bin/toy-corpus-test"
 
+# Run a Linux binary in a Docker (OrbStack) container, as the tests do under
+# TOY_TEST_RUNNER=docker:<platform>: `mise run run:docker linux/arm64 ./prog arg`.
+# Options before the binary: -C <dir> (working directory), -s <KiB> (stack limit),
+# -e NAME=VALUE (environment).
+[tasks."run:docker"]
+description = "Run a Linux binary in Docker: <platform> [-C dir] [-s KiB] [-e K=V]... <binary> [args]"
+# From the caller's folder, so a relative binary path resolves where it was typed.
+dir = "{{cwd}}"
+run = "bash {{config_root}}/tests/run-docker.sh"
+
 # Zig never prunes .zig-cache, and every compiler change builds fresh objects into it,
 # so it grows by tens of GB in a few days of work. The next build rebuilds what it needs.
 [tasks."clean:cache"]

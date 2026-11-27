@@ -9,7 +9,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -41,7 +41,7 @@ test "map: collisions + a grow survive a forced collection" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-collision";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -76,7 +76,7 @@ test "map: for k, v iterates in insertion order across a grow" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-order";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -108,7 +108,7 @@ test "map: `n := m` shares the one table (single handle)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-share";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -142,7 +142,7 @@ test "map: an explicit `impl has Hashable` custom eq is honored (dedups on one f
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-custom-eq";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -161,7 +161,7 @@ test "map: an explicit-impl-Hashable key program is byte-identical at -j1 and -j
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     try harness.expectDeterministicBuild(gpa, io, ".toy-test-map-custom-eq-determinism", custom_eq_src, &.{}, null);
 }
@@ -192,7 +192,7 @@ test "map: a plain struct key round-trips and iterates in insertion order" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-struct-key";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -210,7 +210,7 @@ test "map: the Map program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // The descriptor table + erased units + the Map's mono instances are pure functions of
     // source, so codegen is `-jN` byte-identical.
@@ -247,7 +247,7 @@ test "map: Map[int, ()] set/get/for-k,v with a zero-sized value column across a 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-unit-int";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -278,7 +278,7 @@ test "map: Map[str, ()] dedups an owned key with a zero-sized value" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const dir = ".toy-test-map-unit-str";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -294,7 +294,7 @@ test "map: each, keys and values follow insertion order across a grow" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // 100 str keys in scrambled order cross several grows, then every third key is set
     // again: the walks must still follow first-insertion order, with the new values.
     const codes = try harness.exitAtBothLevels(gpa, io, ".toy-test-map-walk-order",
@@ -343,7 +343,7 @@ test "map: filter and map results keep str keys across a forced collection" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Each callback forces a collection while the method's half-built result Map is the only
     // reference to the str keys it has copied in; a missed root shows up as a failed lookup.
     // 15 odd hits + 30 tag hits = 45.
@@ -390,7 +390,7 @@ test "map: two Map.map instances on one map run their own code" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // One receiver type, three `W`s: each call must seal to its own instance row. Without
     // specialization the generic instances themselves run, so a call sealed to the wrong
     // row would hand back the wrong value type.
@@ -433,7 +433,7 @@ test "map: Map closure methods are byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The lambdas and the Map, Set and Vec instances bring the unit count past the 64 at
     // which Pass C and codegen fan out.
     const src =

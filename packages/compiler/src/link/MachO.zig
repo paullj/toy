@@ -1693,3 +1693,55 @@ test "with a bss, __DWARF and its sections load bss_vmsize above their file offs
         sect += SECT_SIZE;
     }
 }
+
+test "ObjRead reads back the code, symbols, libraries and line rows the writer lays out" {
+    const ObjRead = @import("ObjRead.zig");
+    const gpa = testing.allocator;
+    const st = try Image.Symbols.build(gpa, &.{ .{ .name = "main", .text_off = 0 }, .{ .name = "m.f", .text_off = 8 } });
+    defer st.deinit(gpa);
+    const files = [_][]const u8{"main.toy"};
+    const fns = [_]Dwarf.Fn{.{ .name = "main", .text_off = 0, .size = stub_code.len, .file = 0, .rows = &.{ .{ .off = 0, .line = 1 }, .{ .off = 4, .line = 2 } } }};
+    const dw = try Dwarf.build(gpa, .{ .files = &files, .cu_file = 0, .comp_dir = "/", .fns = &fns, .text_size = stub_code.len });
+    defer dw.deinit(gpa);
+    const dylibs = [_]Image.Library{.{ .name = "/opt/z/lib/libz.1.dylib", .current_version = 0x10203, .compat_version = 0x10000 }};
+    const imports = [_]Image.Import{ .{ .name = "write" }, .{ .name = "z_crc", .library = 0 } };
+    const layout = try assemble(gpa, "hello", &stub_code, 0, demo_cstrings, &imports, .{ .libraries = &dylibs, .debug = .{ .symbols = st, .dwarf = dw } });
+    defer gpa.free(layout.image);
+    const text_addr = layout.text_vmaddr + layout.code_file_off;
+
+    const o = try ObjRead.parse(layout.image);
+    try testing.expectEqualSlices(u8, &stub_code, o.text);
+    try testing.expectEqual(text_addr, o.text_addr);
+
+    const syms = try ObjRead.symbols(o, gpa);
+    defer gpa.free(syms);
+    try testing.expectEqual(@as(usize, 2), syms.len);
+    try testing.expectEqualStrings("_main", syms[0].name);
+    try testing.expectEqualStrings("_m.f", syms[1].name);
+    try testing.expectEqual(text_addr + 8, syms[1].addr);
+    try testing.expect(!syms[0].external and syms[0].defined);
+
+    const libs = try ObjRead.libraries(o, gpa);
+    defer gpa.free(libs);
+    try testing.expectEqual(@as(usize, 2), libs.len);
+    try testing.expectEqualStrings(LIBSYSTEM_PATH, libs[0].name);
+    try testing.expectEqualStrings("/opt/z/lib/libz.1.dylib", libs[1].name);
+    try testing.expectEqual(@as(u32, 0x10203), libs[1].current_version);
+    try testing.expectEqual(@as(u32, 0x10000), libs[1].compat_version);
+
+    const lines = (try ObjRead.lineTable(o, gpa)).?;
+    defer lines.deinit(gpa);
+    try testing.expectEqualStrings("main.toy", lines.fileName(1).?);
+    try testing.expectEqual(@as(usize, 3), lines.rows.len);
+    try testing.expectEqual(text_addr + 4, lines.rows[1].addr);
+    try testing.expectEqual(@as(u64, 2), lines.rows[1].line);
+    try testing.expect(lines.rows[2].end_sequence);
+
+    const bare = try assemble(gpa, "stub", &stub_code, 0, &.{}, &.{}, .{});
+    defer gpa.free(bare.image);
+    const b = try ObjRead.parse(bare.image);
+    const none = try ObjRead.symbols(b, gpa);
+    defer gpa.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+    try testing.expect(try ObjRead.lineTable(b, gpa) == null);
+}
