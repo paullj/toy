@@ -1899,7 +1899,8 @@ pub fn appendPiece(b: *Builder, acc: Ir.SlotId, piece: Ir.SlotId) error{OutOfMem
 }
 
 /// The SOLE producer of a value's `str` rendering — the authority `to_string` (and the
-/// derive `display` emitters) consume. `op` is `ty`'s already-lowered operand. Returns a `str` slot:
+/// derive `display` emitters) consume — emitting the render `Typecheck.displayRender` picks,
+/// which the allocation walk reads too. `op` is `ty`'s already-lowered operand. Returns a `str` slot:
 ///   * str    -> the operand's own slot (identity, no alloc).
 ///   * int    -> `int_to_str` into a fresh cell (i64::MIN-correct never-negate render);
 ///     a 64-bit unsigned int goes to `uint_to_str` instead.
@@ -1910,11 +1911,8 @@ pub fn appendPiece(b: *Builder, acc: Ir.SlotId, piece: Ir.SlotId) error{OutOfMem
 ///     witness and call it -> a fresh str; a custom `impl Display` (std's for float) and a
 ///     structural derive land here identically, which is what makes `to_string` universal.
 pub fn displayToSlot(b: *Builder, ty: Typecheck.Type, op: Ir.Operand) error{OutOfMemory}!Ir.SlotId {
-    // Switch on `ty.kind` (NOT `passKind`): a `Ref` box is a struct type whose display
-    // witness is std's impl, reached through the struct arm; `passKind` would divert it to
-    // `.box` and mis-drop it.
-    if (LayoutEngine.isFnStruct(ty, b.in.layouts)) return try emitStrLiteralSlot(b, "<fn>");
-    switch (ty.kind) {
+    switch (Typecheck.displayRender(b.in.methods, b.in.layouts, ty, b.in.prelude_ids.display)) {
+        .fn_value => return try emitStrLiteralSlot(b, "<fn>"),
         .str => {
             const s = operandSlot(op);
             if (s != Ir.none_slot) return s;
@@ -1952,21 +1950,19 @@ pub fn displayToSlot(b: *Builder, ty: Typecheck.Type, op: Ir.Operand) error{OutO
             return res;
         },
         .unit => return try emitStrLiteralSlot(b, "()"),
-        else => switch (Typecheck.resolveConformanceMethod(b.in.methods, ty, "display", b.in.prelude_ids.display, null)) {
-            .one => |m| {
-                const callee = witnessCallee(b, m);
-                const args = try b.gpa.alloc(Ir.Operand, 1);
-                errdefer b.gpa.free(args);
-                args[0] = op; // self, by slot
-                const slot = try b.addSlot(Typecheck.Type.str);
-                _ = try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = slot } }, null);
-                return slot;
-            },
-            .none, .ambiguous => {
-                try b.diags.append(b.gpa, .{ .byte_offset = 0, .end = 0, .message = "display: no display witness in lower" });
-                b.had_error = true;
-                return try emitStrLiteralSlot(b, "");
-            },
+        .witness => |mi| {
+            const callee = witnessCallee(b, b.in.methods[mi]);
+            const args = try b.gpa.alloc(Ir.Operand, 1);
+            errdefer b.gpa.free(args);
+            args[0] = op; // self, by slot
+            const slot = try b.addSlot(Typecheck.Type.str);
+            _ = try b.emit(.{ .call = .{ .callee = callee, .args = args, .ret_slot = slot } }, null);
+            return slot;
+        },
+        .missing => {
+            try b.diags.append(b.gpa, .{ .byte_offset = 0, .end = 0, .message = "display: no display witness in lower" });
+            b.had_error = true;
+            return try emitStrLiteralSlot(b, "");
         },
     }
 }

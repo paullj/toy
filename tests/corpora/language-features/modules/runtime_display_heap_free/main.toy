@@ -1,0 +1,9 @@
+# A `to_string` on a `bool` or a `str` builds no heap value, so a `core/rt` fn may make
+# one (T0082): the walk follows it as lower renders it.
+# dev-core-imports
+# expect: exit 6
+import core/rt/probe
+
+fn main() -> int {
+    return probe.rendered_len(true, "ab")
+}

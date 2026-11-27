@@ -1,8 +1,9 @@
 //! Whole-graph codegen + link tail: turns a resolved+typechecked module graph into
-//! a linked image in the target's object format (or rendered IR text). One `Plan` lists every unit to lower; the
-//! per-unit fan-out lowers each against its single-unit `Engine.Frozen` view (thread-safe,
-//! program-wide tables + its owner's arrays), and `--emit ir` lowers the same units through
-//! the same path. Then the SERIAL relink tail interns strings,
+//! a linked image in the target's object format (or rendered IR text). One `Plan` lists every unit; a
+//! build lowers only those the program reaches (`Plan.reachable`), so a codegen error in a
+//! fn nothing reaches does not fail it, while `--emit ir` renders every unit, reached or not.
+//! The per-unit fan-out lowers each against its single-unit `Engine.Frozen` view (thread-safe,
+//! program-wide tables + its owner's arrays). Then the SERIAL relink tail interns strings,
 //! rebases cross-section relocs, links, and hands the `Image` to the format's writer —
 //! the order-sensitive write (lay out + patch) → sign-last pipeline. Distinct from the per-file
 //! front-end (`Driver.run`/`pipeline`, discover → lex/parse/check).
@@ -35,6 +36,7 @@ const LibResolver = @import("../link/LibResolver.zig");
 const ValueLayout = @import("../layout/ValueLayout.zig");
 const Derive = @import("../symbols/Derive.zig");
 const Body = @import("../symbols/Body.zig");
+const Alloc = @import("../symbols/Alloc.zig");
 const StdNames = @import("../symbols/StdNames.zig");
 const Target = @import("../Target.zig");
 
@@ -242,6 +244,9 @@ const Plan = struct {
     inline_units_by_name: std.StringHashMapUnmanaged(u32) = .empty,
     /// The callee IR the inliner prepared, shared by every job. Owned.
     inline_cache: *InlineUnits.InlineCache,
+    /// Per unit, what `reachable` walked of a body from source, which its key reads instead
+    /// of walking again; empty, or null for a unit it did not walk. Owned.
+    walked: []?Engine.Walked = &.{},
 
     fn init(gpa: std.mem.Allocator, graph: *const Graph.Graph, res: *const ResolveGraph.GraphResult, tc: *const Typecheck.GraphResult, o: Options) !Plan {
         const modules = try gpa.alloc(Walk.Source, graph.modules.len);
@@ -318,6 +323,8 @@ const Plan = struct {
     }
 
     fn deinit(p: *Plan, gpa: std.mem.Allocator) void {
+        for (p.walked) |*w| if (w.*) |*x| x.deinit(gpa);
+        gpa.free(p.walked);
         p.inline_cache.deinit(gpa);
         gpa.destroy(p.inline_cache);
         p.inline_units_by_name.deinit(gpa);
@@ -455,6 +462,7 @@ const Plan = struct {
             .conformances = if (inst) |x| x.conformances else &.{},
             .closure_facts = if (owner) |o| (if (o < p.closure_facts.len) p.closure_facts[o] else &.{}) else &.{},
             .units = .{ .ctx = p, .findFn = findBody, .cache = p.inline_cache },
+            .walked = if (i < p.walked.len) (if (p.walked[i]) |*w| w else null) else null,
         };
     }
 
@@ -492,11 +500,211 @@ const Plan = struct {
         return facts;
     }
 
+    /// The units a build lowers, ascending: those reachable from `entry`, from the
+    /// `core/rt` fns lowering and the ISAs call by name (`StdNames.RuntimeFn`), and from the
+    /// erased witnesses the descriptor table points at, through the callees each unit's key folds
+    /// (`InlineUnits.appendCallNames`), the lambda units of its owner and the adapters of
+    /// those callees. These are the edges `Engine.uncoveredReloc` proves cover a unit's
+    /// relocs, so the set holds every fn `Link.reachable` keeps; the linker drops the rest
+    /// anyway, so lowering them only costs time.
+    fn reachable(p: *Plan, gpa: std.mem.Allocator, io: Io, ncpu: usize, entry: u32) ![]u32 {
+        const none = std.math.maxInt(u32);
+        const n = p.units.len;
+        // Name -> unit chains, ascending, so a duplicate definition is kept with its twin
+        // as the linker keeps it. An adapter also chains under the name its callers fold.
+        var heads: std.StringHashMapUnmanaged(u32) = .empty;
+        defer heads.deinit(gpa);
+        var bases: std.StringHashMapUnmanaged(u32) = .empty;
+        defer bases.deinit(gpa);
+        const next = try gpa.alloc(u32, n);
+        defer gpa.free(next);
+        const next_base = try gpa.alloc(u32, n);
+        defer gpa.free(next_base);
+        try heads.ensureTotalCapacity(gpa, @intCast(n));
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            const name = p.symOf(p.units[i]).name;
+            const gop = heads.getOrPutAssumeCapacity(name);
+            next[i] = if (gop.found_existing) gop.value_ptr.* else none;
+            gop.value_ptr.* = @intCast(i);
+            next_base[i] = none;
+            if (p.units[i] == .adapter) if (Engine.adapterBase(name)) |b| {
+                const bg = try bases.getOrPut(gpa, b);
+                next_base[i] = if (bg.found_existing) bg.value_ptr.* else none;
+                bg.value_ptr.* = @intCast(i);
+            };
+        }
+
+        const keep = try gpa.alloc(bool, n);
+        defer gpa.free(keep);
+        @memset(keep, false);
+        var work: std.ArrayList(u32) = .empty;
+        defer work.deinit(gpa);
+        const Marker = struct {
+            heads: *const std.StringHashMapUnmanaged(u32),
+            bases: *const std.StringHashMapUnmanaged(u32),
+            next: []const u32,
+            next_base: []const u32,
+            keep: []bool,
+            work: *std.ArrayList(u32),
+            fn unit(m: @This(), a: std.mem.Allocator, u: u32) !void {
+                if (m.keep[u]) return;
+                m.keep[u] = true;
+                try m.work.append(a, u);
+            }
+            fn name(m: @This(), a: std.mem.Allocator, s: []const u8) !void {
+                var at = m.heads.get(s) orelse none;
+                while (at != none) : (at = m.next[at]) try m.unit(a, at);
+                at = m.bases.get(s) orelse none;
+                while (at != none) : (at = m.next_base[at]) try m.unit(a, at);
+            }
+        };
+        const m: Marker = .{ .heads = &heads, .bases = &bases, .next = next, .next_base = next_base, .keep = keep, .work = &work };
+
+        try m.unit(gpa, entry);
+        for (std.enums.values(StdNames.RuntimeFn)) |f| if (!f.collects()) try m.name(gpa, f.name());
+        for (p.units, 0..) |u, k| switch (u) {
+            .erased => try m.unit(gpa, @intCast(k)),
+            // An adapter its callers cannot name is kept whole.
+            .adapter => if (Engine.adapterBase(p.symOf(u).name) == null) try m.unit(gpa, @intCast(k)),
+            else => {},
+        };
+
+        // The collector and the str builders that allocate are kept only once a kept unit
+        // can allocate, by the walk that proves `core/rt` never does (T0082): a program
+        // that allocates nothing, such as one that only prints literals, lowers no GC.
+        const alloc_mods = try gpa.alloc(Alloc.Module, p.modules.len);
+        defer gpa.free(alloc_mods);
+        for (p.modules, alloc_mods, 0..) |src, *am, k| am.* = .{ .src = src, .resolutions = p.res.resolutions[k] };
+        const ap: Alloc.Program = .{
+            .modules = alloc_mods,
+            .prog = .{ .sigs = p.tc.sigs, .methods = p.tc.methods, .instances = p.tc.instances, .layouts = p.tc.layouts },
+            .bodies = p.tc.bodies,
+            .derives = p.tc.derives,
+            .prelude_ids = p.tc.prelude_ids,
+            .elem_prims = Alloc.elemPrims(p.tc.sigs),
+        };
+        var allocates = false;
+
+        if (p.walked.len == 0) {
+            p.walked = try gpa.alloc(?Engine.Walked, n);
+            @memset(p.walked, null);
+        }
+        for (p.walked) |*w| if (w.*) |*x| {
+            x.deinit(gpa);
+            w.* = null;
+        };
+        const found = try gpa.alloc(bool, n);
+        defer gpa.free(found);
+        @memset(found, false);
+        // A program's own bodies are nearly all reached, so they are walked up front on
+        // every core, as their keys walked them before; the walk below then only reads
+        // them, and walks what it reaches of std and core one body at a time.
+        {
+            var own: std.ArrayList(u32) = .empty;
+            defer own.deinit(gpa);
+            for (p.units, 0..) |u, k| switch (u) {
+                .body, .spec => if (!p.graph.modules[p.moduleOf(u)].bundled) try own.append(gpa, @intCast(k)),
+                else => {},
+            };
+            const errs = try gpa.alloc(?anyerror, own.items.len);
+            defer gpa.free(errs);
+            @memset(errs, null);
+            const Ctx = struct {
+                gpa: std.mem.Allocator,
+                p: *Plan,
+                ap: *const Alloc.Program,
+                own: []const u32,
+                found: []bool,
+                errs: []?anyerror,
+                pub fn args(c: @This(), k: usize) std.meta.ArgsTuple(@TypeOf(preWalk)) {
+                    return .{ c.gpa, c.p, c.ap, c.own[k], &c.found[c.own[k]], &c.errs[k] };
+                }
+            };
+            Engine.chunkedFanOut(io, own.items.len, ncpu, Engine.Chunk.body.threshold, Engine.Chunk.body.chunks_per_cpu, preWalk, Ctx{
+                .gpa = gpa,
+                .p = p,
+                .ap = &ap,
+                .own = own.items,
+                .found = found,
+                .errs = errs,
+            });
+            for (errs) |e| if (e) |err| return err;
+        }
+
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(gpa);
+        while (work.pop()) |at| {
+            const u = p.units[at];
+            const fr = p.frozenFor(at);
+            names.clearRetainingCapacity();
+            const may_alloc = switch (u) {
+                .body, .spec => blk: {
+                    if (p.walked[at] == null) {
+                        if (allocates) {
+                            p.walked[at] = try Engine.walkSource(gpa, &fr.in, fr.body.source.decl, fr.in.sig, &Engine.NoVisitor{});
+                        } else found[at] = try p.walkOne(gpa, &ap, at);
+                    }
+                    try InlineUnits.appendSourceCallNames(gpa, &fr, p.walked[at].?.calls, &names);
+                    break :blk found[at];
+                },
+                else => blk: {
+                    try InlineUnits.appendCallNames(gpa, &fr, &names);
+                    break :blk unitAllocates(p.tc.derives, u);
+                },
+            };
+            for (names.items) |nm| try m.name(gpa, nm);
+            if (p.ownerOf(u)) |o| for (Closure.ownerUnits(p.tc.lambda_units, o)) |l| try m.name(gpa, l.name);
+            if (!allocates and may_alloc) {
+                allocates = true;
+                for (std.enums.values(StdNames.RuntimeFn)) |f| if (f.collects()) try m.name(gpa, f.name());
+            }
+        }
+
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(gpa);
+        for (keep, 0..) |k, at| if (k) try out.append(gpa, @intCast(at));
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Walk body unit `at` into `walked[at]`, and say whether it allocates itself.
+    fn walkOne(p: *Plan, gpa: std.mem.Allocator, ap: *const Alloc.Program, at: u32) !bool {
+        const fr = p.frozenFor(at);
+        var scan = Alloc.localScan(gpa, ap.*, p.ownerOf(p.units[at]).?);
+        p.walked[at] = try Engine.walkSource(gpa, &fr.in, fr.body.source.decl, fr.in.sig, &scan);
+        return scan.found;
+    }
+
+    fn preWalk(gpa: std.mem.Allocator, p: *Plan, ap: *const Alloc.Program, at: u32, found: *bool, err: *?anyerror) void {
+        found.* = p.walkOne(gpa, ap, at) catch |e| {
+            err.* = e;
+            return;
+        };
+    }
+
     fn emitError(p: *const Plan, d: Diagnostic, i: usize) EmitError {
         const u = p.units[i];
         return emitErrorOf(p.graph, d, p.moduleOf(u), p.declOf(u));
     }
 };
+
+fn orderU32(k: u32, x: u32) std.math.Order {
+    return std.math.order(k, x);
+}
+
+/// Whether a source-less unit's code may call the collector or a str builder that
+/// allocates: a derive that is not one of the inline compares `Alloc` proves heap-free,
+/// or an erased unit, which exists for a heap type's descriptor; an adapter only moves
+/// its args. A lambda unit's owner allocates its env, so the owner's walk already
+/// answered for it.
+fn unitAllocates(derives: []const Derive.Derive, u: Unit) bool {
+    return switch (u) {
+        .derive => |k| !Alloc.heapFreeDerive(derives, k),
+        .erased => true,
+        .adapter, .lambda, .body, .spec => false,
+    };
+}
 
 /// Whether a build keeps the envs of closures that never outlive their maker in frame
 /// slots, and unboxes the captures only they share. Any one opt pass turns it on, not the
@@ -517,9 +725,9 @@ fn freeNames(gpa: std.mem.Allocator, names: []const Link.SymName) void {
     gpa.free(names);
 }
 
-/// Lower EVERY unit across the whole module `graph` (in parallel, memoized through the
-/// codegen cache), then run the serial relink tail. The entry `main` MUST live in the
-/// entry module (error otherwise). `res`/`tc` are the whole-graph resolve/typecheck results
+/// Lower every unit the program reaches (`Plan.reachable`) across the whole module
+/// `graph` (in parallel, memoized through the codegen cache), then run the serial relink
+/// tail. The entry `main` MUST live in the entry module (error otherwise). `res`/`tc` are the whole-graph resolve/typecheck results
 /// (program-wide global ids). Caller owns the returned `LinkedProgram` on success.
 pub fn lowerGraphProgram(
     gpa: std.mem.Allocator,
@@ -574,7 +782,9 @@ pub fn lowerGraphProgram(
         } };
     }
 
-    const slots = try gpa.alloc(Engine.Slot, plan.units.len);
+    const reached = try plan.reachable(gpa, io, ncpu, entry);
+    defer gpa.free(reached);
+    const slots = try gpa.alloc(Engine.Slot, reached.len);
     defer gpa.free(slots);
     for (slots) |*s| s.* = .{};
 
@@ -584,27 +794,30 @@ pub fn lowerGraphProgram(
         engine: Engine,
         target: Target,
         plan: *const Plan,
+        reached: []const u32,
         slots: []Engine.Slot,
         pub fn args(c: @This(), i: usize) std.meta.ArgsTuple(@TypeOf(unitJob)) {
-            return .{ c.gpa, c.io, c.engine, c.target, c.plan, i, &c.slots[i] };
+            return .{ c.gpa, c.io, c.engine, c.target, c.plan, c.reached[i], &c.slots[i] };
         }
     };
-    Engine.chunkedFanOut(io, plan.units.len, ncpu, Engine.Chunk.codegen.threshold, Engine.Chunk.codegen.chunks_per_cpu, unitJob, Ctx{
+    Engine.chunkedFanOut(io, reached.len, ncpu, Engine.Chunk.codegen.threshold, Engine.Chunk.codegen.chunks_per_cpu, unitJob, Ctx{
         .gpa = gpa,
         .io = io,
         .engine = Engine.initProbe(cache, mode, probe),
         .target = target,
         .plan = &plan,
+        .reached = reached,
         .slots = slots,
     });
 
-    for (slots, 0..) |s, i| if (s.err) |e| {
+    for (slots, reached) |s, i| if (s.err) |e| {
         for (slots) |*sl| if (sl.fc) |*fc| fc.deinit(gpa);
         if (e == error.CodegenDiagnostic) if (s.diag) |d| return .{ .err = plan.emitError(d, i) };
         return e;
     };
 
-    for (slots, plan.units) |*s, u| {
+    for (slots, reached) |*s, i| {
+        const u = plan.units[i];
         const fc = &s.fc.?;
         if (fc.lines.len != 0) fc.src = .{ .file = plan.moduleOf(u), .line = plan.linesFor(u).anchor };
     }
@@ -621,9 +834,9 @@ pub fn lowerGraphProgram(
 
     // relink/link index by unit position, not global id. Each name is borrowed from the
     // plan's tables, which outlive relink here.
-    const unit_names = try gpa.alloc(Link.SymName, plan.units.len);
+    const unit_names = try gpa.alloc(Link.SymName, reached.len);
     defer gpa.free(unit_names);
-    for (plan.units, unit_names) |u, *nm| nm.* = plan.symOf(u);
+    for (reached, unit_names) |i, *nm| nm.* = plan.symOf(plan.units[i]);
 
     // Build the descriptor plan (canonical order = `tc.descriptor_types`), each entry's
     // `{size, align, size_class}` from the layout snapshot + the erased hash/eq unit names
@@ -666,7 +879,8 @@ pub fn lowerGraphProgram(
     const debug: ?Link.DebugInput = if (profile.debugInfo()) .{ .files = files.items, .cu_file = graph.entry_index, .comp_dir = cwd orelse "", .fixed_files = graph.seeded_from } else null;
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
-    const out = relink(io, gpa, Isa.of(target) orelse return error.UnsupportedTarget, slots, unit_names, entry, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
+    const entry_at: u32 = @intCast(std.sort.binarySearch(u32, reached, entry, orderU32).?);
+    const out = relink(io, gpa, Isa.of(target) orelse return error.UnsupportedTarget, slots, unit_names, entry_at, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;
@@ -955,7 +1169,7 @@ test "each unit reads its owner's tables: an instance its own, a lambda its owne
     }
 }
 
-test "the build lowers and links every unit of the plan" {
+test "the build lowers and links every unit the program reaches, every unit of its own module among them" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -964,11 +1178,60 @@ test "the build lowers and links every unit of the plan" {
     for ([_]Profile{ .debug, .release }) |profile| {
         var plan = try ck.plan(gpa, profile);
         defer plan.deinit(gpa);
+        const reached = try plan.reachable(gpa, threaded.io(), 1, plan.entry.?);
+        defer gpa.free(reached);
+        for (plan.units, 0..) |u, i| if (plan.moduleOf(u) == ck.g.entry_index) {
+            try testing.expect(std.sort.binarySearch(u32, reached, @as(u32, @intCast(i)), orderU32) != null);
+        };
         var out = try lowerGraphProgram(gpa, threaded.io(), Cache.disabled, .aarch64_macos, &ck.g, &ck.res, &ck.tc, .verify, profile, true, null, null, 1);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .ok);
-        try testing.expectEqual(plan.units.len, out.ok.codegen_compiled);
+        try testing.expectEqual(reached.len, out.ok.codegen_compiled);
     }
+}
+
+/// Whether the plan's reachable set holds a unit named `name`.
+fn reaches(gpa: std.mem.Allocator, io: Io, plan: *Plan, name: []const u8) !bool {
+    const reached = try plan.reachable(gpa, io, 1, plan.entry.?);
+    defer gpa.free(reached);
+    for (reached) |i| if (std.mem.eql(u8, plan.symOf(plan.units[i]).name, name)) return true;
+    return false;
+}
+
+test "a fn no reached unit calls is not lowered, and the collector only once something allocates" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const quiet = try Checked.createProgram(gpa, threaded.io(),
+        \\import std/io
+        \\fn used() -> int { 1 }
+        \\fn unused() -> int { 2 }
+        \\fn main() -> int {
+        \\    io.println("hi")
+        \\    return used()
+        \\}
+    );
+    defer quiet.destroy(gpa);
+    var qp = try quiet.plan(gpa, .debug);
+    defer qp.deinit(gpa);
+    try testing.expect(try reaches(gpa, threaded.io(), &qp, "main.used"));
+    try testing.expect(!try reaches(gpa, threaded.io(), &qp, "main.unused"));
+    try testing.expect(try reaches(gpa, threaded.io(), &qp, StdNames.RuntimeFn.panic.name()));
+    try testing.expect(!try reaches(gpa, threaded.io(), &qp, StdNames.RuntimeFn.alloc.name()));
+    try testing.expect(!try reaches(gpa, threaded.io(), &qp, "std/float.render"));
+
+    const loud = try Checked.createProgram(gpa, threaded.io(),
+        \\import std/io
+        \\fn main() -> int {
+        \\    io.println(2.5)
+        \\    return 0
+        \\}
+    );
+    defer loud.destroy(gpa);
+    var lp = try loud.plan(gpa, .debug);
+    defer lp.deinit(gpa);
+    try testing.expect(try reaches(gpa, threaded.io(), &lp, StdNames.RuntimeFn.alloc.name()));
+    try testing.expect(try reaches(gpa, threaded.io(), &lp, "std/float.render"));
 }
 
 /// The calls each body's code makes to a unit of `plan` that the body's key does not fold

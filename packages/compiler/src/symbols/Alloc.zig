@@ -1,6 +1,7 @@
 //! Which bodies can reach a GC allocation, and by what call path. A peer data module like
 //! `Escape`: types runs it once every body is checked, to hold every `core/rt` fn to the
-//! no-allocation rule (T0082).
+//! no-allocation rule (T0082), and a build asks it whether the code it lowers can allocate
+//! at all, to leave out the collector when it cannot.
 //!
 //! It reads the checker's call selections over `Body.List`, the call graph the escape pass
 //! and the spec table walk. Anything whose target it cannot see is taken to allocate: a call
@@ -92,19 +93,32 @@ pub fn stepsOf(gpa: std.mem.Allocator, p: Program, bi: Body.Index) error{OutOfMe
     return v.steps.toOwnedSlice(gpa);
 }
 
-const Visitor = struct {
+/// Whether body `bi` itself allocates, not counting its callees, as a visitor to walk its
+/// decl with: lazy lowering rides it on the walk it already makes over the body.
+pub fn localScan(gpa: std.mem.Allocator, p: Program, bi: Body.Index) Visitor {
+    const b = p.bodies.items[bi];
+    const m = p.modules[b.mod];
+    return .{ .gpa = gpa, .p = p, .src = m.src, .body = b.view(m.src.tree, m.resolutions), .found = b.boxed.len != 0, .record = false };
+}
+
+pub const Visitor = struct {
     gpa: std.mem.Allocator,
     p: Program,
     src: Walk.Source,
     body: Body.BodyView,
     steps: std.ArrayList(Step) = .empty,
+    /// Whether a step allocates.
+    found: bool = false,
+    /// Off: keep no steps, only `found`.
+    record: bool = true,
 
     fn alloc(v: *Visitor, node: Ast.Index, r: Reason) error{OutOfMemory}!void {
-        try v.steps.append(v.gpa, .{ .node = node, .to = .{ .alloc = r } });
+        v.found = true;
+        if (v.record) try v.steps.append(v.gpa, .{ .node = node, .to = .{ .alloc = r } });
     }
 
     fn call(v: *Visitor, node: Ast.Index, to: Body.Index) error{OutOfMemory}!void {
-        try v.steps.append(v.gpa, .{ .node = node, .to = .{ .body = to } });
+        if (v.record) try v.steps.append(v.gpa, .{ .node = node, .to = .{ .body = to } });
     }
 
     pub fn on(v: *Visitor, ev: Walk.Event) error{OutOfMemory}!void {
@@ -130,13 +144,17 @@ const Visitor = struct {
             },
             else => {},
         }
-        if (!v.body.nodes.has(idx)) return;
-        switch (v.body.nodes.callee(idx).view()) {
+        const c = v.body.nodes.callee(idx);
+        if (c.tag == .none) return;
+        switch (c.view()) {
             .none => {},
             .direct => |gid| try v.named(idx, gid),
             .instance => |ii| try v.call(idx, v.p.bodies.ofInstance(ii)),
             .method => |mi| try v.method(idx, mi),
-            .builtin => |k| if (builtinAllocates(k)) try v.alloc(idx, .{ .builtin_method = k }),
+            .builtin => |k| switch (k) {
+                .scalar_to_string, .display_to_string => try v.display(idx, k),
+                else => if (builtinAllocates(k)) try v.alloc(idx, .{ .builtin_method = k }),
+            },
             .value => try v.alloc(idx, .value_call),
             .protocol => try v.alloc(idx, .protocol_call),
             .generic => try v.alloc(idx, .generic_call),
@@ -149,9 +167,20 @@ const Visitor = struct {
         }
     }
 
+    /// `x.to_string()`, rendered as lower renders it (`Typecheck.displayRender`).
+    fn display(v: *Visitor, idx: Ast.Index, k: Callee.Builtin) error{OutOfMemory}!void {
+        const n = v.body.tree.nodes[idx.int()];
+        if (n.tag != .field_access or !v.body.nodes.has(n.lhs)) return v.alloc(idx, .{ .builtin_method = k });
+        switch (Typecheck.displayRender(v.p.prog.methods, v.p.prog.layouts, v.body.nodes.typeOf(n.lhs), v.p.prelude_ids.display)) {
+            .fn_value, .str, .bool, .unit => {},
+            .int, .missing => try v.alloc(idx, .{ .builtin_method = k }),
+            .witness => |mi| try v.method(idx, mi),
+        }
+    }
+
     /// A call of fn `gid`, or a reference to it.
     fn named(v: *Visitor, idx: Ast.Index, gid: u32) error{OutOfMemory}!void {
-        if (gid < v.p.prog.sigs.len) if (StdNames.RuntimeFn.lookup(v.p.prog.sigs[gid].name)) |f| {
+        if (gid < v.p.prog.sigs.len and StdNames.isRuntimeModule(v.p.prog.sigs[gid].name)) if (StdNames.RuntimeFn.lookup(v.p.prog.sigs[gid].name)) |f| {
             if (f.collects()) return v.alloc(idx, .{ .collector = gid });
         };
         if (v.p.bodies.ofFn(gid)) |to| return v.call(idx, to);
@@ -228,7 +257,7 @@ const Visitor = struct {
 
 /// A derived Eq, Ord or Hash over a struct whose fields all compare inline: it calls no
 /// witness, and its one call, `core/rt` `str_eq` on a `str` field, this rule holds itself.
-fn heapFreeDerive(derives: []const Derive.Derive, di: u32) bool {
+pub fn heapFreeDerive(derives: []const Derive.Derive, di: u32) bool {
     if (di >= derives.len) return false;
     const d = derives[di];
     switch (d.kind) {

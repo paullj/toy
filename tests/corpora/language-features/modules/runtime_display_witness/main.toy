@@ -1,0 +1,9 @@
+# A `to_string` on a struct calls its `Display` witness, which the walk goes into (T0082):
+# here the witness renders an int, which allocates.
+# dev-core-imports
+# expect: compile-error "[T0082]: core/rt fn 'first_len' can reach a GC allocation: first_len -> core/rt/probe.P.display$Display -> to_string"
+import core/rt/probe
+
+fn main() -> int {
+    return probe.first_len(probe.P { v: 7 })
+}
