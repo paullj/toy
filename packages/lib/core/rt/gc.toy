@@ -174,14 +174,6 @@ fn over_budget(cb: int) -> bool {
     return word(allocated(cb)) >= budget
 }
 
-# A failed mapping (MAP_FAILED, -1) would put the page map, an arena or a large object at
-# address -1, where the next write lands far from any mapping, so it panics here instead.
-fn map_pages(len: int) -> int {
-    at := unsafe { mmap(0, len, 3, 4098, -1, 0) }
-    if at == -1 { panic("out of memory") }
-    return at
-}
-
 # Sweep the list's unswept spans until one frees a cell. Returns the freelist head.
 fn sweep_list(cb: int, list: int) -> int {
     head := freelist(cb, list)
@@ -207,16 +199,16 @@ fn refill(cb: int, list: int, cell_size: int, kind: int) -> int {
         set_word(span_pool(cb), word(span_link(span)))
         # Its cells died unswept, and its layout entries, if it was mixed, were written for
         # another class's cell boundaries.
-        unsafe { memset(span + 256, 0, 16384 - 256) }
+        unsafe { memset(span + 256, 0, span_size() - 256) }
     } else {
         span = new_span(cb)
-        set_pages(cb, span, 16384, span)
+        set_pages(word(page_map(cb)), span, span_size(), span)
         set_word(span, word(span_list(cb)))
         set_word(span_list(cb), span)
         set_word(spans_mapped(cb), word(spans_mapped(cb)) + 1)
     }
     first := first_cell(kind)
-    count := (16384 - first) / cell_size
+    count := (span_size() - first) / cell_size
     set_word(allocated(cb), word(allocated(cb)) + count * cell_size)
     set_word(span_cell_size(span), cell_size)
     set_word(span_cell_count(span), count)
@@ -238,10 +230,10 @@ fn refill(cb: int, list: int, cell_size: int, kind: int) -> int {
 # The collection runs before the mapping, so the new object is never at risk.
 fn alloc_large(cb: int, size: int, fp: int) -> int {
     if over_budget(cb) { collect_from(cb, fp) }
-    len := (size + 256 + 16383) / 16384 * 16384
-    obj := map_pages(len)
+    len := (size + 256 + span_mask()) & -span_size()
+    obj := map_spans(len)
     add_heap(cb, obj, len)
-    set_pages(cb, obj, len, obj)
+    set_pages(word(page_map(cb)), obj, len, obj)
     set_word(obj, word(large_list(cb)))
     set_word(large_list(cb), obj)
     set_word(large_size(obj), size)
@@ -257,38 +249,134 @@ fn alloc_large(cb: int, size: int, fp: int) -> int {
 fn new_span(cb: int) -> int {
     span := word(arena_next(cb))
     if span == word(arena_end(cb)) {
-        span = map_pages(arena_size())
+        span = map_spans(arena_size())
         add_heap(cb, span, arena_size())
         set_word(arena_end(cb), span + arena_size())
     }
-    set_word(arena_next(cb), span + 16384)
+    set_word(arena_next(cb), span + span_size())
     return span
 }
 
 fn arena_size() -> int { return 67108864 }
 
-# Widen the heap's bounds to cover a new mapping, mapping the page map first. The map has a
-# word for each 16 KiB page below 2^47, macOS's user address space, so it needs no base and
-# no second level wherever the kernel puts an arena or a large object. Its 64 GiB are
-# reserved, not committed: a page of the map is resident only once a word in the 32 MiB of
-# address space it covers has been looked up. The bounds keep any other word off the map.
+# Heap mappings and the page map. The fns the map is built from are pub so a test can feed
+# them the addresses of other targets.
+#
+# A span is found from any address in it by masking, so every span starts on a 16 KiB
+# boundary, whatever page size the OS maps with: macOS arm64 maps 16 KiB pages, Linux 4 KiB.
+#
+# The map has two levels, a root and the leaves it points to, so it needs no base and has
+# room for any address the kernel hands out: Linux arm64 maps near 2^48. A root entry with
+# no page set points at a shared empty leaf rather than at 0, so a lookup is two loads and
+# no branch. Each root entry is its leaf's address less the leaf's first page times the
+# entry size, so the page number indexes it with no mask. A leaf is mapped when a page it
+# covers is first set; the kernel commits a page of a leaf only once it is written, and
+# reading the empty leaf commits nothing, so a small heap costs a page of the root and a
+# page of one leaf. The address split is in the constants below, which a target with other
+# address or pointer sizes (wasm32) changes.
+
+# A mapping of `len` (a multiple of 16 KiB) whose base is 16 KiB-aligned.
+pub fn map_spans(len: int) -> int {
+    return align_spans(map_pages(len), len)
+}
+
+# `at`, a fresh mapping of `len`, if its base is 16 KiB-aligned. Most are (all of them on
+# macOS), so only a misaligned one costs a second mapping, with 16 KiB to spare, which
+# `trim_spans` cuts down to the aligned `len`. Apart from `map_spans` so a test on macOS
+# can hand it a misaligned mapping.
+pub fn align_spans(at: int, len: int) -> int {
+    if (at & span_mask()) == 0 { return at }
+    unsafe { munmap(at, len) }
+    return trim_spans(map_pages(len + span_size()), len)
+}
+
+# The 16 KiB-aligned `len` bytes of the mapping at `at` of `len` + 16 KiB, with the rest
+# unmapped. The ends are whole OS pages, since `at` is OS page-aligned.
+pub fn trim_spans(at: int, len: int) -> int {
+    base := (at + span_mask()) & -span_size()
+    head := base - at
+    if head != 0 { unsafe { munmap(at, head) } }
+    unsafe { munmap(base + len, span_size() - head) }
+    return base
+}
+
+# A new, empty map: its root, followed by the address of its empty leaf.
+pub fn new_page_map() -> int {
+    root := map_pages(root_bytes() + (1 << entry_shift()))
+    empty := map_pages(leaf_bytes())
+    set_word(root + root_bytes(), empty)
+    slot := root
+    while slot < root + root_bytes() {
+        set_word(slot, empty - bias(root, slot))
+        slot += 1 << entry_shift()
+    }
+    return root
+}
+
+# Point the entry of every page of [at, at + len) at `owner`, or 0 for none. `at` and
+# `len` are whole spans.
+pub fn set_pages(root: int, at: int, len: int, owner: int) {
+    page := at
+    end := at + len
+    while page < end {
+        slot := root + ((page >> (span_shift() + leaf_shift())) << entry_shift())
+        if word(slot) == word(root + root_bytes()) - bias(root, slot) {
+            set_word(slot, map_pages(leaf_bytes()) - bias(root, slot))
+        }
+        set_word(word(slot) + ((page >> span_shift()) << entry_shift()), owner)
+        page += span_size()
+    }
+}
+
+# The owner of the page `w` is in, or 0. The bounds check in `mark_word` keeps `w` below
+# 2^address_bits. Every reference the mark reaches comes here.
+pub fn page_owner(root: int, w: int) -> int {
+    leaf := word(root + ((w >> (span_shift() + leaf_shift())) << entry_shift()))
+    return word(leaf + ((w >> span_shift()) << entry_shift()))
+}
+
+# What root entry `slot` takes off its leaf's address: the offset of its first page's
+# entry in a map of one level.
+fn bias(root: int, slot: int) -> int {
+    return (slot - root) << leaf_shift()
+}
+
+# A failed mapping (MAP_FAILED, -1) would put the map, an arena or a large object at
+# address -1, where the next write lands far from any mapping, so it panics here instead.
+fn map_pages(len: int) -> int {
+    at := unsafe { mmap(0, len, 3, 4098, -1, 0) }
+    if at == -1 { panic("out of memory") }
+    return at
+}
+
+fn span_shift() -> int { return 14 }
+# Literals rather than derived from `span_shift`: the allocation paths these are inlined
+# into do not fold a nested constant call, which cost binary_trees 5% of its instructions.
+fn span_size() -> int { return 16384 }
+fn span_mask() -> int { return 16383 }
+# 48 on a 64-bit target, 32 on wasm32.
+fn address_bits() -> int { return 48 }
+# A leaf covers 256 GiB, so a 48-bit root is 8 KiB, small enough to fill with the empty
+# leaf up front, and a leaf reserves 128 MiB. The empty leaf is free only because the
+# kernel commits a mapping's pages lazily; wasm32's linear memory does not, so it would
+# take a map of one level.
+fn leaf_shift() -> int { return 24 }
+fn leaf_bytes() -> int { return 1 << (leaf_shift() + entry_shift()) }
+fn root_bytes() -> int {
+    return 1 << (address_bits() - span_shift() - leaf_shift() + entry_shift())
+}
+# Each entry is a pointer: 8 bytes, 4 on wasm32.
+fn entry_shift() -> int { return 3 }
+
+# Widen the heap's bounds to cover a new mapping, making the page map first. The bounds
+# turn away most words that are no heap address before the map is read.
 fn add_heap(cb: int, at: int, len: int) {
     if word(page_map(cb)) == 0 {
-        set_word(page_map(cb), map_pages(68719476736))
+        set_word(page_map(cb), new_page_map())
         set_word(heap_low(cb), at)
     }
     if at < word(heap_low(cb)) { set_word(heap_low(cb), at) }
     if at + len > word(heap_high(cb)) { set_word(heap_high(cb), at + len) }
-}
-
-# Point the page map entry of every page of [at, at + len) at `owner`, or 0 for none.
-fn set_pages(cb: int, at: int, len: int, owner: int) {
-    entry := word(page_map(cb)) + (at >> 14) * 8
-    end := entry + (len >> 14) * 8
-    while entry < end {
-        set_word(entry, owner)
-        entry += 8
-    }
 }
 
 # One collection. `fp` is the frame record of the entry the program called, so the walk
@@ -326,7 +414,7 @@ fn collect_from(cb: int, fp: int) {
 fn mark_word(w: int) {
     cb := control_block()
     if w < word(heap_low(cb)) || w >= word(heap_high(cb)) { return }
-    span := word(word(page_map(cb)) + (w >> 14) * 8)
+    span := page_owner(word(page_map(cb)), w)
     if span == 0 { return }
     obj := word(span_cells(span))
     size := word(span_cell_size(span))
@@ -613,7 +701,7 @@ fn sweep_large(cb: int) -> int {
             link = obj
         } else {
             set_word(link, next)
-            set_pages(cb, obj, word(large_len(obj)), 0)
+            set_pages(word(page_map(cb)), obj, word(large_len(obj)), 0)
             unsafe { munmap(obj, word(large_len(obj))) }
         }
         obj = next
@@ -685,7 +773,7 @@ fn first_cell(kind: int) -> int {
 fn table_end() -> int { return 3488 }
 
 fn layout_slot(cell: int) -> int {
-    off := cell & 16383
+    off := cell & span_mask()
     return cell - off + (off >> 2) + (256 - (table_end() >> 2))
 }
 
