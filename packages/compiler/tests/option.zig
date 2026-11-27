@@ -12,7 +12,7 @@ test "option: Option.map over a str payload survives forced collections" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     // Every callback forces a collection while the method holds the only reference to a
     // fresh str (its payload or its result), so a missed root shows up as a wrong str.
     // 10 * 3 + 10 * 4 = 70.
@@ -66,7 +66,7 @@ test "option: two Option.map instances on one payload type run their own code" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     // One receiver type, three `U`s: each call must seal to its own instance row. Without
     // specialization the generic instances themselves run, so a call sealed to the wrong
     // row would hand back the wrong payload type.
@@ -111,7 +111,7 @@ test "option: Option and Result methods are byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     // std/vec brings the unit count past the 64 at which Pass C and codegen fan out.
     const src =
         \\import std/option
@@ -144,7 +144,7 @@ test "option: a then lambda's constructors take their type args from its expecte
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     // No annotation anywhere: `Option.none` is checked before the `Option.some` that fixes
     // `U`, and `Result.ok` takes `E` from the receiver. 1 + 2 + 4 + 8 + 16 = 31.
     const codes = try harness.exitAtBothLevels(gpa, io, ".toy-test-option-then-infer",

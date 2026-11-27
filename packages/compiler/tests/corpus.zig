@@ -49,6 +49,10 @@
 //! fixture whose output counts collections, or that allocates too much to collect on
 //! every allocation, opts out with `# gc-stress: skip`.
 //!
+//! `TOY_TEST_TARGET` and `TOY_TEST_RUNNER` (see `runner.zig`) pick what the fixtures are
+//! built for and where they run, e.g. `TOY_TEST_RUNNER=docker:linux/arm64` with
+//! `TOY_TEST_TARGET=aarch64-linux`.
+//!
 //! This file is its own test binary, `toy-corpus-test`. Run it under `zig build test`,
 //! or `zig build test-bin` then `./zig-out/bin/toy-corpus-test`. `TOY_CORPUS=<substr>`
 //! runs only the fixtures whose path contains it:
@@ -75,10 +79,13 @@ const Profile = toyc.Profile;
 
 const testing = std.testing;
 
-/// Codegen+exec only runs where the back-end can emit and the kernel can exec what
-/// it emits (the signed Mach-O path). Off this target the front-end still runs, so a
-/// clean fixture is counted as covered but its binary is not built.
-const can_exec = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
+const runner = @import("runner.zig");
+
+/// The test target and runner (`TOY_TEST_TARGET`, `TOY_TEST_RUNNER`), read once before
+/// the workers start. Codegen and exec run only where toy emits the target and the runner
+/// runs it; elsewhere the front-end still runs, so a clean fixture is counted as covered
+/// but its binary is not built.
+var run_cfg: runner.Config = undefined;
 
 /// One parsed `#~ ERROR|WARN [CODE] <substr>` annotation. `line` is 1-based (the line
 /// the comment sits on). `matched` is flipped true when a diagnostic satisfies it.
@@ -213,16 +220,21 @@ fn collectDiags(
         var res = try ResolveGraph.resolveGraph(gpa, &graph);
         defer res.deinit(gpa);
         try push.go(res.diags);
+        // As in `toy check`, a target whose libraries toy cannot read yet has no resolver,
+        // and its library checks wait for the build.
+        const resolver = toyc.LibResolver.of(Driver.default_target);
         if (countErr(res.diags) == 0) {
             var tc = try TypecheckGraph.checkGraph(gpa, &graph, &res, io, 0);
             defer tc.deinit(gpa);
             try push.go(tc.diags);
-            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, toyc.LibResolver.of(Driver.default_target).?);
-            defer libs.deinit();
-            try push.go(libs.diags);
-            if (countErr(tc.diags) == 0) try push.go(try libs.unexportedCalls(io, &graph, &tc));
-        } else {
-            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, toyc.LibResolver.of(Driver.default_target).?);
+            if (resolver) |r| {
+                var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, r);
+                defer libs.deinit();
+                try push.go(libs.diags);
+                if (countErr(tc.diags) == 0) try push.go(try libs.unexportedCalls(io, &graph, &tc));
+            }
+        } else if (resolver) |r| {
+            var libs = try toyc.Libraries.collect(gpa, io, &graph, .{}, r);
             defer libs.deinit();
             try push.go(libs.diags);
         }
@@ -366,10 +378,24 @@ fn checkFixture(
         return try std.fmt.allocPrint(gpa, "{s}: fixture has no #~ ERROR or #~ WARN annotations", .{path});
     }
 
+    if (toyc.LibResolver.of(Driver.default_target) == null) for (anns.items) |a| {
+        if (libraryCode(a.code)) {
+            std.debug.print("corpus: {s} skipped: its {s} needs a reader of {s} libraries\n", .{ path, a.code, Driver.default_target.name() });
+            return null;
+        }
+    };
+
     var emitted = try collectDiags(gpa, io, cache, path);
     defer freeEmitted(gpa, &emitted);
 
     return matchExhaustive(gpa, path, anns.items, emitted.items);
+}
+
+/// A code only the library checks report, which wait for the build on a target with no
+/// library reader.
+fn libraryCode(code: []const u8) bool {
+    const c = toyc.diagnostics.codes.fromStr(code) orelse return false;
+    return std.mem.indexOfScalar(toyc.diagnostics.codes.Code, &toyc.Libraries.library_codes, c) != null;
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +707,8 @@ fn compileAndRun(
         errdefer gpa.free(joined);
         try include.append(gpa, joined);
     }
-    var graph = try Graph.discover(gpa, io, cache, Driver.default_target, entry, .{ .roots = .{ .include = include.items }, .allow_core_imports = e.dev_core_imports, .profile = profile.name });
+    const target = run_cfg.target;
+    var graph = try Graph.discover(gpa, io, cache, target, entry, .{ .roots = .{ .include = include.items }, .allow_core_imports = e.dev_core_imports, .profile = profile.name });
     defer graph.deinit(gpa);
     if (graph.err) |err| {
         try checkGraphSpans(gpa, &graph, err.parse_diags);
@@ -713,15 +740,17 @@ fn compileAndRun(
         errdefer gpa.free(dir);
         try libdirs.append(gpa, dir);
     }
-    var libs = try toyc.Libraries.collect(gpa, io, &graph, .{ .dirs = libdirs.items }, toyc.LibResolver.of(Driver.default_target).?);
+    // No resolver reads the target's libraries yet (ELF's is #435): nothing can link.
+    const resolver = toyc.LibResolver.of(target) orelse return .skipped_exec;
+    var libs = try toyc.Libraries.collect(gpa, io, &graph, .{ .dirs = libdirs.items }, resolver);
     defer libs.deinit();
     if (libs.diags.len > 0) return .{ .compile_error = try renderDiags(gpa, libs.diags) };
     const unexported = try libs.unexportedCalls(io, &graph, &tc);
     if (unexported.len > 0) return .{ .compile_error = try renderDiags(gpa, unexported) };
 
-    if (!can_exec) return .skipped_exec;
+    if (run_cfg.skipReason() != null) return .skipped_exec;
 
-    var lowered = try DriverCodegen.lowerGraphProgram(gpa, io, cache, Driver.default_target, &graph, &res, &tc, .verify, profile, true, null, null, 0);
+    var lowered = try DriverCodegen.lowerGraphProgram(gpa, io, cache, target, &graph, &res, &tc, .verify, profile, true, null, null, 0);
     const lp = switch (lowered) {
         .ok => |*ok| ok,
         // A codegen `EmitError` after a clean typecheck is a real back-end failure,
@@ -732,7 +761,7 @@ fn compileAndRun(
     defer lp.deinit(gpa);
     if (lp.diags.len > 0) return .{ .compile_error = try std.fmt.allocPrint(gpa, "codegen diagnostics ({d})\n", .{lp.diags.len}) };
 
-    const image = try DriverCodegen.buildImage(io, gpa, Driver.default_target, out_name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, libs.linking, lp.debug);
+    const image = try DriverCodegen.buildImage(io, gpa, target, out_name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, libs.linking, lp.debug);
     defer gpa.free(image);
     {
         const perms: Io.File.Permissions = .fromMode(0o755);
@@ -743,13 +772,15 @@ fn compileAndRun(
     }
     const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_name, gpa);
     defer gpa.free(abs);
-    {
-        var cs = try std.process.spawn(io, .{ .argv = &.{ "codesign", "-v", abs } });
+    // The system verifier, where there is one, names a signing regression before the
+    // kernel refuses the exec.
+    if (target.objectFormat() == .macho and builtin.os.tag == .macos) {
+        var cs = try std.process.spawn(io, .{ .argv = &.{ "codesign", "-v", abs }, .stderr = .ignore });
         if ((exitCode(try cs.wait(io)) orelse 1) != 0) {
             return .{ .compile_error = try std.fmt.allocPrint(gpa, "codesign rejected {s}\n", .{out_name}) };
         }
     }
-    return .{ .ran = try runBinary(gpa, io, abs, e, cwd) };
+    return .{ .ran = try runBinary(gpa, io, run_cfg.runner, abs, e, cwd) };
 }
 
 /// The absolute path of `dir`, relative to the folder of the fixture `entry`.
@@ -759,13 +790,13 @@ fn relDir(gpa: std.mem.Allocator, io: Io, entry: []const u8, dir: []const u8) ![
     return Io.Dir.cwd().realPathFileAlloc(io, joined, gpa);
 }
 
-/// Run `abs` with `e`'s args, stdin and environment, in `cwd`, capturing both output
-/// streams. Every stdio fd is piped: under `zig build test` the test binary's stdin and
-/// stderr are the build runner's `--listen=-` protocol stream, so a child that read
+/// Run `abs` through `r` with `e`'s args, stdin and environment, in `cwd`, capturing both
+/// output streams. Every stdio fd is piped: under `zig build test` the test binary's stdin
+/// and stderr are the build runner's `--listen=-` protocol stream, so a child that read
 /// the inherited stdin would eat protocol bytes, and one that wrote a backtrace to the
 /// inherited stderr would corrupt it. The environment starts empty so a fixture cannot
 /// pass or fail on whatever the developer's shell exports.
-fn runBinary(gpa: std.mem.Allocator, io: Io, abs: []const u8, e: *const Expect, cwd: []const u8) !Ran {
+fn runBinary(gpa: std.mem.Allocator, io: Io, r: runner.Runner, abs: []const u8, e: *const Expect, cwd: []const u8) !Ran {
     const argv = try gpa.alloc([]const u8, 1 + e.args.items.len);
     defer gpa.free(argv);
     argv[0] = abs;
@@ -778,33 +809,17 @@ fn runBinary(gpa: std.mem.Allocator, io: Io, abs: []const u8, e: *const Expect, 
         try env.put(kv[0..eq], kv[eq + 1 ..]);
     }
 
-    var child = try std.process.spawn(io, .{
+    const cwd_abs = try Io.Dir.cwd().realPathFileAlloc(io, cwd, gpa);
+    defer gpa.free(cwd_abs);
+    const res = try runner.run(r, gpa, io, .{
         .argv = argv,
-        .cwd = .{ .path = cwd },
+        .cwd = cwd_abs,
         .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
+        .stdin = e.stdin.items,
+        .stdout_limit = .limited(1 << 16),
+        .stderr_limit = .limited(1 << 16),
     });
-    errdefer child.kill(io);
-    // The fixtures' stdin is far below a pipe buffer, so writing it all before reading
-    // any output cannot deadlock. A child that exits without reading it closes the pipe
-    // first; that is the child's business, not a harness failure.
-    child.stdin.?.writeStreamingAll(io, e.stdin.items) catch |err| switch (err) {
-        error.BrokenPipe => {},
-        else => return err,
-    };
-    child.stdin.?.close(io);
-    child.stdin = null;
-
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(got);
-    var errr = child.stderr.?.readerStreaming(io, &.{});
-    const err_bytes = try errr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(err_bytes);
-    const term = try child.wait(io);
-    return .{ .term = term, .stdout = got, .stderr = err_bytes };
+    return .{ .term = res.term, .stdout = res.stdout, .stderr = res.stderr };
 }
 
 /// The exit code of a finished child, or `null` for a signal death (a bounds/panic
@@ -1028,6 +1043,8 @@ fn runCorpus(gpa: std.mem.Allocator) !void {
     var picked: std.ArrayList(Fixture) = .empty;
     defer picked.deinit(gpa);
     stress = if (testing.environ.getPosix("TOY_GC_STRESS")) |v| v.len != 0 else false;
+    run_cfg = try runner.Config.fromEnv(testing.environ, std.process.Environ.getPosix);
+    if (run_cfg.skipReason()) |why| runner.note(io, "corpus: fixtures are checked, not built or run: {s}\n", .{why});
     if (stress) std.debug.print("corpus: GC stress mode (--gc-stress at -O0 and -O1)\n", .{});
     const filter: ?[]const u8 = if (testing.environ.getPosix("TOY_CORPUS")) |sub| (if (sub.len == 0) null else sub) else null;
     for (all.items) |f| {
@@ -1337,7 +1354,6 @@ test "expect harness: judge matches stderr by substring" {
 }
 
 test "expect harness: runBinary pipes stdin, passes args, empties env, and sets cwd" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -1365,7 +1381,7 @@ test "expect harness: runBinary pipes stdin, passes args, empties env, and sets 
     sh_e.stdin = e.stdin;
     sh_e.env = e.env;
 
-    const r = try runBinary(gpa, io, "/bin/sh", &sh_e, cwd);
+    const r = try runBinary(gpa, io, .native, "/bin/sh", &sh_e, cwd);
     defer r.deinit(gpa);
     try testing.expectEqual(@as(?u8, 3), exitCode(r.term));
     try testing.expectEqualStrings("in\n2|a|b c|V|unset|marker\n", r.stdout);
@@ -1375,7 +1391,7 @@ test "expect harness: runBinary pipes stdin, passes args, empties env, and sets 
     var empty: Expect = .{};
     defer empty.args.deinit(gpa);
     try empty.args.appendSlice(gpa, &.{ "-c", "cat; echo done" });
-    const r2 = try runBinary(gpa, io, "/bin/sh", &empty, cwd);
+    const r2 = try runBinary(gpa, io, .native, "/bin/sh", &empty, cwd);
     defer r2.deinit(gpa);
     try testing.expectEqualStrings("done\n", r2.stdout);
 }

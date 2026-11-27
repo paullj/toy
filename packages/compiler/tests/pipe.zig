@@ -14,13 +14,13 @@ const harness = @import("harness.zig");
 const cases_dir = "tests/corpora/language-features/pipe";
 const twins_dir = "packages/compiler/tests/pipe_twins";
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 test "pipe: every pipe run case compiles to the same code as its hand-desugared twin" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     try harness.expectTwins(gpa, io, .{ .cases_dir = cases_dir, .twins_dir = twins_dir, .tmp = ".toy-test-pipe-twins" });
 }

@@ -8,7 +8,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -21,7 +21,7 @@ test "math: integer helpers min/max/clamp/sign/pow/abs" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // 3 + 7 + 3 + 32 + 4 == 49, then + sign(-2)+sign(0)+sign(9) == 49 + 0 == 49.
     const code = try buildAndRun(gpa, io, ".toy-test-math-int",
         \\import std/math
@@ -39,7 +39,7 @@ test "math: libm sqrt over the float extern (16.0 -> 4)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // The f64 arg rides a V-register into libSystem `sqrt`; the f64 result rides back and
     // truncates to 4. Proves float marshals correctly across the extern boundary.
     const code = try buildAndRun(gpa, io, ".toy-test-math-sqrt",
@@ -57,7 +57,7 @@ test "math: libm floor/ceil round toward -inf/+inf" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // floor(3.7)=3, ceil(3.2)=4 -> 3 + 4 == 7.
     const code = try buildAndRun(gpa, io, ".toy-test-math-floorceil",
         \\import std/math

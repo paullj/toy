@@ -9,7 +9,6 @@
 //! symbol names below alias the driver's published surface so the moved test bodies
 //! stay byte-verbatim.
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const toyc = @import("toy_compiler");
 const harness = @import("harness.zig");
@@ -348,7 +347,6 @@ test "`toy check` on a many-error file caps output at DIAG_CAP primaries + a sum
     // `toy check` subcommand. DIAG_CAP = 100
     // primary `-->` carets are drawn, then one `... and N more` line; the summary count
     // is total - 100.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -397,7 +395,6 @@ test "a pre-verb CLI error is reported once, not doubled by the subcommand re-pa
     // `toy <bad-root-option> build <file>` parses argv twice — the root pass, then the
     // matched subcommand — into one shared error sink; without resetting the sink
     // between passes the same error rendered twice. Assert a single occurrence.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -611,12 +608,9 @@ test "coded render: a parse error renders `error[P0002]:` and stays report-once 
 /// then drives `check` over the entry.
 fn spawnToy(gpa: std.mem.Allocator, io: Io, argv_tail: []const []const u8) !struct { out: []u8, term: std.process.Child.Term } {
     try harness.requireToy(io);
-    const bin_abs = harness.toy_exe;
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    for (argv_tail) |a| try argv.append(gpa, a);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe });
+    const argv = try harness.toyArgv(gpa, argv_tail);
+    defer gpa.free(argv);
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .pipe });
     var rdr = child.stdout.?.readerStreaming(io, &.{});
     const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
     const term = try child.wait(io);
@@ -632,13 +626,12 @@ test "check follows imports: a VALID multi-module program reports zero diagnosti
     // asserts (a) check + build AGREE on a valid two-module program (both exit 0, zero
     // diagnostics) and (b) a real error in the IMPORTED module is reported against THAT
     // module and exits 1 (matching build).
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-check-multimod";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -691,13 +684,12 @@ test "check follows imports: a VALID multi-module program reports zero diagnosti
 }
 
 test "a diagnostic in any user module names its file, not its module, in check and build (#88)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     // The cwd (the repo root) is not the entry's dir, and one import sits in a subdirectory.
     const dir_name = ".toy-test-driver-diag-file-paths";
@@ -767,13 +759,12 @@ test "a diagnostic in any user module names its file, not its module, in check a
 }
 
 test "io.print(char) emits byte-exact UTF-8 for 1/2/3/4-byte codepoints (no extra bytes)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-m10-charutf8";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -789,12 +780,8 @@ test "io.print(char) emits byte-exact UTF-8 for 1/2/3/4-byte codepoints (no extr
 
     const bin_abs = try Io.Dir.cwd().realPathFileAlloc(io, out_bin, gpa);
     defer gpa.free(bin_abs);
-    var child = try std.process.spawn(io, .{ .argv = &.{bin_abs}, .stdout = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    const got = try harness.runStdout(gpa, io, bin_abs);
     defer gpa.free(got);
-    const term = try child.wait(io);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
     // A(41) ñ(C3 B1) €(E2 82 AC) 😀(F0 9F 98 80) = EXACTLY 10 bytes, no trailing newline.
     try testing.expectEqualSlices(u8, "\x41\xC3\xB1\xE2\x82\xAC\xF0\x9F\x98\x80", got);
 }
@@ -804,13 +791,12 @@ test "io.print(int) renders decimal for 0 / negative / i64 max / i64 MIN (never-
     // instruction SHAPE: __int_to_str's i64::MIN-safe digit loop (it must NOT negate the
     // running value) and the str write. i64::MIN is the critical case — negating it
     // overflows. Asserts exact stdout bytes.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-display-int-edges";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -842,23 +828,18 @@ test "io.print(int) renders decimal for 0 / negative / i64 max / i64 MIN (never-
 
     const bin_abs = try Io.Dir.cwd().realPathFileAlloc(io, out_bin, gpa);
     defer gpa.free(bin_abs);
-    var child = try std.process.spawn(io, .{ .argv = &.{bin_abs}, .stdout = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    const got = try harness.runStdout(gpa, io, bin_abs);
     defer gpa.free(got);
-    const term = try child.wait(io);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
     try testing.expectEqualSlices(u8, "0\n-1\n9223372036854775807\n-9223372036854775808\n", got);
 }
 
 test "char Display is a shared witness — >6 boundary codepoints compile + byte-exact UTF-8" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-c4-charbands";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -891,12 +872,8 @@ test "char Display is a shared witness — >6 boundary codepoints compile + byte
 
     const bin_abs = try Io.Dir.cwd().realPathFileAlloc(io, out_bin, gpa);
     defer gpa.free(bin_abs);
-    var child = try std.process.spawn(io, .{ .argv = &.{bin_abs}, .stdout = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
+    const got = try harness.runStdout(gpa, io, bin_abs);
     defer gpa.free(got);
-    const term = try child.wait(io);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
     // 7F | C2 80 | DF BF | E0 A0 80 | EF BF BF | F0 90 80 80 | F4 8F BF BF  = 19 bytes exactly.
     try testing.expectEqualSlices(u8, "\x7F\xC2\x80\xDF\xBF\xE0\xA0\x80\xEF\xBF\xBF\xF0\x90\x80\x80\xF4\x8F\xBF\xBF", got);
 }
@@ -907,11 +884,11 @@ test "int->char try_into is a shared witness — 12 in one fn compile (pre-fix f
     // the shared `TryInto$int_to_char` witness (O(1)/site), so the fn compiles. Each result
     // is consumed via a char-typed match (pins int->char) then char->int `.into()`; the sum
     // of codepoints 65..76 is 846, so a correct run exits 42.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c4-icframe";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -960,11 +937,11 @@ test "char->byte try_into is a shared witness — 22 in one fn compile (pre-fix 
     // (b0, b21) exit non-42 on any miscompile, else 42.
     // 22 is the smallest count that cleared the pre-fix ~21-site overflow; it pins that each
     // site stays one call to the witness.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c4-cbframe";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1006,11 +983,11 @@ test "char->byte try_into is a shared witness — 22 in one fn compile (pre-fix 
 test "int->char witness — surrogate/range boundaries are byte-exact through the CALL" {
     // The witness's `validScalarValue` predicate must reproduce the inline verdicts exactly:
     // valid scalars Ok (their codepoint), surrogates + >0x10FFFF Err (the '?'=63 sentinel).
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c4-icbounds";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1037,11 +1014,11 @@ test "int->char witness — surrogate/range boundaries are byte-exact through th
 }
 
 test "char->byte witness — 0xFF fits, 0x100 does not (byte-exact through the CALL)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c4-cbbounds";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1062,11 +1039,11 @@ test "char->byte witness — 0xFF fits, 0x100 does not (byte-exact through the C
 test "a uint-source int->char passes the raw value to the witness (no-widen arg path)" {
     // Locks that the call site hands the witness the receiver value RAW (no width coercion):
     // a `uint`-typed source converts to the correct char just like an `int` source.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c4-icnonint";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1091,11 +1068,11 @@ test "float->int try_into is a shared witness — 12 in one fn compile (pre-fix 
     // 12 float->int `try_into` in ONE fn — >10; the pre-fix inline would overflow the imm12
     // frame cap. Each is now one CALL to the shared `TryInto$float_to_int` witness (O(1)/site),
     // so the fn compiles. The 12 floats 0.0..11.0 all convert; the sum is 66, so a correct run exits 42.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c5-fiframe";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1130,11 +1107,11 @@ test "float->int witness — NaN/+-inf/out-of-range Err, 2^63 boundary is byte-e
     // |f|>=2^63 -> Err (or(-1) sentinel); the largest f64 < 2^63 -> Ok. The exactly-
     // representable 2^63 is the silent-saturation gate: fcvtzs alone would saturate it to
     // i64_max, but the strict `< 2^63` guard makes it Err.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-c5-fibounds";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1163,11 +1140,11 @@ test "float->int witness — NaN/+-inf/out-of-range Err, 2^63 boundary is byte-e
 test "an Option[int] find/match program compiles + runs; exit is the unwrapped payload" {
     // The prelude `Option[T]` is nameable with no import; `Option[int]` reifies to a
     // plain concrete enum through the reification path, so this compiles + runs on the real backend.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-m23-option";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1186,11 +1163,11 @@ test "an Option[int] find/match program compiles + runs; exit is the unwrapped p
 }
 
 test "a Result[int,str] construct+match program compiles + runs; exit is the ok payload" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-m23-result";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1460,11 +1437,11 @@ test "match: an out-of-range literal pattern on a narrow-int scrutinee reports T
 }
 
 test "an Option is_some/or program compiles + runs; exit is the guarded payload" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-m23-option-methods";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1482,11 +1459,11 @@ test "an Option is_some/or program compiles + runs; exit is the guarded payload"
 }
 
 test "a Result is_ok/or program compiles + runs; exit is the ok payload" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-m23-result-methods";
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     const src =
@@ -1541,12 +1518,11 @@ const run_args_fixture =
 ;
 
 test "run passes the words after -- to the program, and rejects a second word without it" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessHostRun(io);
 
     const dir_name = ".toy-test-driver-run-args";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -1577,12 +1553,11 @@ test "run passes the words after -- to the program, and rejects a second word wi
 }
 
 test "build -o into a missing directory or onto a directory is one error line, not a trace (#119)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessHostRun(io);
 
     const dir_name = ".toy-test-driver-out-missing-dir";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -1611,12 +1586,11 @@ test "build -o into a missing directory or onto a directory is one error line, n
 }
 
 test "a missing entry file exits 2 and a missing import exits 1 on build, run and check (#130)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessHostRun(io);
 
     const dir_name = ".toy-test-driver-missing-entry";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -1654,12 +1628,9 @@ fn runToyOnFixture(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, src: []
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/one.toy", .{dir_name});
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
-    const bin_abs = harness.toy_exe;
-
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    for (args) |a| try argv.append(gpa, a);
+    try argv.appendSlice(gpa, args);
     // Without `-o` every fixture's binary lands at the one shared `.toy/<stamp>/debug/one`,
     // and macOS can SIGKILL a binary rebuilt at a path it has already run (#245).
     var out_buf: [256]u8 = undefined;
@@ -1668,8 +1639,11 @@ fn runToyOnFixture(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, src: []
         try argv.append(gpa, try std.fmt.bufPrint(&out_buf, "{s}/prog", .{dir_name}));
     }
     try argv.append(gpa, path);
+    try harness.skipUnlessToyCan(io, argv.items);
+    const full = try harness.toyArgv(gpa, argv.items);
+    defer gpa.free(full);
 
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe, .stderr = .ignore });
+    var child = try std.process.spawn(io, .{ .argv = full, .stdout = .pipe, .stderr = .ignore });
     var rdr = child.stdout.?.readerStreaming(io, &.{});
     const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
     const term = try child.wait(io);
@@ -3414,12 +3388,12 @@ test "a syntax-error file is tainted, reported, and never reaches check/codegen"
 // can we exec what we produced. Proves the whole back-end (Codegen + MachO +
 // CodeSign) yields a binary the kernel accepts and runs.
 test "integration: emitted binary runs with the right exit code" {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
+    const target = (try harness.config()).target;
 
     // Unique per-process scratch dir. `zig build` runs the two test executables
     // (module + exe) in parallel and BOTH include this test, so a fixed dir name
@@ -3877,11 +3851,11 @@ test "integration: emitted binary runs with the right exit code" {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = c.src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, i);
+        try pipeline(gpa, io, cache, .check, target, &r, i);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .normal, if (c.wraps) .{ .name = .release, .opt = .O0 } else .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, target, &r, .normal, if (c.wraps) .{ .name = .release, .opt = .O0 } else .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3889,7 +3863,7 @@ test "integration: emitted binary runs with the right exit code" {
         defer lp.deinit(gpa);
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
 
-        const image = try buildImage(io, gpa, .aarch64_macos, c.name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, target, c.name, lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
 
         const out_path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_name, c.name }) catch unreachable;
@@ -3908,26 +3882,23 @@ test "integration: emitted binary runs with the right exit code" {
         // mysterious spawn error.
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
         defer gpa.free(abs);
-        {
-            var cs = try std.process.spawn(io, .{ .argv = &.{ "codesign", "-v", abs } });
-            const cs_term = try cs.wait(io);
-            try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs_term);
-        }
+        if (target.objectFormat() == .macho) if (try harness.runTool(gpa, io, null, &.{ "codesign", "-v", abs })) |cs| {
+            defer cs.deinit(gpa);
+            try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, cs.term);
+        };
 
         // Spawn the executable by absolute path and check its exit code.
-        var child = try std.process.spawn(io, .{ .argv = &.{abs} });
-        const term = try child.wait(io);
-        try testing.expectEqual(std.process.Child.Term{ .exited = c.expect }, term);
+        try testing.expectEqual(c.expect, try harness.runExit(gpa, io, abs));
     }
 }
 
 test "integration: monomorphized generic instances get distinct symbols, run to exit 42, and cost zero units when uncalled" {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
+    const target = (try harness.config()).target;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3951,7 +3922,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
+        try pipeline(gpa, io, cache, .check, target, &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
@@ -3963,7 +3934,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expect(!std.mem.eql(u8, insts[0].name.?, insts[1].name.?));
 
         // Force a fresh lowering: main + 2 instances = exactly 3 codegen units.
-        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, target, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -3972,7 +3943,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
         try testing.expectEqual(@as(usize, 3), lp.codegen_compiled);
 
-        const image = try buildImage(io, gpa, .aarch64_macos, "idexp", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, target, "idexp", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
         const out_path = std.fmt.allocPrint(gpa, "{s}/idexp", .{dir_name}) catch unreachable;
         defer gpa.free(out_path);
@@ -3985,9 +3956,7 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         }
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
         defer gpa.free(abs);
-        var child = try std.process.spawn(io, .{ .argv = &.{abs} });
-        const term = try child.wait(io);
-        try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, term);
+        try testing.expectEqual(@as(u8, 42), try harness.runExit(gpa, io, abs));
     }
 
     // Case B: an UNCALLED generic fn mints zero instances and emits zero extra units
@@ -3999,12 +3968,12 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 1);
+        try pipeline(gpa, io, cache, .check, target, &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.instances.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, target, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -4016,12 +3985,12 @@ test "integration: monomorphized generic instances get distinct symbols, run to 
 }
 
 test "integration: a derived-Eq struct runs to exit 42, mints one source-less unit, and costs zero when uncalled" {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
+    const target = (try harness.config()).target;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4044,7 +4013,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 0);
+        try pipeline(gpa, io, cache, .check, target, &r, 0);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
 
@@ -4053,7 +4022,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expectEqual(@as(usize, 1), derives.len);
         try testing.expectEqualStrings("Eq$eq$s0", derives[0].name.?);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, target, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -4062,7 +4031,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try testing.expectEqual(@as(usize, 0), lp.diags.len);
         try testing.expectEqual(@as(usize, 2), lp.codegen_compiled); // main + Eq$eq$s0
 
-        const image = try buildImage(io, gpa, .aarch64_macos, "deq", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
+        const image = try buildImage(io, gpa, target, "deq", lp.text, lp.entry_off, lp.cstrings, lp.data_relocs, .{}, lp.debug);
         defer gpa.free(image);
         const out_path = std.fmt.allocPrint(gpa, "{s}/deq", .{dir_name}) catch unreachable;
         defer gpa.free(out_path);
@@ -4075,9 +4044,7 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         }
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
         defer gpa.free(abs);
-        var child = try std.process.spawn(io, .{ .argv = &.{abs} });
-        const term = try child.wait(io);
-        try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, term);
+        try testing.expectEqual(@as(u8, 42), try harness.runExit(gpa, io, abs));
     }
 
     // Case B: a derivable struct never compared with `==` mints ZERO derive units
@@ -4089,12 +4056,12 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = src });
 
         var r: FileResult = .{ .path = src_path };
-        try pipeline(gpa, io, cache, .check, .aarch64_macos, &r, 1);
+        try pipeline(gpa, io, cache, .check, target, &r, 1);
         defer r.deinit(gpa);
         try testing.expect(r.err == null);
         try testing.expectEqual(@as(usize, 0), r.typecheck.?.derives.len);
 
-        var lowered = try lowerSingleFile(gpa, io, cache, .aarch64_macos, &r, .force, .debug);
+        var lowered = try lowerSingleFile(gpa, io, cache, target, &r, .force, .debug);
         const lp = switch (lowered) {
             .ok => |*ok| ok,
             .err => return error.TestUnexpectedResult,
@@ -4105,12 +4072,11 @@ test "integration: a derived-Eq struct runs to exit 42, mints one source-less un
 }
 
 test "integration: print writes the expected bytes to stdout" {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4150,13 +4116,8 @@ test "integration: print writes the expected bytes to stdout" {
         const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
         defer gpa.free(abs);
 
-        // Spawn capturing stdout; read to EOF (child closes it on exit), then reap.
-        var child = try std.process.spawn(io, .{ .argv = &.{abs}, .stdout = .pipe });
-        var rdr = child.stdout.?.readerStreaming(io, &.{});
-        const got = try rdr.interface.allocRemaining(gpa, .limited(4096));
+        const got = try harness.runStdout(gpa, io, abs);
         defer gpa.free(got);
-        const term = try child.wait(io);
-        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
         try testing.expectEqualStrings(c.want, got);
     }
 }
@@ -5027,8 +4988,10 @@ test "reorder: swapping fn order is all cache hits and keeps correct linkage" {
     try testing.expectEqual(@as(usize, 0), lpb.codegen_compiled);
 
     // The reordered binary still links correctly (call resolves by name): build
-    // it and run it — must exit 7. (macOS/aarch64 only.)
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return;
+    // it and run it — must exit 7. The cache under test lowered for aarch64-macos, so only
+    // a runner of that target can.
+    const cfg = try harness.config();
+    if (cfg.skipReason() != null or !cfg.target.eql(.aarch64_macos)) return;
     const image = try buildImage(io, gpa, .aarch64_macos, "p", lpb.text, lpb.entry_off, lpb.cstrings, lpb.data_relocs, .{}, lpb.debug);
     defer gpa.free(image);
     const out_path = std.fmt.allocPrint(gpa, "{s}/p", .{src_dir}) catch unreachable;
@@ -5042,9 +5005,7 @@ test "reorder: swapping fn order is all cache hits and keeps correct linkage" {
     }
     const abs = try Io.Dir.cwd().realPathFileAlloc(io, out_path, gpa);
     defer gpa.free(abs);
-    var child = try std.process.spawn(io, .{ .argv = &.{abs} });
-    const term = try child.wait(io);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 7 }, term);
+    try testing.expectEqual(@as(u8, 7), try harness.runExit(gpa, io, abs));
 }
 
 test "cross-serializer parity: every int-aware identity serializer folds int_desc in lockstep" {
@@ -5156,7 +5117,7 @@ test "a lowering diagnostic reaches the build result with its text and span" {
     var ck = try checkWithBlankedMethods(gpa, io, dir_name, lower_diag_src, &blankAll);
     defer ck.r.deinit(gpa);
 
-    var out = try lowerCheckedModule(gpa, io, ck.cache, Driver.default_target, &ck.r, .force, .debug);
+    var out = try lowerCheckedModule(gpa, io, ck.cache, .aarch64_macos, &ck.r, .force, .debug);
     defer if (out == .ok) out.ok.deinit(gpa);
     try testing.expect(out == .err);
     try testing.expectEqualStrings("call target unsupported in lower", out.err.message);
@@ -5218,7 +5179,7 @@ test "the first failing unit in index order is reported at every -j" {
     var graph = try Graph.single(gpa, "main", ck.r.path, ck.r.source, ck.r.tokens, ck.r.nodes, ck.r.extra, ck.r.pub_bits);
     defer graph.deinit(gpa);
     for ([_]usize{ 1, 8 }) |ncpu| {
-        var out = try lowerGraphProgram(gpa, io, ck.cache, Driver.default_target, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .force, .debug, true, null, null, ncpu);
+        var out = try lowerGraphProgram(gpa, io, ck.cache, .aarch64_macos, &graph, &ck.r.resolve.?, &ck.r.typecheck.?, .force, .debug, true, null, null, ncpu);
         defer if (out == .ok) out.ok.deinit(gpa);
         try testing.expect(out == .err);
         const at = out.err.span.?.start;
@@ -5229,12 +5190,9 @@ test "the first failing unit in index order is reported at every -j" {
 /// `spawnToy` with stderr captured too, where an uncaught error's name lands.
 fn spawnToyBoth(gpa: std.mem.Allocator, io: Io, argv_tail: []const []const u8) !struct { out: []u8, err: []u8, term: std.process.Child.Term } {
     try harness.requireToy(io);
-    const bin_abs = harness.toy_exe;
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    for (argv_tail) |a| try argv.append(gpa, a);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe, .stderr = .pipe });
+    const argv = try harness.toyArgv(gpa, argv_tail);
+    defer gpa.free(argv);
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .pipe });
     var rdr = child.stdout.?.readerStreaming(io, &.{});
     const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 20));
     errdefer gpa.free(out);
@@ -5245,11 +5203,11 @@ fn spawnToyBoth(gpa: std.mem.Allocator, io: Io, argv_tail: []const []const u8) !
 }
 
 test "a type too large for any frame is T0077 at build, not a codegen panic (#51)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-type-too-large";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5308,11 +5266,11 @@ fn writeFrameTooLarge(w: *std.Io.Writer, name: []const u8) !void {
 }
 
 test "a codegen diagnostic is printed with its text" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-frame-diag";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5337,11 +5295,11 @@ test "a codegen diagnostic is printed with its text" {
 }
 
 test "a fn the program never reaches is not lowered, so its codegen diagnostic does not fail the build" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-frame-diag-unreached";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5363,7 +5321,6 @@ test "a fn the program never reaches is not lowered, so its codegen diagnostic d
 }
 
 test "`toy check --timings` prints the stages check runs (#66)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5410,7 +5367,6 @@ test "`toy check --timings` prints the stages check runs (#66)" {
 }
 
 test "a build-only flag on check is named as one, and each bad flag is reported once, on stderr (#66)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5447,7 +5403,6 @@ test "a build-only flag on check is named as one, and each bad flag is reported 
 }
 
 test "check takes -j, and every job count reports the same diagnostics (#104)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5481,7 +5436,6 @@ test "check takes -j, and every job count reports the same diagnostics (#104)" {
 }
 
 test "an unknown command or long flag suggests the near name, and every usage error exits 2 (#70)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5529,7 +5483,7 @@ test "mem2reg: a match arm ending in an if/else keeps the local it assigns at -O
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     // The arm's join has a unit param its `br`s leave off; mem2reg's param comes after it.
     try harness.expectStdoutAtBothLevels(gpa, io, ".toy-test-driver-mem2reg-unit-join",
         \\import std/io
@@ -5554,11 +5508,11 @@ test "mem2reg: a match arm ending in an if/else keeps the local it assigns at -O
 }
 
 test "every enum or range flag lists its valid values, on build, run and check (#70)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessHostRun(io);
 
     const dir_name = ".toy-test-driver-flag-values";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5722,7 +5676,7 @@ test "`native` and the host's triple share the codegen cache (#422)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessHostRun(io);
     const dir_name = ".toy-test-driver-native-cache";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     try Io.Dir.cwd().createDirPath(io, dir_name);
@@ -5731,9 +5685,11 @@ test "`native` and the host's triple share the codegen cache (#422)" {
     const cwd = try Io.Dir.cwd().realPathFileAlloc(io, dir_name, gpa);
     defer gpa.free(cwd);
     // A fresh cwd is a fresh `.toy` cache: the first build compiles every unit.
+    const host = try std.fmt.allocPrint(gpa, "--target={s}", .{harness.runner.Target.host.?.name()});
+    defer gpa.free(host);
     const builds = [_]struct { target: []const u8, out: []const u8, cold: bool }{
         .{ .target = "--target=native", .out = "a", .cold = true },
-        .{ .target = "--target=aarch64-macos", .out = "b", .cold = false },
+        .{ .target = host, .out = "b", .cold = false },
         .{ .target = "--target=native", .out = "c", .cold = false },
     };
     for (builds) |b| {
@@ -5746,11 +5702,11 @@ test "`native` and the host's triple share the codegen cache (#422)" {
 }
 
 test "severity flags list the bands and suggest a near code; explain ignores case and suggests (#70)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-sev-bands";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5810,12 +5766,11 @@ test "severity flags list the bands and suggest a near code; explain ignores cas
 }
 
 test "a word near a command that names an existing file still builds (#70)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir_name = ".toy-test-driver-near-name-files";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};

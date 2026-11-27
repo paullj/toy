@@ -11,7 +11,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const harness = @import("harness.zig");
 
-const skipUnlessBackend = harness.skipUnlessBackend;
+const skipUnlessRunnable = harness.skipUnlessRunnable;
 
 const compile = harness.compile;
 
@@ -22,7 +22,7 @@ test "ref: two independent Ref.new(41) boxes compare UNEQUAL (cell identity, not
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // Returns 1 iff the two distinct cells are unequal AND a handle equals itself.
     const code = try buildAndRun(gpa, io, ".toy-test-ref-identity",
         \\import std/ref
@@ -41,7 +41,7 @@ test "ref: Option[Ref[int]] expect-some yields the boxed value; absence takes th
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     const code = try buildAndRun(gpa, io, ".toy-test-ref-option",
         \\import std/ref
         \\fn pick(present: bool) -> Option[Ref[int]] {
@@ -65,7 +65,7 @@ test "ref: a program building Ref[int] AND Ref[bool] is byte-identical at -j1 an
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/ref
@@ -89,7 +89,7 @@ test "ref: a Vec[Ref[int]] pushes then reads back the boxed values" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // A box element is an 8-byte handle: `push` stores it and `xs[i]` reads it back as a
     // `Ref[int]` (not a truncated int). 3 + 4 == 7.
     const code = try buildAndRun(gpa, io, ".toy-test-ref-box-element",
@@ -111,7 +111,7 @@ test "ref: a Vec[Ref[int]] program is byte-identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     const src =
         \\import std/ref
@@ -133,7 +133,7 @@ test "ref: a derivable + Ref-containing type builds deterministically (-j1 == -j
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
 
     // `Node` derives `Eq` (used via `==`) AND holds a `Ref` field, so its derived unit's
     // name (minted off the reified struct id, which rides the (depth, structural-key) order)
@@ -158,7 +158,7 @@ test "ref: a set through a copy of a handle is seen through the original" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     // `bump` takes the handle BY VALUE, so its `set` goes through a copy; the caller's handle
     // names the same cell and sees both writes.
     const code = try buildAndRun(gpa, io, ".toy-test-ref-copy-alias",
@@ -181,7 +181,7 @@ test "ref: Ref[P] and Ref[str] payloads round-trip through set and get" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     const code = try buildAndRun(gpa, io, ".toy-test-ref-aggregate",
         \\import std/ref
         \\struct P { x: int, y: int }
@@ -203,7 +203,7 @@ test "ref: Ref.new inside a generic mk[T] and a user Box.new(5) infer their type
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     const code = try buildAndRun(gpa, io, ".toy-test-ref-infer",
         \\import std/ref
         \\struct Box[T] { v: T }

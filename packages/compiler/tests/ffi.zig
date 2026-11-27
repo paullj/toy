@@ -6,6 +6,7 @@
 const std = @import("std");
 const Io = std.Io;
 const harness = @import("harness.zig");
+const ObjRead = @import("toy_compiler").ObjRead;
 
 const test_lib_dir: []const u8 = @import("test_options").test_lib_dir;
 
@@ -45,7 +46,7 @@ test "user dylibs: int, float and rawptr calls run at -O0 and -O1" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-levels", calls_src, &.{ "-L", test_lib_dir }, "ok\n");
 }
 
@@ -85,7 +86,7 @@ test "user dylibs: cstr params and returns run at -O0 and -O1" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-cstr", cstr_src, &.{ "-L", test_lib_dir }, "hello from C\n");
 }
 
@@ -133,7 +134,7 @@ test "user dylibs: float32 and extern structs by value and by pointer run at -O0
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-structs", structs_src, &.{ "-L", test_lib_dir }, "name\n");
 }
 
@@ -208,7 +209,7 @@ test "user dylibs: capture-free toy fns as C callbacks run at -O0 and -O1" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-callbacks", callbacks_src, &.{ "-L", test_lib_dir }, "ok\n");
 }
 
@@ -217,7 +218,7 @@ test "a wild pointer in C still dies of SIGSEGV, not as a stack overflow, at -O0
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const dir = ".toy-test-ffi-wild-pointer";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -289,7 +290,7 @@ test "user dylibs: C varargs (ints, floats, cstr; a struct and stack args before
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     try harness.expectStdoutAtBothLevelsWith(gpa, io, ".toy-test-ffi-varargs", varargs_src, &.{ "-L", test_lib_dir }, "k=-12/0.12\n");
 }
 
@@ -310,19 +311,8 @@ test "user dylibs: a -j1 build equals a -j8 build at -O0 and -O1" {
 
 /// Run the built `toy` with `args` in `cwd_abs`, capturing its output (caller frees).
 fn toyIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, args: []const []const u8) !struct { out: []u8, err: []u8, code: u8 } {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, harness.toy_exe);
-    try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .cwd = .{ .path = cwd_abs }, .stdout = .pipe, .stderr = .pipe });
-    var ro = child.stdout.?.readerStreaming(io, &.{});
-    const out = try ro.interface.allocRemaining(gpa, .limited(1 << 20));
-    errdefer gpa.free(out);
-    var re = child.stderr.?.readerStreaming(io, &.{});
-    const err = try re.interface.allocRemaining(gpa, .limited(1 << 20));
-    errdefer gpa.free(err);
-    const term = try child.wait(io);
-    return .{ .out = out, .err = err, .code = if (term == .exited) term.exited else 255 };
+    const r = try harness.toyIn(gpa, io, cwd_abs, args);
+    return .{ .out = r.out, .err = r.err, .code = if (r.term == .exited) r.term.exited else 255 };
 }
 
 fn expectToy(gpa: std.mem.Allocator, io: Io, cwd: []const u8, args: []const []const u8, code: u8, stream: enum { out, err }, needles: []const []const u8) !void {
@@ -357,7 +347,7 @@ test "library errors: a bad -l is a coded usage error, a bad extern library a di
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessHostRun(io);
     const root = ".toy-test-ffi-errors";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try project(gpa, io, root, &.{
@@ -387,7 +377,7 @@ test "only the externs lowered code calls are imported, and only those are check
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-ffi-reachable";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const src =
@@ -455,7 +445,7 @@ test "core reads errno through when target.os: a macOS binary imports only __err
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-ffi-errno";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const src =
@@ -484,7 +474,7 @@ test "warm rebuild: a changed library set relinks, and equals a cold build" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-ffi-warm";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const lib = try Io.Dir.cwd().readFileAlloc(io, test_lib_dir ++ "/libtoyffi.dylib", gpa, .unlimited);
@@ -522,51 +512,14 @@ fn readIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, rel: []const u8) 
     return Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
 }
 
-/// A load command as `otool -L` prints it: `<install name> (compatibility version
-/// <compat>, current version <current>)`.
-const LoadLine = struct {
-    install_name: []const u8,
-    compat: []const u8,
-    current: u32,
-
-    fn parse(line: []const u8) ?LoadLine {
-        const open = std.mem.indexOf(u8, line, " (compatibility version ") orelse return null;
-        const rest = line[open + " (compatibility version ".len ..];
-        const comma = std.mem.indexOf(u8, rest, ", current version ") orelse return null;
-        const cur = std.mem.trimEnd(u8, rest[comma + ", current version ".len ..], ")");
-        return .{ .install_name = line[0..open], .compat = rest[0..comma], .current = packVersion(cur) orelse return null };
-    }
-
-    /// `x.y.z` packed as LC_ID_DYLIB packs it, so versions compare as integers.
-    fn packVersion(v: []const u8) ?u32 {
-        var parts = std.mem.splitScalar(u8, v, '.');
-        var packed_v: u32 = 0;
-        for ([_]u5{ 16, 8, 0 }) |shift| {
-            const part = parts.next() orelse "0";
-            packed_v |= (std.fmt.parseInt(u32, part, 10) catch return null) << shift;
-        }
-        return packed_v;
-    }
-};
-
-/// The `otool -L` line of `binary` that names `lib`, trimmed (caller frees).
-fn otoolLine(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, binary: []const u8, lib: []const u8) !?[]u8 {
-    const res = (try harness.runTool(gpa, io, cwd_abs, &.{ "otool", "-L", binary })) orelse return null;
-    defer res.deinit(gpa);
-    var lines = std.mem.splitScalar(u8, res.out, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, lib) != null) return try gpa.dupe(u8, std.mem.trim(u8, line, " \t"));
-    }
+/// The library `binary` (under `cwd_abs`) loads whose name holds `lib`, or null for none.
+/// Its name borrows from `bytes.*`, the binary's bytes, which the caller frees.
+fn loadCommand(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, binary: []const u8, lib: []const u8, bytes: *[]u8) !?ObjRead.Library {
+    bytes.* = try readIn(gpa, io, cwd_abs, binary);
+    const libs = try ObjRead.libraries(try ObjRead.parse(bytes.*), gpa);
+    defer gpa.free(libs);
+    for (libs) |l| if (std.mem.indexOf(u8, l.name, lib) != null) return l;
     return null;
-}
-
-test "otool -L load lines parse into install name and versions" {
-    const l = LoadLine.parse("/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)").?;
-    try std.testing.expectEqualStrings("/usr/lib/libz.1.dylib", l.install_name);
-    try std.testing.expectEqualStrings("1.0.0", l.compat);
-    try std.testing.expectEqual(@as(u32, 0x1020c), l.current);
-    try std.testing.expectEqual(@as(u32, 0x1960000), LoadLine.parse("/a (compatibility version 1.0.0, current version 406)").?.current);
-    try std.testing.expect(LoadLine.parse("/usr/lib/libz.1.dylib") == null);
 }
 
 // The system linker reads a shared-cache library's versions from the SDK, toy from the
@@ -577,7 +530,7 @@ test "a shared-cache library records the versions the system linker does" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const root = ".toy-test-ffi-versions";
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     const w = try project(gpa, io, root, &.{
@@ -591,13 +544,13 @@ test "a shared-cache library records the versions the system linker does" {
     if (!std.meta.eql(clang.term, std.process.Child.Term{ .exited = 0 })) return error.SkipZigTest;
     try harness.buildIn(gpa, io, w, &.{ "build", "main.toy", "-l", "z", "-o", "t" });
     try std.testing.expectEqual(@as(u8, 0), try harness.runExitIn(gpa, io, w, "t"));
-    const want_line = (try otoolLine(gpa, io, w, "c", "libz")) orelse return error.SkipZigTest;
-    defer gpa.free(want_line);
-    const got_line = (try otoolLine(gpa, io, w, "t", "libz")) orelse return error.TestExpectedLibz;
-    defer gpa.free(got_line);
-    const want = LoadLine.parse(want_line) orelse return error.SkipZigTest;
-    const got = LoadLine.parse(got_line) orelse return error.TestUnexpectedOtoolLine;
-    try std.testing.expectEqualStrings(want.install_name, got.install_name);
-    try std.testing.expectEqualStrings(want.compat, got.compat);
-    try std.testing.expect(got.current >= want.current);
+    var want_bytes: []u8 = &.{};
+    defer gpa.free(want_bytes);
+    const want = (try loadCommand(gpa, io, w, "c", "libz", &want_bytes)) orelse return error.SkipZigTest;
+    var got_bytes: []u8 = &.{};
+    defer gpa.free(got_bytes);
+    const got = (try loadCommand(gpa, io, w, "t", "libz", &got_bytes)) orelse return error.TestExpectedLibz;
+    try std.testing.expectEqualStrings(want.name, got.name);
+    try std.testing.expectEqual(want.compat_version, got.compat_version);
+    try std.testing.expect(got.current_version >= want.current_version);
 }

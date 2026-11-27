@@ -21,7 +21,6 @@
 //! check==build differential over the CLI (build additionally needs macOS codegen).
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const toyc = @import("toy_compiler");
 const harness = @import("harness.zig");
@@ -363,12 +362,9 @@ test "coherence: sibling modules' duplicate impls get the same T0020s at -j1 and
 
 /// Spawn the built `toy` with `argv_tail`, returning the exit code (or an error).
 fn spawnExit(gpa: std.mem.Allocator, io: Io, argv_tail: []const []const u8) !std.process.Child.Term {
-    const bin_abs = harness.toy_exe;
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    for (argv_tail) |a| try argv.append(gpa, a);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe });
+    const argv = try harness.toyArgv(gpa, argv_tail);
+    defer gpa.free(argv);
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .pipe });
     var rdr = child.stdout.?.readerStreaming(io, &.{});
     const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
     gpa.free(got);
@@ -387,26 +383,18 @@ fn exitCode(term: std.process.Child.Term) ?u8 {
 /// abort surfaces as `Term.signal` (exitCode==null) — `toy run` would cook it into a
 /// clean 128+signo instead.
 fn spawnBinaryTerm(gpa: std.mem.Allocator, io: Io, abs_path: []const u8) !std.process.Child.Term {
-    var child = try std.process.spawn(io, .{ .argv = &.{abs_path}, .stdout = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const got = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    gpa.free(got);
-    return child.wait(io);
+    const r = try spawnBinaryTermStderr(gpa, io, abs_path);
+    gpa.free(r.stderr);
+    return r.term;
 }
 
 const BinTermErr = struct { term: std.process.Child.Term, stderr: []u8 };
-/// Like `spawnBinaryTerm` but ALSO captures the child's STDERR (fd 2). Drains stdout
-/// (discarded) so a program that also prints cannot deadlock on a full pipe; the panic
-/// fixtures print nothing, so their tiny stderr never blocks. Caller frees `.stderr`. A
-/// clean `exit(1)` panic surfaces as `Term.exited{1}` with the message on `.stderr`.
+/// Like `spawnBinaryTerm` but also returns the program's stderr (caller frees). A clean
+/// `exit(1)` panic surfaces as `Term.exited{1}` with the message on `.stderr`.
 fn spawnBinaryTermStderr(gpa: std.mem.Allocator, io: Io, abs_path: []const u8) !BinTermErr {
-    var child = try std.process.spawn(io, .{ .argv = &.{abs_path}, .stdout = .pipe, .stderr = .pipe });
-    var out = child.stdout.?.readerStreaming(io, &.{});
-    const out_bytes = try out.interface.allocRemaining(gpa, .limited(1 << 16));
-    gpa.free(out_bytes);
-    var errr = child.stderr.?.readerStreaming(io, &.{});
-    const err_bytes = try errr.interface.allocRemaining(gpa, .limited(1 << 16));
-    return .{ .term = try child.wait(io), .stderr = err_bytes };
+    const r = try harness.run(gpa, io, .{ .argv = &.{abs_path} });
+    gpa.free(r.stdout);
+    return .{ .term = r.term, .stderr = r.stderr };
 }
 
 test "differential: the real `toy check` and `toy build` exit codes AGREE on the three fixtures" {
@@ -414,12 +402,11 @@ test "differential: the real `toy check` and `toy build` exit codes AGREE on the
     // `build` runs codegen, so it needs macOS; skip cleanly
     // otherwise. The in-process test above is the always-on guard; this pins the
     // end-to-end CLI agreement.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     // (i) single-file valid: check exit 0 AND build exit 0.
     {
@@ -516,12 +503,11 @@ test "sibling protocol reusing eq/cmp: build+run yields the derive result (exit 
     // name-selected witness would `.ambiguous` in lower and abort `build`. Needs macOS
     // codegen; skips cleanly otherwise (the in-process check above is
     // the always-on guard).
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessHostRun(io);
 
     inline for (.{ sibling_eq_src, sibling_cmp_src }, .{ ".toy-test-sibling-eq-run", ".toy-test-sibling-cmp-run" }) |src, dir| {
         try writeFixture(io, dir, &.{.{ "main.toy", src }});
@@ -542,12 +528,11 @@ test "panic: div/mod/expect traps + user panic() write msg + a symbolized-backtr
     // erase the panic). The control legs (nonzero
     // divisor) run to their normal exit with NO backtrace — their panic block is now
     // `bl panic` but never reached (or DCE'd at -O1 for the const divisor).
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const fixtures = .{
         .{ .dir = ".toy-test-panic-div0", .src = "fn main() -> int { return 10 / 0 }\n", .want = @as(?u8, 1), .err = "division by zero" },
@@ -590,12 +575,11 @@ test "panic: div/mod/expect traps + user panic() write msg + a symbolized-backtr
 test "dfe: after the link drops an unreachable fn, a panic backtrace names only kept fns at BOTH -O levels" {
     // The dropped fn sits BEFORE the panicking one in source order, so a symtab built
     // from the pre-drop layout would mis-symbolize every frame after it.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-dfe-backtrace";
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -635,12 +619,11 @@ test "dfe: after the link drops an unreachable fn, a panic backtrace names only 
 }
 
 test "panic: a backtrace through a C callback names the C frames <C> and still stops at main" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-panic-c-callback";
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -681,12 +664,11 @@ test "panic: a backtrace through a C callback names the C frames <C> and still s
 }
 
 test "panic: a release build inlines a small panicking fn, so its frame leaves the backtrace, which still ends at main" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-panic-inlined";
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -719,12 +701,11 @@ test "panic: a release build inlines a small panicking fn, so its frame leaves t
 }
 
 test "inline: a recursion over small helpers runs as deep at -O1 and in release as at -O0" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const src = try Io.Dir.cwd().readFileAlloc(io, "tests/corpora/regression/inline_deep_recursion.toy", gpa, .unlimited);
     defer gpa.free(src);
@@ -738,7 +719,6 @@ test "inline: a recursion over small helpers runs as deep at -O1 and in release 
 }
 
 test "inline: a comment in a helper's body does not keep it from inlining" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -770,12 +750,11 @@ test "inline: a comment in a helper's body does not keep it from inlining" {
 }
 
 test "inline: a release build splices derive witnesses into their callers" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-inline-derive";
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -812,12 +791,11 @@ test "inline: a release build splices derive witnesses into their callers" {
 }
 
 test "panic: a backtrace cut off by the frame cap before main ends with a '...' line" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.requireToy(io);
+    try harness.skipUnlessRunnable(io);
 
     const dir = ".toy-test-panic-frame-cap";
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};

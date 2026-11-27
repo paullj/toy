@@ -10,16 +10,12 @@ const cases_dir = "tests/corpora/language-features/closures";
 
 const Ran = struct { exit: u8, stdout: []u8 };
 
-// Stderr is dropped: an expected panic (the *_oob fixtures) would otherwise reach the build
-// runner, which then reports the passing step as a failed command.
 fn run(gpa: std.mem.Allocator, io: Io, prog: []const u8) !Ran {
-    var child = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .pipe, .stderr = .ignore });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(out);
-    const term = try child.wait(io);
-    return switch (term) {
-        .exited => |c| .{ .exit = c, .stdout = out },
+    const res = try harness.run(gpa, io, .{ .argv = &.{prog} });
+    gpa.free(res.stderr);
+    errdefer gpa.free(res.stdout);
+    return switch (res.term) {
+        .exited => |c| .{ .exit = c, .stdout = res.stdout },
         else => error.ChildCrashed,
     };
 }
@@ -56,7 +52,7 @@ test "every closures/spec_*.toy has the same exit and stdout with --no-specializ
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-spec";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
@@ -115,7 +111,7 @@ test "spec_cap.toy has exactly 1 erased + 8 spec units" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     const ir = try harness.emitIr(gpa, io, cases_dir ++ "/spec_cap.toy", &.{});
     defer gpa.free(ir);
@@ -141,7 +137,7 @@ test "specialized binaries are identical at -j1 and -j8" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     var cases = try specCases(gpa, io);
     defer freeCases(gpa, &cases);
@@ -160,7 +156,7 @@ test "a _ capture builds the same code as the lambda it means" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-hole";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
@@ -212,7 +208,7 @@ test "200 nested captures build and run" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-nest";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
@@ -240,7 +236,7 @@ test "a capturing lambda passed to Vec.each or to a generic fn that only calls i
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     // Inlining off: a small std callee spliced in (the Vec literal's own allocation) would
     // bring a `gc_alloc` that is no env or box. The default pipeline still keeps the env in
@@ -277,7 +273,7 @@ test "every std method that takes a closure keeps its caller's env in the frame 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     // Inlining off, as above: only an env or box allocation may count.
     const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_std_methods.toy", &.{ "-O1", "--no-opt=inline" });
@@ -313,7 +309,7 @@ test "#40's table makes no heap allocation at -O1: a 24-byte boxed local, a 320-
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     // Inlining off: a spliced callee's own allocation is no env or box.
     const o1 = try harness.emitIr(gpa, io, cases_dir ++ "/escape_table.toy", &.{ "-O1", "--no-opt=inline" });
@@ -339,7 +335,7 @@ test "a closure a non-escaping closure leaks (returns, stores, pushes, passes to
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.requireToy(io);
 
     const ir = try harness.emitIr(gpa, io, cases_dir ++ "/escape_chain.toy", &.{ "-O1", "--no-opt=inline" });
     defer gpa.free(ir);
@@ -389,10 +385,11 @@ fn nearCapFrame(gpa: std.mem.Allocator, g_bytes: u32) ![]u8 {
 
 /// The exit code of `prog` run with a 32 MiB stack, room for a frame near codegen's 16 MiB
 /// cap (the default 8 MiB stack faults on the frame's first page past it).
-fn runExitBigStack(io: Io, prog: []const u8) !u8 {
-    var child = try std.process.spawn(io, .{ .argv = &.{ "/bin/sh", "-c", "ulimit -s 32768 && exec \"$0\"", prog } });
-    const term = try child.wait(io);
-    return switch (term) {
+fn runExitBigStack(gpa: std.mem.Allocator, io: Io, prog: []const u8) !u8 {
+    const res = try harness.run(gpa, io, .{ .argv = &.{prog}, .stack_kib = 32768 });
+    gpa.free(res.stdout);
+    gpa.free(res.stderr);
+    return switch (res.term) {
         .exited => |c| c,
         else => error.ChildCrashed,
     };
@@ -403,7 +400,7 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     // Since #32 the cap is 16 MiB, so only a frame within an env's size of it reaches the
     // fallback. At this size `main`'s frame fits at -O0 and with a heap env at -O1, but not
@@ -420,8 +417,8 @@ test "a body whose -O1 frame would overflow with frame envs falls back to heap e
     defer gpa.free(p0);
     const p1 = try harness.compile(gpa, io, tmp ++ "/o1", src, &.{ "--no-cache", "-O1" });
     defer gpa.free(p1);
-    try std.testing.expectEqual(@as(u8, 32), try runExitBigStack(io, p0));
-    try std.testing.expectEqual(@as(u8, 32), try runExitBigStack(io, p1));
+    try std.testing.expectEqual(@as(u8, 32), try runExitBigStack(gpa, io, p0));
+    try std.testing.expectEqual(@as(u8, 32), try runExitBigStack(gpa, io, p1));
     const path = tmp ++ "/near.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
     // Without inlining, whose spliced bodies bring their own allocations into `main`.
@@ -467,7 +464,7 @@ test "a body whose -O1 frame would overflow with unboxed locals falls back to th
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-unboxed";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
@@ -479,8 +476,8 @@ test "a body whose -O1 frame would overflow with unboxed locals falls back to th
     defer gpa.free(p0);
     const p1 = try harness.compile(gpa, io, tmp ++ "/o1", src, &.{ "--no-cache", "-O1", "--gc-stress" });
     defer gpa.free(p1);
-    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(io, p0));
-    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(io, p1));
+    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(gpa, io, p0));
+    try std.testing.expectEqual(@as(u8, 28), try runExitBigStack(gpa, io, p1));
     const path = tmp ++ "/big.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src });
     const ir = try harness.emitIr(gpa, io, path, &.{ "-O1", "--no-opt=inline" });
@@ -504,7 +501,7 @@ test "a capturing lambda passed to Vec.each in a loop triggers no collection at 
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-alloc";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
@@ -540,7 +537,7 @@ test "every closures/ and places/ program and modules/escape_summary has the sam
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
 
     const tmp = ".toy-test-closures-diffopt";
     Io.Dir.cwd().deleteTree(io, tmp) catch {};

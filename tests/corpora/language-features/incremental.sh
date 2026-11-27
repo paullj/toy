@@ -29,10 +29,16 @@ echo "building toy..."
 if command -v zig >/dev/null 2>&1; then zig="zig"
 elif command -v mise >/dev/null 2>&1; then zig="mise exec -- zig"
 else echo "build failed: no zig (and no mise to provide it)"; exit 1; fi
-( cd "$root" && $zig build ) || { echo "build failed"; exit 1; }
+( cd "$root" && $zig build install objdump ) || { echo "build failed"; exit 1; }
+objdump="$root/zig-out/bin/toy-objdump"
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-texthash() { otool -s __TEXT __text "$1" 2>/dev/null | tail -n +2 | shasum | cut -d' ' -f1; }
+# The code section's checksum, read by toy's own object reader so the gate runs on any
+# host. An unreadable binary gets a hash of its own, so it can never match another.
+texthash() {
+  "$objdump" text "$1" >"$1.text" || { echo "unreadable:$1"; return; }
+  cksum <"$1.text" | cut -d' ' -f1
+}
 compiled_of() { sed -n 's/.*compiled=\([0-9]*\).*/\1/p' <<<"$1"; }
 
 pass=0; fail=0

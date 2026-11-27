@@ -2,7 +2,6 @@
 //! alongside this test binary and run the result.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 
 /// The absolute install path of the `toy` this test binary was built with. build.zig
@@ -19,10 +18,97 @@ pub fn requireToy(io: Io) !void {
     };
 }
 
-/// The emitted binary is macOS/aarch64 Mach-O, and these tests drive the CLI.
-pub fn skipUnlessBackend(io: Io) !void {
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+pub const runner = @import("runner.zig");
+
+var config_once: ?runner.Config = null;
+
+/// The test target and runner, from `TOY_TEST_TARGET` and `TOY_TEST_RUNNER`. A value
+/// that does not parse fails every test that asks, rather than quietly testing the host.
+pub fn config() !runner.Config {
+    if (config_once) |c| return c;
+    const c = runner.Config.fromEnv(std.testing.environ, std.process.Environ.getPosix) catch |e| {
+        std.debug.print("TOY_TEST_TARGET / TOY_TEST_RUNNER: {t}\n", .{e});
+        return e;
+    };
+    config_once = c;
+    return c;
+}
+
+/// A test that builds a binary with toy and runs it. It skips, naming why, when toy
+/// cannot emit the test target or the runner cannot run it.
+pub fn skipUnlessRunnable(io: Io) !void {
     try requireToy(io);
+    try skipFor((try config()).skipReason());
+}
+
+/// A test of `toy run`, which runs only what it builds for the host, on the host. Its
+/// builds name no target, so it skips when `TOY_TEST_TARGET` names another.
+pub fn skipUnlessHostRun(io: Io) !void {
+    try requireToy(io);
+    const c = try config();
+    const host = runner.Target.host orelse return skipFor("this host is not a target toy builds for");
+    if (!c.target.eql(host)) return skipFor("a `toy run` test runs on the host's target, and TOY_TEST_TARGET names another");
+    try skipFor((runner.Config{ .target = host, .runner = .native, .explicit_target = false }).skipReason());
+}
+
+fn skipFor(reason: ?[]const u8) !void {
+    return runner.skip(std.testing.io, reason orelse return);
+}
+
+var target_args: [2][]const u8 = undefined;
+
+/// `runner.Config.targetArgs` of the test config.
+pub fn targetArgs() ![]const []const u8 {
+    return (try config()).targetArgs(&target_args);
+}
+
+/// `toy_exe` then `args`, plus `targetArgs` for a build that names no target; the
+/// caller frees the slice. A `toy run` keeps the host: it runs only what it builds for
+/// the host.
+pub fn toyArgv(gpa: std.mem.Allocator, args: []const []const u8) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer argv.deinit(gpa);
+    try argv.append(gpa, toy_exe);
+    try argv.appendSlice(gpa, args);
+    if (verbOf(args) == .build) {
+        const names_target = for (args) |a| {
+            if (std.mem.startsWith(u8, a, "--target")) break true;
+        } else false;
+        if (!names_target) try argv.appendSlice(gpa, try targetArgs());
+    }
+    return argv.toOwnedSlice(gpa);
+}
+
+pub const Verb = enum { build, run, check, other };
+
+/// What a `toy` command line does: `build` is also the verb of a bare `toy main.toy`, and
+/// `--emit` stops before code.
+pub fn verbOf(args: []const []const u8) Verb {
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--")) break;
+        if (std.mem.eql(u8, a, "--emit") or std.mem.startsWith(u8, a, "--emit=")) return .other;
+        if (std.mem.startsWith(u8, a, "-")) continue;
+        if (std.mem.eql(u8, a, "build")) return .build;
+        if (std.mem.eql(u8, a, "run")) return .run;
+        if (std.mem.eql(u8, a, "check")) return .check;
+        if (std.mem.endsWith(u8, a, ".toy")) return .build;
+    }
+    return .other;
+}
+
+/// The skip a test of the `toy` command line `args` needs: a build must emit the test
+/// target, a run must run on the host, and the rest only need toy.
+pub fn skipUnlessToyCan(io: Io, args: []const []const u8) !void {
+    switch (verbOf(args)) {
+        .build => try skipUnlessRunnable(io),
+        .run => try skipUnlessHostRun(io),
+        .check, .other => try requireToy(io),
+    }
+}
+
+/// Run a built binary through the test runner, both streams captured (caller frees).
+pub fn run(gpa: std.mem.Allocator, io: Io, o: runner.RunOptions) !std.process.RunResult {
+    return runner.run((try config()).runner, gpa, io, o);
 }
 
 /// Write `entry_src` to `dir_name/main.toy`, build it to `dir_name/prog`, and return the
@@ -35,8 +121,6 @@ pub fn compile(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, entry_src: 
 /// `compile` with the binary in `out_dir`. A debug build embeds its source paths, so two
 /// builds compare equal only from the same `src_dir`.
 fn compileTo(gpa: std.mem.Allocator, io: Io, src_dir: []const u8, out_dir: []const u8, entry_src: []const u8, flags: []const []const u8) ![:0]u8 {
-    const bin_abs = toy_exe;
-
     try Io.Dir.cwd().createDirPath(io, src_dir);
     try Io.Dir.cwd().createDirPath(io, out_dir);
     const main_path = try std.fmt.allocPrint(gpa, "{s}/main.toy", .{src_dir});
@@ -46,16 +130,12 @@ fn compileTo(gpa: std.mem.Allocator, io: Io, src_dir: []const u8, out_dir: []con
     const out_bin = try std.fmt.allocPrint(gpa, "{s}/prog", .{out_dir});
     defer gpa.free(out_bin);
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    try argv.append(gpa, "build");
-    try argv.append(gpa, main_path);
-    try argv.append(gpa, "-o");
-    try argv.append(gpa, out_bin);
-    for (flags) |f| try argv.append(gpa, f);
+    const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "build", main_path, "-o", out_bin }, flags });
+    defer gpa.free(args);
+    const argv = try toyArgv(gpa, args);
+    defer gpa.free(argv);
 
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .stdout = .pipe, .stderr = .pipe });
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .pipe });
     const term = try child.wait(io);
     if (term != .exited or term.exited != 0) return error.CompileFailed;
 
@@ -67,7 +147,7 @@ fn compileTo(gpa: std.mem.Allocator, io: Io, src_dir: []const u8, out_dir: []con
 /// -j1 binary to exit with it. Every byte must match: the code signature has no nonce, only
 /// the `-o` basename (which `compile` keeps fixed), so any difference is a -jN leak.
 pub fn expectDeterministicBuild(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, src: []const u8, flags: []const []const u8, exit: ?u8) !void {
-    try skipUnlessBackend(io);
+    try skipUnlessRunnable(io);
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
 
@@ -106,12 +186,9 @@ fn buildImage(gpa: std.mem.Allocator, io: Io, dir_name: []const u8, jobs: []cons
 /// Run the built `toy` with `args` in the directory `cwd_abs` (absolute), which owns the
 /// `.toy/` cache the build reads and writes. Fails unless toy exits 0.
 pub fn buildIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, args: []const []const u8) !void {
-    const bin_abs = toy_exe;
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin_abs);
-    try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .cwd = .{ .path = cwd_abs }, .stdout = .pipe, .stderr = .pipe });
+    const argv = try toyArgv(gpa, args);
+    defer gpa.free(argv);
+    var child = try std.process.spawn(io, .{ .argv = argv, .cwd = .{ .path = cwd_abs }, .stdout = .pipe, .stderr = .pipe });
     const term = try child.wait(io);
     if (term != .exited or term.exited != 0) return error.CompileFailed;
 }
@@ -124,12 +201,10 @@ pub fn runExitIn(gpa: std.mem.Allocator, io: Io, cwd_abs: []const u8, rel: []con
 }
 
 pub fn runExit(gpa: std.mem.Allocator, io: Io, prog: []const u8) !u8 {
-    // Under `zig build test` the test binary's stdout is the build runner's protocol pipe,
-    // so a program that prints must not inherit it or the runner deadlocks.
-    var run = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .ignore });
-    const term = try run.wait(io);
-    _ = gpa;
-    return switch (term) {
+    const res = try run(gpa, io, .{ .argv = &.{prog} });
+    gpa.free(res.stdout);
+    gpa.free(res.stderr);
+    return switch (res.term) {
         .exited => |c| c,
         else => error.ChildCrashed,
     };
@@ -212,13 +287,11 @@ pub fn sameCode(a: []const u8, b: []const u8) bool {
 
 /// The stdout of `prog`, which must exit 0.
 pub fn runStdout(gpa: std.mem.Allocator, io: Io, prog: []const u8) ![]u8 {
-    var child = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .pipe });
-    var rdr = child.stdout.?.readerStreaming(io, &.{});
-    const out = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(out);
-    const term = try child.wait(io);
-    if (term != .exited or term.exited != 0) return error.ChildFailed;
-    return out;
+    const res = try run(gpa, io, .{ .argv = &.{prog} });
+    gpa.free(res.stderr);
+    errdefer gpa.free(res.stdout);
+    if (res.term != .exited or res.term.exited != 0) return error.ChildFailed;
+    return res.stdout;
 }
 
 pub const ToolOutput = struct {
@@ -255,13 +328,19 @@ pub fn runTool(gpa: std.mem.Allocator, io: Io, cwd_abs: ?[]const u8, argv: []con
     return .{ .out = out, .err = err, .term = try child.wait(io) };
 }
 
+/// The built `toy` run with `args` (see `toyArgv`) in `cwd_abs` (the test's cwd when
+/// null), both streams captured.
+pub fn toyIn(gpa: std.mem.Allocator, io: Io, cwd_abs: ?[]const u8, args: []const []const u8) !ToolOutput {
+    const argv = try toyArgv(gpa, args);
+    defer gpa.free(argv);
+    return (try runTool(gpa, io, cwd_abs, argv)) orelse error.ToyMissing;
+}
+
 /// What `prog` wrote to stderr, and how it ended.
 pub fn runStderr(gpa: std.mem.Allocator, io: Io, prog: []const u8) !struct { err: []u8, term: std.process.Child.Term } {
-    var child = try std.process.spawn(io, .{ .argv = &.{prog}, .stdout = .ignore, .stderr = .pipe });
-    var rdr = child.stderr.?.readerStreaming(io, &.{});
-    const err = try rdr.interface.allocRemaining(gpa, .limited(1 << 16));
-    errdefer gpa.free(err);
-    return .{ .err = err, .term = try child.wait(io) };
+    const res = try run(gpa, io, .{ .argv = &.{prog} });
+    gpa.free(res.stdout);
+    return .{ .err = res.stderr, .term = res.term };
 }
 
 /// Build `src` at -O0 and at -O1 into separate dirs under `dir`, run each, and expect
@@ -424,4 +503,15 @@ pub fn irBody(ir: []const u8, name: []const u8) ?[]const u8 {
     const at = if (std.mem.startsWith(u8, ir, head)) 0 else (std.mem.indexOf(u8, ir, head) orelse return null);
     const end = std.mem.indexOfPos(u8, ir, at, "\n}\n") orelse ir.len;
     return ir[at..end];
+}
+
+test "verbOf: a bare file builds, --emit stops before code, and flags are not verbs" {
+    const t = std.testing;
+    try t.expectEqual(Verb.build, verbOf(&.{ "build", "a.toy" }));
+    try t.expectEqual(Verb.build, verbOf(&.{ "-o", "out", "a.toy" }));
+    try t.expectEqual(Verb.build, verbOf(&.{ "--color", "never", "build" }));
+    try t.expectEqual(Verb.run, verbOf(&.{ "run", "a.toy", "--", "build" }));
+    try t.expectEqual(Verb.check, verbOf(&.{ "check", "a.toy" }));
+    try t.expectEqual(Verb.other, verbOf(&.{ "--emit", "parse", "a.toy" }));
+    try t.expectEqual(Verb.other, verbOf(&.{ "explain", "R0001" }));
 }

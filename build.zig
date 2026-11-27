@@ -167,6 +167,11 @@ pub fn build(b: *std.Build) void {
     test_options.addOption([]const u8, "toy_exe", b.getInstallPath(.bin, exe.out_filename));
     test_options.addOption([]const u8, "test_lib_dir", test_lib_dir);
     integration_mod.addOptions("test_options", test_options);
+    // Every harness that runs a built binary goes through tests/runner.zig, which starts
+    // a container (TOY_TEST_RUNNER=docker:<platform>) through this script.
+    const runner_options = b.addOptions();
+    runner_options.addOption([]const u8, "docker_script", b.pathFromRoot("tests/run-docker.sh"));
+    integration_mod.addOptions("runner_options", runner_options);
     const integration_tests = b.addTest(.{
         .name = "toy-integration-test",
         .root_module = integration_mod,
@@ -192,6 +197,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     corpus_tests.root_module.addOptions("test_options", corpus_options);
+    corpus_tests.root_module.addOptions("runner_options", runner_options);
     const run_corpus = b.addRunArtifact(corpus_tests);
     for (test_lib_installs) |st| run_corpus.step.dependOn(st);
     test_step.dependOn(&run_corpus.step);
@@ -205,6 +211,26 @@ pub fn build(b: *std.Build) void {
     const lsp_tests = b.addTest(.{ .name = "toy-lsp-test", .root_module = lsp_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
     test_bin_step.dependOn(&b.addInstallArtifact(lsp_tests, .{}).step);
+
+    // `toy-objdump`: reads a built binary's code, symbols, libraries and DWARF lines on
+    // any host, for scripts (incremental.sh) that would otherwise need otool or nm. It
+    // builds the std-only reader alone, without the compiler.
+    const objdump = b.addExecutable(.{
+        .name = "toy-objdump",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("packages/compiler/tools/objdump.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ObjRead", .module = b.createModule(.{
+                .root_source_file = b.path("packages/compiler/src/link/ObjRead.zig"),
+                .target = target,
+                .optimize = optimize,
+            }) }},
+        }),
+    });
+    const install_objdump = b.addInstallArtifact(objdump, .{});
+    b.step("objdump", "Install toy-objdump, the object reader scripts use").dependOn(&install_objdump.step);
+    test_bin_step.dependOn(&install_objdump.step);
 
     // `zig build fuzz`: an in-process front-end fuzzer (tests/fuzz.zig). It feeds
     // mutated seed-corpus bytes + grammar-generated programs through lex → parse →
@@ -231,6 +257,7 @@ pub fn build(b: *std.Build) void {
     const fuzz_options = b.addOptions();
     fuzz_options.addOption([]const u8, "toy_exe", b.getInstallPath(.bin, exe.out_filename));
     fuzz_exe.root_module.addOptions("fuzz_options", fuzz_options);
+    fuzz_exe.root_module.addOptions("runner_options", runner_options);
     const run_fuzz = b.addRunArtifact(fuzz_exe);
     run_fuzz.step.dependOn(&install_exe.step);
     // The fuzzer reads its seed corpus from tests/corpora relative to cwd, so it must

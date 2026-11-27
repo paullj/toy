@@ -30,10 +30,10 @@
 //! with and without `--gc-stress`, disagree on exit code or stdout.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const toyc = @import("toy_compiler");
 const fuzz_diff = @import("fuzz_diff.zig");
+const runner = @import("runner.zig");
 const toy_exe: []const u8 = @import("fuzz_options").toy_exe;
 
 const Lexer = toyc.Lexer;
@@ -149,12 +149,13 @@ pub fn main(init: std.process.Init) !void {
 
     const diff_iters = envUsize(env, "FUZZ_DIFF_ITERS") orelse default_diff_iters;
     if (diff_iters == 0) return;
-    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) {
-        std.debug.print("fuzz: differential phase skipped: the backend only targets aarch64-macos\n", .{});
+    const cfg = try runner.Config.fromEnv(env.*, std.process.Environ.Map.get);
+    if (cfg.skipReason()) |why| {
+        std.debug.print("fuzz: differential phase skipped: {s}\n", .{why});
         return;
     }
     std.debug.print("fuzz: differential: {d} programs, {d} builds each\n", .{ diff_iters, fuzz_diff.variants.len });
-    if (!try fuzz_diff.fuzz(gpa, io, toy_exe, ".zig-cache/fuzz-diff", seed, diff_iters)) std.process.exit(1);
+    if (!try fuzz_diff.fuzz(gpa, io, .{ .exe = toy_exe, .cfg = cfg }, ".zig-cache/fuzz-diff", seed, diff_iters)) std.process.exit(1);
     std.debug.print("fuzz: {d} programs agree across levels and gc stress\n", .{diff_iters});
 }
 

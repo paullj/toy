@@ -450,7 +450,7 @@ test "gc: at -O1 a lambda whose Vec, str, Ref and closure captures sit in a fram
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try harness.skipUnlessBackend(io);
+    try harness.skipUnlessRunnable(io);
     const dir = ".toy-test-gc-frame-env-ir";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     try Io.Dir.cwd().createDirPath(io, dir);
