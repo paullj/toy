@@ -5197,12 +5197,15 @@ test "the first failing unit in index order is reported at every -j" {
     const io = threaded.io();
 
     // More units than the codegen fan-out threshold, so -j8 really splits them; each fn
-    // makes one method call, so method slot k lies in fn f<k>.
+    // makes one method call, so method slot k lies in fn f<k>. main calls every one, since
+    // a build lowers only what main reaches.
     var src: std.Io.Writer.Allocating = .init(gpa);
     defer src.deinit();
     try src.writer.writeAll("struct P { v: int }\nimpl P { fn get(self) -> int { self.v } }\n");
     for (0..70) |k| try src.writer.print("fn f{d}(p: P) -> int {{ p.get() + {d} }}\n", .{ k, k });
-    try src.writer.writeAll("fn main() -> int {\n p := P { v: 3 }\n return f0(p)\n}\n");
+    try src.writer.writeAll("fn main() -> int {\n p := P { v: 3 }\n return 0");
+    for (0..70) |k| try src.writer.print(" + f{d}(p)", .{k});
+    try src.writer.writeAll("\n}\n");
 
     const dir_name = ".toy-test-driver-codegen-diag-jn";
     Io.Dir.cwd().deleteTree(io, dir_name) catch {};
@@ -5288,6 +5291,22 @@ test "a type too large for any frame is T0077 at build, not a codegen panic (#51
     }
 }
 
+/// A program whose fn `name` has a frame too large for codegen (`:9:4`). Two locals
+/// together pass the 16 MiB frame codegen can address (one alone is a type T0077 rejects):
+/// an enum whose one variant holds 14 MiB, built as its other variant so nothing else
+/// copies it.
+fn writeFrameTooLarge(w: *std.Io.Writer, name: []const u8) !void {
+    try w.writeAll("struct A { a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int }\n");
+    const nest = [_][2][]const u8{ .{ "B", "A" }, .{ "C", "B" }, .{ "D", "C" }, .{ "E", "D" }, .{ "F", "E" }, .{ "G", "F" } };
+    for (nest) |pair| {
+        try w.print("struct {s} {{ ", .{pair[0]});
+        const n: usize = if (std.mem.eql(u8, pair[0], "G")) 7 else 8;
+        for (0..n) |i| try w.print("{s}x{d}: {s}, ", .{ pair[0], i, pair[1] });
+        try w.writeAll("}\n");
+    }
+    try w.print("enum H {{ Small, Huge(G) }}\nfn {s}() -> int {{\n    h := H.Small\n    k := h\n    return match k {{ H.Small -> 1, H.Huge(_) -> 2 }}\n}}\n", .{name});
+}
+
 test "a codegen diagnostic is printed with its text" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = testing.allocator;
@@ -5300,20 +5319,9 @@ test "a codegen diagnostic is printed with its text" {
     try Io.Dir.cwd().createDirPath(io, dir_name);
     defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
 
-    // Two locals that together pass the 16 MiB frame codegen can address (one alone is a
-    // type T0077 rejects): an enum whose one variant holds 14 MiB, built as its other
-    // variant so nothing else copies it.
     var src: std.Io.Writer.Allocating = .init(gpa);
     defer src.deinit();
-    try src.writer.writeAll("struct A { a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int }\n");
-    const nest = [_][2][]const u8{ .{ "B", "A" }, .{ "C", "B" }, .{ "D", "C" }, .{ "E", "D" }, .{ "F", "E" }, .{ "G", "F" } };
-    for (nest) |pair| {
-        try src.writer.print("struct {s} {{ ", .{pair[0]});
-        const n: usize = if (std.mem.eql(u8, pair[0], "G")) 7 else 8;
-        for (0..n) |i| try src.writer.print("{s}x{d}: {s}, ", .{ pair[0], i, pair[1] });
-        try src.writer.writeAll("}\n");
-    }
-    try src.writer.writeAll("enum H { Small, Huge(G) }\nfn main() -> int {\n    h := H.Small\n    k := h\n    return match k { H.Small -> 1, H.Huge(_) -> 2 }\n}\n");
+    try writeFrameTooLarge(&src.writer, "main");
     const path = dir_name ++ "/big.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src.written() });
 
@@ -5326,6 +5334,32 @@ test "a codegen diagnostic is printed with its text" {
     try testing.expect(std.mem.indexOf(u8, res.out, "--> " ++ path ++ ":9:4") != null);
     try testing.expect(std.mem.indexOf(u8, res.out, "CodegenDiagnostic") == null);
     try testing.expect(std.mem.indexOf(u8, res.err, "CodegenDiagnostic") == null);
+}
+
+test "a fn the program never reaches is not lowered, so its codegen diagnostic does not fail the build" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir_name = ".toy-test-driver-frame-diag-unreached";
+    Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir_name);
+    defer Io.Dir.cwd().deleteTree(io, dir_name) catch {};
+
+    var src: std.Io.Writer.Allocating = .init(gpa);
+    defer src.deinit();
+    try writeFrameTooLarge(&src.writer, "big");
+    try src.writer.writeAll("fn main() -> int {\n    return 0\n}\n");
+    const path = dir_name ++ "/big.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = src.written() });
+
+    const res = try spawnToyBoth(gpa, io, &.{ "build", "--no-cache", path, "-o", dir_name ++ "/big" });
+    defer gpa.free(res.out);
+    defer gpa.free(res.err);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    try testing.expect(std.mem.indexOf(u8, res.out, "function frame too large for codegen") == null);
 }
 
 test "`toy check --timings` prints the stages check runs (#66)" {

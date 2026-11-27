@@ -1,0 +1,3 @@
+pub fn rendered_len(b: bool, s: str) -> int {
+    return b.to_string().len() + s.to_string().len()
+}

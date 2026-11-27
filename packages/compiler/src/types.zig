@@ -1170,6 +1170,38 @@ pub fn resolveConformanceMethod(methods: []const Method, recv: Type, name: []con
 /// cannot be told apart from a same-content sibling).
 pub const MethodIndexPick = union(enum) { none, one: u32, ambiguous };
 
+/// How `to_string` renders a value of a type. Lower emits it and the allocation walk
+/// (T0082, lazy lowering) follows it, so the two cannot disagree on what a render calls.
+pub const DisplayRender = union(enum) {
+    /// A literal or the receiver itself: no call, no heap.
+    fn_value,
+    str,
+    bool,
+    unit,
+    /// An allocating str builder.
+    int,
+    /// The `display` witness, by its index in the method table.
+    witness: u32,
+    /// No single witness: a checked program never gets here.
+    missing,
+};
+
+pub fn displayRender(methods: []const Method, layouts: anytype, ty: Type, display_pid: ?u32) DisplayRender {
+    // Switch on `ty.kind` (NOT `passKind`): a `Ref` box is a struct type whose display
+    // witness is std's impl.
+    if (LayoutEngine.isFnStruct(ty, layouts)) return .fn_value;
+    return switch (ty.kind) {
+        .str => .str,
+        .bool => .bool,
+        .unit => .unit,
+        .int => .int,
+        else => switch (pickMethodIndex(methods, ty, "display", display_pid, null, .program)) {
+            .one => |mi| .{ .witness = mi },
+            .none, .ambiguous => .missing,
+        },
+    };
+}
+
 pub fn pickMethodIndex(methods: []const Method, recv: Type, name: []const u8, witness_pid: ?u32, explicit_args: ?[]const Type, site: Site) MethodIndexPick {
     if (explicit_args) |ea| {
         for (methods, 0..) |m, i| {

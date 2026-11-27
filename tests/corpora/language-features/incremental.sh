@@ -616,6 +616,47 @@ fn main() -> int {
 }
 ' 0
 
+# Lazy lowering: a build lowers only the units its program reaches. An edit that starts
+# printing a float makes core/fmt reachable, and one that stops drops it again; each
+# warm build on the shared cache must print its own output and equal a --no-cache build.
+run_reach() {
+  local d="$work/reach"; mkdir -p "$d"
+  ( cd "$d" && rm -rf .toy )
+  local n=0 ok=1 src want got
+  for step in "str" "float" "str" "float"; do
+    n=$((n + 1))
+    if [ "$step" = float ]; then
+      src='import std/io
+fn main() -> int {
+    io.println("hi")
+    io.println(2.5)
+    return 0
+}
+'; want="$(printf 'hi\n2.5')"
+    else
+      src='import std/io
+fn main() -> int {
+    io.println("hi")
+    return 0
+}
+'; want="hi"
+    fi
+    printf '%s' "$src" > "$d/prog.toy"
+    ( cd "$d" && "$toyc" -o "w$n.bin" prog.toy >/dev/null 2>&1 ) || { fail_one "reach: $step warm build failed"; return; }
+    ( cd "$d" && "$toyc" -o "f$n.bin" --no-cache prog.toy >/dev/null 2>&1 ) || { fail_one "reach: $step force build failed"; return; }
+    got="$("$d/w$n.bin")"
+    if [ "$got" != "$want" ]; then fail_one "reach: step $n ($step) printed '$got', want '$want' [UNREACHED UNIT]"; ok=0; fi
+    if [ "$(texthash "$d/w$n.bin")" != "$(texthash "$d/f$n.bin")" ]; then
+      fail_one "reach: SOUNDNESS — step $n ($step) warm __text != force __text [STALE-CACHE MISCOMPILE]"; ok=0
+    fi
+  done
+  if [ "$ok" = 1 ]; then
+    echo "  OK   reach: a float print that starts and stops lowers core/fmt only while reached, SOUND"
+    pass=$((pass + 1))
+  fi
+}
+run_reach
+
 # $1 scenario  $2 base exit  $3 warm exit: the edit reaches the warm binary.
 expect_exits() {
   local d="$work/$1" b i

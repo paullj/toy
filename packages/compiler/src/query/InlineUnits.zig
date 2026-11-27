@@ -91,9 +91,12 @@ fn spliced(name: []const u8) bool {
 /// witnesses, the symbol an adapter or an erased unit calls.
 pub fn appendCallNames(gpa: std.mem.Allocator, fr: *const Frozen, out: *std.ArrayList([]const u8)) !void {
     switch (fr.body) {
-        .source => |s| {
-            try appendWalked(gpa, fr, s.decl, fr.in.sig, out);
-            if (s.spec) for (fr.in.closure.spec_targets) |t| try out.append(gpa, t.sym.name);
+        .source => {
+            if (fr.walked) |w| return appendSourceCallNames(gpa, fr, w.calls, out);
+            var sigs: std.ArrayList(Fingerprint.Sig) = .empty;
+            defer sigs.deinit(gpa);
+            try AstWalk.walkCalls(gpa, &fr.in, fr.body.source.decl, fr.in.sig, &sigs);
+            return appendSourceCallNames(gpa, fr, sigs.items, out);
         },
         .lambda => |l| try appendWalked(gpa, fr, fr.in.closure.lambda_units[l.unit].node, Engine.lambdaSig(fr, l), out),
         .derive => |d| for (d.field_witnesses) |fw| switch (fw) {
@@ -103,6 +106,13 @@ pub fn appendCallNames(gpa: std.mem.Allocator, fr: *const Frozen, out: *std.Arra
         .adapter => |a| try out.append(gpa, a.target.name),
         .erased => |u| if (Engine.erasedCall(fr, u)) |c| try out.append(gpa, c.sym.name),
     }
+    for (fr.conformances) |rc| try out.appendSlice(gpa, rc.witness_syms);
+}
+
+/// `appendCallNames` of a body from source whose walk gave `sigs`.
+pub fn appendSourceCallNames(gpa: std.mem.Allocator, fr: *const Frozen, sigs: []const Fingerprint.Sig, out: *std.ArrayList([]const u8)) !void {
+    for (sigs) |sg| try out.append(gpa, sg.name);
+    if (fr.body.source.spec) for (fr.in.closure.spec_targets) |t| try out.append(gpa, t.sym.name);
     for (fr.conformances) |rc| try out.appendSlice(gpa, rc.witness_syms);
 }
 

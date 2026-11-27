@@ -415,25 +415,27 @@ pub fn walkCalls(gpa: std.mem.Allocator, frozen: *const lower.Inputs, idx: Ast.I
 /// The constants the subtree at `idx` names, in walk order. A use lowers to the
 /// constant's value, which the body text does not hold, so the fingerprint folds them.
 pub fn walkConsts(gpa: std.mem.Allocator, frozen: *const lower.Inputs, idx: Ast.Index, out: *std.ArrayList(Typecheck.ConstSym)) error{OutOfMemory}!void {
-    const ConstVisitor = struct {
-        gpa: std.mem.Allocator,
-        frozen: *const lower.Inputs,
-        out: *std.ArrayList(Typecheck.ConstSym),
-        pub fn on(self: *@This(), ev: Walk.Event) error{OutOfMemory}!void {
-            const e = switch (ev) {
-                .enter => |e| e,
-                else => return,
-            };
-            if (e.tag != .identifier and e.tag != .field_access) return;
-            switch (self.frozen.resolutions[e.idx.int()]) {
-                .constant => |cid| try self.out.append(self.gpa, self.frozen.consts[cid]),
-                else => {},
-            }
-        }
-    };
     var v: ConstVisitor = .{ .gpa = gpa, .frozen = frozen, .out = out };
     try Walk.walk(.{ .tree = frozen.tree, .tokens = frozen.tokens, .source = frozen.source }, idx, &v);
 }
+
+/// Records each constant a name resolves to, in walk order (`walkConsts`).
+pub const ConstVisitor = struct {
+    gpa: std.mem.Allocator,
+    frozen: *const lower.Inputs,
+    out: *std.ArrayList(Typecheck.ConstSym),
+    pub fn on(self: *@This(), ev: Walk.Event) error{OutOfMemory}!void {
+        const e = switch (ev) {
+            .enter => |e| e,
+            else => return,
+        };
+        if (e.tag != .identifier and e.tag != .field_access) return;
+        switch (self.frozen.resolutions[e.idx.int()]) {
+            .constant => |cid| try self.out.append(self.gpa, self.frozen.consts[cid]),
+            else => {},
+        }
+    }
+};
 
 /// Collect the types `idx` touches (its node types under the subtree, in walk order),
 /// each as a `TouchedType` carrying — for an aggregate — an index-free layout descriptor

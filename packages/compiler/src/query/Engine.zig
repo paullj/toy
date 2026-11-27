@@ -491,6 +491,25 @@ pub const Frozen = struct {
     /// The program's other units, which the inliner reads callee IR from. Null lowers
     /// every call as a call.
     units: ?InlineUnits.Units = null,
+    /// A body from source: what `walkSource` found in its decl, when the build
+    /// already walked it to find what it reaches. Null walks again.
+    walked: ?*const Walked = null,
+};
+
+/// The callee sigs, touched types and constants of a body from source, as `sourceFp`
+/// folds them.
+pub const Walked = struct {
+    calls: []const Fingerprint.Sig = &.{},
+    touched: []const Fingerprint.TouchedType = &.{},
+    consts: []const Typecheck.ConstSym = &.{},
+
+    /// For a `Walked` that owns its slices and each touched layout.
+    pub fn deinit(w: *Walked, gpa: std.mem.Allocator) void {
+        gpa.free(w.calls);
+        AstWalk.freeTouched(gpa, w.touched);
+        gpa.free(w.touched);
+        gpa.free(w.consts);
+    }
 };
 
 /// Fail a unit's lowering, keeping its first diagnostic where the driver reports it: such
@@ -761,15 +780,59 @@ pub fn erasedCall(fr: *const Frozen, u: *const Typecheck.ErasedUnit) ?ErasedCall
 /// facts, and its lines when the profile tracks them. `sig` is the body's signature.
 pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, sig: ?Fingerprint.Sig) !u64 {
     const in = &fr.in;
-    var callee_sigs: std.ArrayList(Fingerprint.Sig) = .empty;
-    defer callee_sigs.deinit(gpa);
-    try AstWalk.walkCalls(gpa, in, decl, sig, &callee_sigs);
+    if (fr.body == .source and fr.body.source.decl == decl) if (fr.walked) |w| return foldSource(gpa, fr, decl, w.*);
+    var w = try walkSource(gpa, in, decl, sig, &NoVisitor{});
+    defer w.deinit(gpa);
+    return foldSource(gpa, fr, decl, w);
+}
+
+/// What `sourceFp` folds of `decl`, whose signature is `sig`, owned: the one definition of
+/// that walk. `along` (a visitor) is fed the events of the same walk, so a build that needs
+/// another fact of the body walks it once.
+pub fn walkSource(gpa: std.mem.Allocator, in: *const lower.Inputs, decl: Ast.Index, sig: ?Fingerprint.Sig, along: anytype) !Walked {
+    var calls: std.ArrayList(Fingerprint.Sig) = .empty;
+    defer calls.deinit(gpa);
     var touched: std.ArrayList(Fingerprint.TouchedType) = .empty;
     defer {
         AstWalk.freeTouched(gpa, touched.items);
         touched.deinit(gpa);
     }
-    try AstWalk.walkTouchedSig(gpa, in, decl, sig, &touched);
+    var consts: std.ArrayList(Typecheck.ConstSym) = .empty;
+    defer consts.deinit(gpa);
+    var cv: AstWalk.CallVisitor = .{ .gpa = gpa, .frozen = in, .fn_sig = sig, .out = &calls };
+    var tv: AstWalk.TouchedVisitor = .{ .gpa = gpa, .frozen = in, .fn_sig = sig, .out = &touched };
+    var kv: AstWalk.ConstVisitor = .{ .gpa = gpa, .frozen = in, .out = &consts };
+    var tee: Tee(@TypeOf(along)) = .{ .calls = &cv, .touched = &tv, .consts = &kv, .along = along };
+    try Walk.walk(.{ .tree = in.tree, .tokens = in.tokens, .source = in.source }, decl, &tee);
+    var w: Walked = .{};
+    errdefer w.deinit(gpa);
+    w.calls = try calls.toOwnedSlice(gpa);
+    w.consts = try consts.toOwnedSlice(gpa);
+    w.touched = try touched.toOwnedSlice(gpa);
+    return w;
+}
+
+pub const NoVisitor = struct {
+    pub fn on(_: *const NoVisitor, _: Walk.Event) error{OutOfMemory}!void {}
+};
+
+fn Tee(comptime B: type) type {
+    return struct {
+        calls: *AstWalk.CallVisitor,
+        touched: *AstWalk.TouchedVisitor,
+        consts: *AstWalk.ConstVisitor,
+        along: B,
+        pub fn on(t: *@This(), ev: Walk.Event) error{OutOfMemory}!void {
+            try t.calls.on(ev);
+            try t.touched.on(ev);
+            try t.consts.on(ev);
+            try t.along.on(ev);
+        }
+    };
+}
+
+fn foldSource(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, w: Walked) !u64 {
+    const in = &fr.in;
     var type_args: std.ArrayList(Fingerprint.TouchedType) = .empty;
     defer {
         AstWalk.freeTouched(gpa, type_args.items);
@@ -782,10 +845,7 @@ pub fn sourceFp(gpa: std.mem.Allocator, fr: *const Frozen, decl: Ast.Index, sig:
         confs.deinit(gpa);
     }
     try AstWalk.walkConformances(gpa, in, fr.conformances, &confs);
-    var consts: std.ArrayList(Typecheck.ConstSym) = .empty;
-    defer consts.deinit(gpa);
-    try AstWalk.walkConsts(gpa, in, decl, &consts);
-    var fp = Fingerprint.foldConsts(Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, callee_sigs.items, touched.items, type_args.items, confs.items), fr.closure_facts), consts.items);
+    var fp = Fingerprint.foldConsts(Fingerprint.foldClosure(Fingerprint.fingerprint(in.tree, in.tokens, in.source, decl, w.calls, w.touched, type_args.items, confs.items), fr.closure_facts), w.consts);
     if (in.lines.tracked()) {
         var h = std.hash.Wyhash.init(fp);
         var lv = AstWalk.LineVisitor{ .h = &h, .in = in };
@@ -817,19 +877,26 @@ pub fn uncoveredReloc(gpa: std.mem.Allocator, fr: *const Frozen, fc: *const Link
             else => continue,
         };
         if (t.kind == .builtin or StdNames.isBundledRuntimeSym(t.name) or std.mem.eql(u8, t.name, fr.sym.name)) continue;
-        // A `.c_call` adapter is `<module>.<sym>$ccall`, or `<module>.<sym>$v<k>$ccall`
-        // for a variadic extern, and the caller names the extern by its bare C symbol.
-        const base = if (std.mem.endsWith(u8, t.name, "$ccall")) blk: {
-            const head = t.name[0..std.mem.indexOfScalar(u8, t.name, '$').?];
-            break :blk head[if (std.mem.lastIndexOfScalar(u8, head, '.')) |d| d + 1 else 0..];
-        } else for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
-            if (std.mem.endsWith(u8, t.name, suf)) break t.name[0 .. t.name.len - suf.len];
-        } else t.name;
+        const base = adapterBase(t.name) orelse t.name;
         if (InlineUnits.containsName(names.items, base)) continue;
         if (for (siblings) |u| {
             if (std.mem.eql(u8, u.name, base)) break true;
         } else false) continue;
         return t.name;
+    }
+    return null;
+}
+
+/// The name a caller's key folds for the adapter `name`, or null when `name` is no
+/// adapter: the fn or method it calls, or for a `.c_call` adapter (`<module>.<sym>$ccall`,
+/// or `<module>.<sym>$v<k>$ccall` for a variadic extern) the bare C symbol the caller names.
+pub fn adapterBase(name: []const u8) ?[]const u8 {
+    if (std.mem.endsWith(u8, name, "$ccall")) {
+        const head = name[0..std.mem.indexOfScalar(u8, name, '$').?];
+        return head[if (std.mem.lastIndexOfScalar(u8, head, '.')) |d| d + 1 else 0..];
+    }
+    for ([_][]const u8{ "$fnval", "$bound", "$boundbox", "$boundref", "$cfn" }) |suf| {
+        if (std.mem.endsWith(u8, name, suf)) return name[0 .. name.len - suf.len];
     }
     return null;
 }

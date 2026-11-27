@@ -1,0 +1,9 @@
+pub struct P { pub v: int }
+
+impl P has Display {
+    fn display(self) -> str { self.v.to_string() }
+}
+
+pub fn first_len(p: P) -> int {
+    return p.to_string().len()
+}
