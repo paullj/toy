@@ -56,8 +56,8 @@ declares its own externs as `ffi.md` describes.
 |--------|-------|
 | `core/sys` | the system C library's `write` and `read` externs: `print(s)` to fd 1, `write_fd`, `read_fd_all` and `read_line_fd` |
 | `core/ffi` | the libm and `labs` externs and their safe wrappers |
-| `core/os` | the `_NSGetArgc`, `_NSGetArgv`, `getenv`, `strlen`, `exit`, `__error`, `__errno_location`, `clock_gettime_nsec_np`, `nanosleep` and `getentropy` externs: `argc`, `argv(i)`, `env`, `exit_process`, `errno`, `errno_loc` (picks the errno extern with `when target.os`), `monotonic_ns`, `realtime_ns`, `sleep_ns`, `entropy_u64`, and `from_cstr` (copies) / `to_cstr` |
-| `core/fs` | the `open` (two arguments, never `O_CREAT`), `creat`, `close`, `unlink` and `access` externs: `open_read`, `open_append`, `create`, `close_fd`, `remove`, `exists`, `write_all`, `read_some` and `read_all`, each failure as a negated errno |
+| `core/os` | the private `getenv`, `strlen`, `exit`, `__error`, `__errno_location`, `clock_gettime`, `nanosleep` and `getentropy` externs: `argc` and `argv(i)` (from the words the target's entry stores before `main`), `env`, `exit_process`, `errno`, `errno_loc` (picks the errno extern with `when target.os`), `monotonic_ns` and `realtime_ns` (one `clock_gettime` call; only the clock ids differ per OS), `sleep_ns`, `entropy_u64`, and `from_cstr` (copies) / `to_cstr` |
+| `core/fs` | the private `open` (two arguments, never `O_CREAT`; its flags picked per OS with `when target.os`), `creat`, `close`, `unlink` and `access` externs: `open_read`, `open_append`, `create`, `close_fd`, `remove`, `exists`, `write_all`, `read_some` and `read_all`, each failure as a negated errno |
 | `core/mem` | the growable `gc_array` and the hash table behind Vec, Map and Set |
 | `core/fmt` | float digits in toy: `shortest(f)` (Zig std's Ryu: the shortest round-trip digits, their decimal point and sign), `rounded(f, n)` (exact, to `n` significant digits), and `parse(s)` over the `strtod` extern |
 | `core/text` | raw `str` parts: `slice`, the `alloc`/`put`/`window`/`take` buffer that builds a str once, and `join` over it |
@@ -383,10 +383,11 @@ Every std and core module follows these rules.
 - **stdout and stderr are unbuffered.** Each print is one or more `write` calls before it
   returns, so output interleaves in program order, survives a panic or an exit, and needs
   no flush.
-- **Each Darwin-only symbol sits behind one core wrapper.** A private or
-  platform-specific symbol (for example `_NSGetArgv`, `__error`) is declared once in core
-  and reached only through that one wrapper fn, so porting to another target changes the
-  wrapper bodies and nothing in std.
+- **Each per-OS binding sits behind one core wrapper.** An extern, a constant or a
+  struct layout that differs per OS (for example `__error` and `__errno_location`, or
+  the clock ids) is chosen with `when target.os` inside one core wrapper fn, and the
+  externs are private to their core module (#421), so porting to another target changes
+  the wrapper bodies and nothing in std.
 - **core is private (R0013).** A user module that imports `core/*` gets R0013, which
   names the std module to import instead. Each core module has a row in
   `StdNames.core_replacements`, and a unit test walks the bundle so a new core module

@@ -328,18 +328,16 @@ const LibPhrase = struct {
     }
 };
 
-/// Whether the program names a library of its own: a `-l`, or an extern in a user
-/// module. The bundled modules' externs bind to the system C library, which every
-/// target has.
+/// Whether the program names a library of its own: a `-l`, or an `extern "lib"` block.
+/// Any other extern binds to the system C library, which every target has.
 pub fn namesLibraries(graph: *const Graph.Graph, req: Request) bool {
     if (req.libs.len != 0) return true;
     for (graph.modules) |*m| {
-        if (m.bundled) continue;
         const tree = m.tree();
         const prog = tree.nodes[Ast.root(tree.nodes).int()];
         if (prog.tag != .program) continue;
         for (Ast.rangeSlice(tree, prog.lhs.int())) |idx| {
-            if (tree.nodes[idx.int()].tag == .extern_fn_decl) return true;
+            if (tree.nodes[idx.int()].tag == .extern_fn_decl and Ast.externLibrary(tree, m.tokens, m.source, idx) != null) return true;
         }
     }
     return false;
@@ -584,7 +582,7 @@ fn freeGraphOfMods(gpa: std.mem.Allocator, g: *Graph.Graph) void {
     g.deinit(gpa);
 }
 
-test "a program names libraries when the command line gives -l or a user module declares an extern" {
+test "a program names libraries when the command line gives -l or an extern block names one" {
     const gpa = testing.allocator;
     var bare = try graphOfMods(gpa, &.{
         .{ .path = "main", .src = "fn main() -> int { 0 }\n" },
@@ -593,7 +591,10 @@ test "a program names libraries when the command line gives -l or a user module 
     defer freeGraphOfMods(gpa, &bare);
     try testing.expect(!namesLibraries(&bare, .{}));
     try testing.expect(namesLibraries(&bare, .{ .libs = &.{"z"} }));
-    var ext = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern fn labs(x: int) -> int\nfn main() -> int { 0 }\n" }});
+    var system = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern fn labs(x: int) -> int\nextern { fn abs(x: int32) -> int32 }\nfn main() -> int { 0 }\n" }});
+    defer freeGraphOfMods(gpa, &system);
+    try testing.expect(!namesLibraries(&system, .{}));
+    var ext = try graphOfMods(gpa, &.{.{ .path = "main", .src = "extern \"z\" { fn crc32(c: int, p: rawptr, n: int32) -> int }\nfn main() -> int { 0 }\n" }});
     defer freeGraphOfMods(gpa, &ext);
     try testing.expect(namesLibraries(&ext, .{}));
 }

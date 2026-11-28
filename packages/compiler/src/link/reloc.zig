@@ -141,6 +141,11 @@ pub const gc_stackmap_base_hash: u64 = 0x57AC_C0DE_BA5E_0000;
 /// test below holds every one of them inside.
 pub const bss_size: u32 = 1024;
 
+/// The control block words each target's entry stores the process's argc and argv in
+/// (#60 T10), wherever it gets them from; core reads only these words.
+pub const argc_off: u32 = 216;
+pub const argv_off: u32 = 224;
+
 comptime {
     std.debug.assert(gc_stackmap_base_hash != symtab_base_hash and
         gc_stackmap_base_hash != desc_table_base_hash and gc_stackmap_base_hash != 0);
@@ -166,6 +171,8 @@ test "every control block field core/rt/gc names fits in __bss" {
     var fields: usize = 0;
     var end: usize = 0;
     var used = [_]bool{false} ** (bss_size / 8);
+    used[argc_off / 8] = true;
+    used[argv_off / 8] = true;
     var lines = std.mem.tokenizeScalar(u8, src, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "fn ") or std.mem.indexOf(u8, line, "(cb: int") == null) continue;
@@ -187,6 +194,17 @@ test "every control block field core/rt/gc names fits in __bss" {
         fields += 1;
     }
     try testing.expect(fields >= 15);
+}
+
+test "core/os reads argc and argv from the words the entry stores them in" {
+    const src = for (@import("bundled_std").modules) |m| {
+        if (std.mem.eql(u8, m.path, "core/os")) break m.source;
+    } else return error.TestUnexpectedResult;
+    var buf: [64]u8 = undefined;
+    for ([_]u32{ argc_off, argv_off }) |off| {
+        try testing.expect(std.mem.indexOf(u8, src, try std.fmt.bufPrint(&buf, "load(control_block() + {d})", .{off})) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, src, "_NSGetArg") == null);
 }
 
 /// The integer a one-line .toy fn returns, as in `fn f() -> int { return 13 }`, or the

@@ -3318,8 +3318,8 @@ test "codegen reports missing main and lowers a simple main" {
         }
     }
 
-    // A simple `main` lowers and links to a non-empty, word-aligned __text blob
-    // with `main` at offset 0 (it is the only function).
+    // A simple `main` lowers and links to a non-empty, word-aligned __text blob that
+    // enters at the 5-word entry stub, linked last.
     {
         const src = "fn main() -> int {\n x := 40\n y := 2\n return x + y\n}\n";
         const path = dir_name ++ "/main.toy";
@@ -3336,7 +3336,7 @@ test "codegen reports missing main and lowers a simple main" {
                 try testing.expectEqual(@as(usize, 0), lp.diags.len);
                 try testing.expect(lp.text.len > 0);
                 try testing.expectEqual(@as(usize, 0), lp.text.len % 4);
-                try testing.expectEqual(@as(u32, 0), lp.entry_off);
+                try testing.expectEqual(@as(u32, @intCast(lp.text.len - 20)), lp.entry_off);
             },
         }
     }
@@ -5569,7 +5569,7 @@ test "every enum or range flag lists its valid values, on build, run and check (
     }
 }
 
-test "`toy check --target` checks for that target's os, and a build for one toy cannot emit is R0021 (#422)" {
+test "`toy check --target` checks for that target's os, and a build for one toy cannot emit is R0021 (#422, #433)" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5596,7 +5596,14 @@ test "`toy check --target` checks for that target's os, and a build for one toy 
     try Io.Dir.cwd().createDirPath(io, dir_name);
     const path = dir_name ++ "/main.toy";
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "fn main() -> int {\n    return 0\n}\n" });
-    for ([_][]const u8{ "aarch64-linux", "aarch64-linux-gnu", "x86_64-linux", "x86_64-linux-gnu" }) |t| {
+    for ([_][]const u8{ "aarch64-linux", "aarch64-linux-gnu" }) |t| {
+        const res = try spawnToyBoth(gpa, io, &.{ "build", "--target", t, "-o", dir_name ++ "/linux", path });
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+        try Io.Dir.cwd().access(io, dir_name ++ "/linux", .{});
+    }
+    for ([_][]const u8{ "x86_64-linux", "x86_64-linux-gnu" }) |t| {
         const res = try spawnToyBoth(gpa, io, &.{ "build", "--target", t, "-o", dir_name ++ "/never", path });
         defer gpa.free(res.out);
         defer gpa.free(res.err);
@@ -5610,7 +5617,7 @@ test "`toy check --target` checks for that target's os, and a build for one toy 
     }
 }
 
-test "`toy check` for a target whose libraries toy cannot read says it skips the library checks (#422)" {
+test "`toy check` for a target whose libraries toy cannot read says it skips the library checks, and a build refuses named ones (#422, #433)" {
     const gpa = testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -5639,6 +5646,28 @@ test "`toy check` for a target whose libraries toy cannot read says it skips the
         try testing.expectEqualStrings("", res.out);
         try testing.expectEqualStrings(c.err, res.err);
     }
+    // A build cannot skip them: it binds every import to a library.
+    const refused = "error: a program that names a library cannot be built for aarch64-linux yet: toy cannot read its shared libraries\n";
+    for ([_][]const []const u8{
+        &.{ "build", "--target", "aarch64-linux", "-o", dir_name ++ "/never", ext },
+        &.{ "build", "--target", "aarch64-linux", "-l", "nosuchlibxyz", "-o", dir_name ++ "/never", plain },
+    }) |args| {
+        const res = try spawnToyBoth(gpa, io, args);
+        defer gpa.free(res.out);
+        defer gpa.free(res.err);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, res.term);
+        try testing.expectEqualStrings(refused, res.err);
+        try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, dir_name ++ "/never", .{}));
+    }
+    // An extern that names no library binds to the system C library, as the runtime's do.
+    const bare = dir_name ++ "/bare.toy";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = bare, .data = "extern fn putchar(c: int32) -> int32\nextern { fn labs(x: int) -> int }\nfn main() -> int {\n    unsafe { putchar(65) }\n    return unsafe { labs(0) }\n}\n" });
+    const res = try spawnToyBoth(gpa, io, &.{ "build", "--target", "aarch64-linux", "-o", dir_name ++ "/bare", bare });
+    defer gpa.free(res.out);
+    defer gpa.free(res.err);
+    errdefer std.debug.print("{s}\n{s}\n", .{ res.out, res.err });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    try Io.Dir.cwd().access(io, dir_name ++ "/bare", .{});
 }
 
 test "`toy run` takes only the host target, with a hint to build (#422)" {

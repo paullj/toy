@@ -11,7 +11,7 @@ pub enum IoError {
     not_directory,
     # The path holds a NUL byte, which would cut it short as a C string.
     invalid_path,
-    # Any other errno, as libSystem set it.
+    # Any other errno, as the C library set it.
     other(int),
 }
 
@@ -29,7 +29,7 @@ impl IoError has Display {
     }
 }
 
-# Darwin's errno values.
+# These errno values are the same on Darwin and Linux.
 fn from_errno(e: int) -> IoError {
     return match e {
         2 -> IoError.not_found,
@@ -106,7 +106,7 @@ pub fn exists(path: str) -> bool {
 # binding, an argument) must see a close made through any other copy.
 pub struct File { fd: Ref[int] }
 
-# Darwin's EBADF, as libSystem would report it for a closed fd.
+# EBADF (9 on Darwin and Linux), as the C library would report it for a closed fd.
 fn closed() -> IoError {
     return IoError.other(9)
 }
@@ -168,7 +168,8 @@ impl File {
         return Result[(), IoError].ok(())
     }
 
-    # The File is closed even when close(2) fails, since Darwin frees the fd either way.
+    # The File is closed even when close(2) fails, since Darwin and Linux free the fd
+    # either way.
     fn close(self) -> Result[(), IoError] {
         fd := self.fd.get()
         if fd == -1 { return Result[(), IoError].err(closed()) }

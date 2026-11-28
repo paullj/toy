@@ -139,6 +139,7 @@ pub const IrResult = union(enum) {
 fn relink(
     io: Io,
     gpa: std.mem.Allocator,
+    target: Target,
     backend: *const Isa.Backend,
     slots: []Engine.Slot,
     names: []const Link.SymName,
@@ -160,7 +161,7 @@ fn relink(
         s.fc = null; // ownership moved into `fns`, then into linkAndTail
     }
 
-    var lp = linkAndTail(io, gpa, backend, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
+    var lp = linkAndTail(io, gpa, target, backend, fns.items, names, entry_fn, desc_plan, debug) catch |e| switch (e) {
         error.CallTargetTooFar => return .{ .err = .{ .message = "call target out of range", .span = null } },
         error.UnresolvedSymbol, error.NoEntry => return .{ .err = .{ .message = "internal: unresolved symbol after codegen", .span = null } },
         else => |err| return err,
@@ -178,8 +179,8 @@ fn relink(
 /// Shared back half of both paths: intern strings deterministically, rewrite `.cstr`
 /// targets, then `Link.link`. CONSUMES `fns` (frees each FnCode). Returns a LinkedProgram
 /// with `diags`/`owned_msgs` left empty for the caller to fill.
-fn linkAndTail(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
-    const lk = try link.linkProgram(io, gpa, backend, fns, names[entry_fn], desc_plan, debug);
+fn linkAndTail(io: Io, gpa: std.mem.Allocator, target: Target, backend: *const Isa.Backend, fns: []Link.FnCode, names: []const Link.SymName, entry_fn: u32, desc_plan: []const Link.DescEntry, debug: ?Link.DebugInput) !LinkedProgram {
+    const lk = try link.linkProgram(io, gpa, target, backend, fns, names[entry_fn], desc_plan, debug);
     return LinkedProgram{
         .text = lk.text,
         .entry_off = lk.entry_off,
@@ -880,7 +881,7 @@ pub fn lowerGraphProgram(
 
     const link_t0: i128 = if (link_ns != null) nowNs(io) else 0;
     const entry_at: u32 = @intCast(std.sort.binarySearch(u32, reached, entry, orderU32).?);
-    const out = relink(io, gpa, Isa.of(target) orelse return error.UnsupportedTarget, slots, unit_names, entry_at, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
+    const out = relink(io, gpa, target, Isa.of(target) orelse return error.UnsupportedTarget, slots, unit_names, entry_at, compiled, cached_n, opt_stats, ir_instrs, desc_plan.items, debug);
     if (link_ns) |lp| {
         const dt = nowNs(io) - link_t0;
         lp.* = if (dt > 0) @intCast(dt) else 0;

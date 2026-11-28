@@ -27,13 +27,13 @@
 # in a pool any class refills from, every other one on its class's unswept list, which
 # allocation sweeps a span at a time once the class's freelist runs dry.
 #
-# The control block is in the image's zero-fill __bss, so every field starts at 0. A span
-# is a 256-byte header, the layout table if it is mixed, then cells of one size, carved
-# from a 64 MiB arena; a large object (over 8 KiB) has a mapping of its own with the same
-# header shape. The page map names the span or large object that owns each heap page. The
-# fns at the end name each field's offset.
+# The control block is in the image's zero-fill bss, so every field starts at 0. A span is a
+# 256-byte header, the layout table if mixed, then cells of one size, carved from a 64 MiB
+# arena; a large object (over 8 KiB) has its own mapping with the same header shape. The
+# page map names each heap page's span or large object. The last fns name the fields.
 
 import core/rt/frames
+import core/target
 
 extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
 extern fn munmap(addr: int, len: int) -> int
@@ -344,9 +344,15 @@ fn bias(root: int, slot: int) -> int {
 # A failed mapping (MAP_FAILED, -1) would put the map, an arena or a large object at
 # address -1, where the next write lands far from any mapping, so it panics here instead.
 fn map_pages(len: int) -> int {
-    at := unsafe { mmap(0, len, 3, 4098, -1, 0) }
+    at := map_anon(len)
     if at == -1 { panic("out of memory") }
     return at
+}
+
+# A private, anonymous, read-write mapping of `len` bytes, or -1. MAP_PRIVATE|MAP_ANONYMOUS
+# is 0x1002 on Darwin and 0x22 on Linux; core/rt/stack maps its alternate stack here too.
+pub fn map_anon(len: int) -> int {
+    return unsafe { mmap(0, len, 3, when target.os { .macos -> 0x1002, .linux -> 0x22 }, -1, 0) }
 }
 
 fn span_shift() -> int { return 14 }
@@ -709,10 +715,10 @@ fn sweep_large(cb: int) -> int {
     return live
 }
 
-# Control block fields. Release inlines each, so a name costs no call. Bytes 120..216
-# belong to other core/rt modules: 120 is core/rt/frames's, 128..176 core/rt/str's and
-# 176..216 core/rt/panic's. Byte 232 is core/rt/stack's: 1 once it has armed the stack
-# overflow handler.
+# Control block fields; release inlines each. Bytes 120..240 are others': 120 is
+# core/rt/frames's, 128..176 core/rt/str's, 176..216 core/rt/panic's, 216 and 224 the argc
+# and argv `main` stores (#60 T10), and 232 core/rt/stack's: 1 once it has armed the
+# stack overflow handler.
 fn spans_mapped(cb: int) -> int { return cb }
 fn collections_run(cb: int) -> int { return cb + 8 }
 # Bytes allocated since the last collection, counted when a refill or a sweep hands a

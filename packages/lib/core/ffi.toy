@@ -3,7 +3,7 @@
 pub extern fn labs(x: int) -> int
 
 # The libm double-precision math entry points (toy `float` is an f64, matching C `double`).
-# The C symbol name IS the extern name, so these bind libSystem's `sqrt`/`floor`/... directly.
+# The C symbol name IS the extern name, so these bind the system's `sqrt`/`floor`/... directly.
 pub extern fn sqrt(x: float) -> float
 pub extern fn floor(x: float) -> float
 pub extern fn ceil(x: float) -> float

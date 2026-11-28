@@ -5609,9 +5609,16 @@ test "a local const is named to the end of its block and a pub one across module
     };
     const Check = struct {
         fn run(g: *const Graph.Graph, r: *GraphResult) anyerror!void {
-            _ = g;
-            try testing.expectEqual(@as(usize, 3), r.consts.len);
-            try testing.expect(!r.consts[2].is_pub);
+            // The bundled runtime brings `core/target`'s consts along.
+            var own: [3]GlobalConst = undefined;
+            var n: usize = 0;
+            for (r.consts) |c| {
+                if (g.modules[c.module].bundled) continue;
+                own[n] = c;
+                n += 1;
+            }
+            try testing.expectEqual(@as(usize, 3), n);
+            try testing.expect(!own[2].is_pub);
             try testing.expectEqual(@as(usize, 1), countCode(r, .R0001));
             try testing.expectEqual(@as(usize, 1), countCode(r, .R0005));
             var bound: usize = 0;

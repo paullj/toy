@@ -986,11 +986,19 @@ fn emitExecutable(
     // The interpreter ran every stage clean: `lowered` is `.ok` with no EFFECTIVE error.
     const lp = &lowered.?.ok;
 
-    var libs = try toyc.Libraries.collect(gpa, io, &graph.?, link, toyc.LibResolver.of(target) orelse return error.UnsupportedTarget);
-    defer libs.deinit();
-    if (try reportLibraryUsage(usage, &libs)) |code| return code;
-    if (try reportLinkDiags(gpa, out, level, &graph.?, &libs, libs.diags, sev)) |code| return code;
-    if (try reportLinkDiags(gpa, out, level, &graph.?, &libs, try libs.unexportedCalls(io, &graph.?, &tc.?), sev)) |code| return code;
+    // A target whose libraries toy cannot read yet has no resolver; until it has one, it
+    // builds only programs that name no library, which bind every import to the system's.
+    var libs: ?toyc.Libraries.Result = if (toyc.LibResolver.of(target)) |r| try toyc.Libraries.collect(gpa, io, &graph.?, link, r) else null;
+    defer if (libs) |*l| l.deinit();
+    if (libs) |*l| {
+        if (try reportLibraryUsage(usage, l)) |code| return code;
+        if (try reportLinkDiags(gpa, out, level, &graph.?, l, l.diags, sev)) |code| return code;
+        if (try reportLinkDiags(gpa, out, level, &graph.?, l, try l.unexportedCalls(io, &graph.?, &tc.?), sev)) |code| return code;
+    } else if (toyc.Libraries.namesLibraries(&graph.?, link)) {
+        try usage.w.print("error: a program that names a library cannot be built for {s} yet: toy cannot read its shared libraries\n", .{target.name()});
+        try usage.w.flush();
+        return 1;
+    }
 
     // Render any surviving warnings + a summary, then build the binary. No warning
     // survives to here under `deny_warnings` (it would have promoted to an error and
@@ -1045,7 +1053,7 @@ fn emitExecutable(
         lp.entry_off,
         lp.cstrings,
         lp.data_relocs,
-        libs.linking,
+        if (libs) |l| l.linking else .{},
         lp.debug,
     );
     defer gpa.free(image);

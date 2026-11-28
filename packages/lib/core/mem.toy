@@ -92,7 +92,7 @@ extern fn memcpy(dst: rawptr, src: rawptr, n: int) -> rawptr
 # Double the backing (an empty one, which has none to copy, gets room for 4) and copy the
 # live prefix over. A collection can fire inside `gc_alloc`, so the header still holds the
 # OLD backing there (keeping its elements traced); nothing allocates between the copy and
-# the publish. The header never moves, so every alias sees the new backing. libSystem's
+# the publish. The header never moves, so every alias sees the new backing. The C library's
 # `memcpy` moves the bytes in bulk: a toy loop costs dozens of instructions per element.
 pub fn ga_grow[T](a: gc_array[T], c: int) {
     nc := if c == 0 { 4 } else { c * 2 }

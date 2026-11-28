@@ -49,6 +49,8 @@ pub const symtab_base_hash = reloc.symtab_base_hash;
 pub const desc_table_base_hash = reloc.desc_table_base_hash;
 pub const gc_stackmap_base_hash = reloc.gc_stackmap_base_hash;
 pub const bss_size = reloc.bss_size;
+pub const argc_off = reloc.argc_off;
+pub const argv_off = reloc.argv_off;
 
 /// The per-type descriptor sentinel a `descriptor_of[T]()` `cstr_ptr` reloc carries: the
 /// reserved `0xDE5C` prefix OR'd with a 48-bit Wyhash of `T`'s structural key bytes, so
