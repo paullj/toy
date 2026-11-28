@@ -1,0 +1,33 @@
+# Feature: `main` called from toy code, directly and through a fn whose own args sit in
+# the argument registers, leaves the process args as the loader gave them.
+# args: "a" "b c"
+# expect: stdout "3\na\nb c\n3\na\nb c\n"
+# expect: exit 0
+import std/fs
+import std/io
+import std/os
+import std/vec
+fn again(n: int, m: int) -> int {
+    main()
+    return n + m
+}
+fn main() {
+    if !fs.exists("reentered_main.txt") {
+        match fs.write_file("reentered_main.txt", "x") {
+            .ok(_) -> {},
+            .err(_) -> { return },
+        }
+        again(5, 7)
+        main()
+        match fs.remove("reentered_main.txt") {
+            .ok(_) -> {},
+            .err(_) -> { return },
+        }
+        return
+    }
+    xs := os.args()
+    io.println(xs.len())
+    for i in 1..xs.len() {
+        io.println(xs[i])
+    }
+}

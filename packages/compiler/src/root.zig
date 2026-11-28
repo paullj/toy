@@ -61,6 +61,7 @@ pub const Walk = @import("ast/Walk.zig");
 pub const angle_args = @import("ast/angle_args.zig");
 pub const Link = @import("link/Link.zig");
 pub const MachO = @import("link/MachO.zig");
+pub const Elf = @import("link/Elf.zig");
 pub const Dylib = @import("link/Dylib.zig");
 pub const Image = @import("link/Image.zig");
 pub const LibResolver = @import("link/LibResolver.zig");
@@ -134,6 +135,7 @@ test {
     _ = angle_args;
     _ = Link;
     _ = MachO;
+    _ = Elf;
     _ = Image;
     _ = LibResolver;
     _ = CodeSign;

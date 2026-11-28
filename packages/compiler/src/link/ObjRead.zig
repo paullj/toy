@@ -3,8 +3,10 @@
 //! stands in for otool, nm and dwarfdump, which exist only on macOS and read only
 //! Mach-O.
 //!
-//! Each format fills the same `Object`; the readers past `parse` never look at the format.
-//! ELF joins with the ELF writer (#433): `.text`, `.symtab`, `DT_NEEDED` and `.debug_*`.
+//! Each format fills the same `Object`; the readers past `parse` look at the format only
+//! to decode a table in its own layout. ELF is read through its section headers: `.text`,
+//! `.symtab`, `.dynamic` (`DT_NEEDED`) and `.debug_line`; its program headers and dynamic
+//! entries are readable too, for tests of the ELF writer.
 //!
 //! The reader depends on std alone, so the `toy-objdump` tool builds it without the
 //! compiler.
@@ -26,6 +28,10 @@ pub const Object = struct {
     debug_line: ?[]const u8 = null,
     /// The load commands (Mach-O) or the dynamic section (ELF).
     libs_raw: []const u8 = &.{},
+    /// The string table the dynamic section's names index (ELF).
+    dynstr: []const u8 = &.{},
+    /// The program headers (ELF).
+    phdrs: []const u8 = &.{},
 };
 
 pub const ParseError = error{ Truncated, UnknownFormat, UnsupportedFormat, NoText };
@@ -34,7 +40,7 @@ pub fn parse(bytes: []const u8) ParseError!Object {
     if (bytes.len < 4) return error.Truncated;
     const magic = std.mem.readInt(u32, bytes[0..4], .little);
     if (magic == macho.MH_MAGIC_64) return macho.parse(bytes);
-    if (std.mem.eql(u8, bytes[0..4], "\x7fELF")) return error.UnsupportedFormat;
+    if (std.mem.eql(u8, bytes[0..4], "\x7fELF")) return elf.parse(bytes);
     return error.UnknownFormat;
 }
 
@@ -53,7 +59,7 @@ pub const Symbol = struct {
 pub fn symbols(o: Object, gpa: std.mem.Allocator) ![]Symbol {
     return switch (o.format) {
         .macho => macho.symbols(o, gpa),
-        .elf => error.UnsupportedFormat,
+        .elf => elf.symbols(o, gpa),
     };
 }
 
@@ -69,8 +75,55 @@ pub const Library = struct {
 pub fn libraries(o: Object, gpa: std.mem.Allocator) ![]Library {
     return switch (o.format) {
         .macho => macho.libraries(o, gpa),
-        .elf => error.UnsupportedFormat,
+        .elf => elf.libraries(o, gpa),
     };
+}
+
+pub const Segment = struct {
+    /// `p_type`, as `PT_LOAD`.
+    kind: u32,
+    /// `PF_R`/`PF_W`/`PF_X` bits.
+    flags: u32,
+    offset: u64,
+    addr: u64,
+    file_size: u64,
+    mem_size: u64,
+    alignment: u64,
+};
+
+/// An ELF binary's program headers, in file order.
+pub fn segments(o: Object, gpa: std.mem.Allocator) ![]Segment {
+    if (o.format != .elf) return error.UnsupportedFormat;
+    const out = try gpa.alloc(Segment, o.phdrs.len / elf.PHDR_SIZE);
+    for (out, 0..) |*sg, i| {
+        const p = o.phdrs[i * elf.PHDR_SIZE ..][0..elf.PHDR_SIZE];
+        sg.* = .{
+            .kind = std.mem.readInt(u32, p[0..4], .little),
+            .flags = std.mem.readInt(u32, p[4..8], .little),
+            .offset = std.mem.readInt(u64, p[8..16], .little),
+            .addr = std.mem.readInt(u64, p[16..24], .little),
+            .file_size = std.mem.readInt(u64, p[32..40], .little),
+            .mem_size = std.mem.readInt(u64, p[40..48], .little),
+            .alignment = std.mem.readInt(u64, p[48..56], .little),
+        };
+    }
+    return out;
+}
+
+pub const Dynamic = struct { tag: u64, value: u64 };
+
+/// An ELF binary's dynamic entries up to `DT_NULL`, which is left out.
+pub fn dynamicEntries(o: Object, gpa: std.mem.Allocator) ![]Dynamic {
+    if (o.format != .elf) return error.UnsupportedFormat;
+    var out: std.ArrayList(Dynamic) = .empty;
+    errdefer out.deinit(gpa);
+    var off: usize = 0;
+    while (off + 16 <= o.libs_raw.len) : (off += 16) {
+        const tag = std.mem.readInt(u64, o.libs_raw[off..][0..8], .little);
+        if (tag == 0) break;
+        try out.append(gpa, .{ .tag = tag, .value = std.mem.readInt(u64, o.libs_raw[off + 8 ..][0..8], .little) });
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 pub const Row = struct {
@@ -230,6 +283,16 @@ pub fn formatVersion(v: u32, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}", .{ v >> 16, (v >> 8) & 0xff, v & 0xff }) catch unreachable;
 }
 
+fn rd64(b: []const u8, off: usize) ParseError!u64 {
+    if (off + 8 > b.len) return error.Truncated;
+    return std.mem.readInt(u64, b[off..][0..8], .little);
+}
+
+fn slice(b: []const u8, off: u64, len: u64) ParseError![]const u8 {
+    if (off > b.len or len > b.len - off) return error.Truncated;
+    return b[@intCast(off)..][0..@intCast(len)];
+}
+
 const macho = struct {
     const MH_MAGIC_64: u32 = 0xfeedfacf;
     const LC_SEGMENT_64: u32 = 0x19;
@@ -249,16 +312,6 @@ const macho = struct {
     fn rd32(b: []const u8, off: usize) ParseError!u32 {
         if (off + 4 > b.len) return error.Truncated;
         return std.mem.readInt(u32, b[off..][0..4], .little);
-    }
-
-    fn rd64(b: []const u8, off: usize) ParseError!u64 {
-        if (off + 8 > b.len) return error.Truncated;
-        return std.mem.readInt(u64, b[off..][0..8], .little);
-    }
-
-    fn slice(b: []const u8, off: u64, len: u64) ParseError![]const u8 {
-        if (off > b.len or len > b.len - off) return error.Truncated;
-        return b[@intCast(off)..][0..@intCast(len)];
     }
 
     fn parse(b: []const u8) ParseError!Object {
@@ -351,6 +404,99 @@ const macho = struct {
     }
 };
 
+const elf = struct {
+    const PHDR_SIZE = 56;
+    const SHDR_SIZE = 64;
+    const SYM_SIZE = 24;
+    const SHT_SYMTAB = 2;
+    const SHT_DYNAMIC = 6;
+    const SHT_NOBITS = 8;
+    const STT_SECTION = 3;
+    const STT_FILE = 4;
+    const DT_NEEDED = 1;
+
+    fn parse(b: []const u8) ParseError!Object {
+        if (b.len < 64) return error.Truncated;
+        // 64-bit, little-endian: the only kind toy writes.
+        if (b[4] != 2 or b[5] != 1) return error.UnsupportedFormat;
+        var o: Object = .{ .format = .elf, .bytes = b, .text = &.{}, .text_addr = 0 };
+        const phoff = rd64(b, 32) catch unreachable;
+        const shoff = rd64(b, 40) catch unreachable;
+        const phnum = std.mem.readInt(u16, b[56..58], .little);
+        const shnum = std.mem.readInt(u16, b[60..62], .little);
+        const shstrndx = std.mem.readInt(u16, b[62..64], .little);
+        o.phdrs = try slice(b, phoff, @as(u64, phnum) * PHDR_SIZE);
+        const shdrs = try slice(b, shoff, @as(u64, shnum) * SHDR_SIZE);
+        if (shstrndx >= shnum) return error.NoText;
+        const names = try sectionBytes(b, shdrs, shstrndx);
+        var found_text = false;
+        for (0..shnum) |i| {
+            const h = shdrs[i * SHDR_SIZE ..][0..SHDR_SIZE];
+            const name_at = std.mem.readInt(u32, h[0..4], .little);
+            if (name_at >= names.len) return error.Truncated;
+            const name = std.mem.sliceTo(names[name_at..], 0);
+            const kind = std.mem.readInt(u32, h[4..8], .little);
+            const link = std.mem.readInt(u32, h[40..44], .little);
+            if (std.mem.eql(u8, name, ".text")) {
+                o.text = try sectionBytes(b, shdrs, i);
+                o.text_addr = std.mem.readInt(u64, h[16..24], .little);
+                found_text = true;
+            } else if (std.mem.eql(u8, name, ".debug_line")) {
+                o.debug_line = try sectionBytes(b, shdrs, i);
+            } else if (kind == SHT_SYMTAB) {
+                o.symtab = try sectionBytes(b, shdrs, i);
+                if (link >= shnum) return error.Truncated;
+                o.strtab = try sectionBytes(b, shdrs, link);
+            } else if (kind == SHT_DYNAMIC) {
+                o.libs_raw = try sectionBytes(b, shdrs, i);
+                if (link >= shnum) return error.Truncated;
+                o.dynstr = try sectionBytes(b, shdrs, link);
+            }
+        }
+        if (!found_text) return error.NoText;
+        return o;
+    }
+
+    fn sectionBytes(b: []const u8, shdrs: []const u8, i: usize) ParseError![]const u8 {
+        const h = shdrs[i * SHDR_SIZE ..][0..SHDR_SIZE];
+        if (std.mem.readInt(u32, h[4..8], .little) == SHT_NOBITS) return &.{};
+        return slice(b, std.mem.readInt(u64, h[24..32], .little), std.mem.readInt(u64, h[32..40], .little));
+    }
+
+    fn symbols(o: Object, gpa: std.mem.Allocator) ![]Symbol {
+        var out: std.ArrayList(Symbol) = .empty;
+        errdefer out.deinit(gpa);
+        var i: usize = SYM_SIZE;
+        while (i + SYM_SIZE <= o.symtab.len) : (i += SYM_SIZE) {
+            const n = o.symtab[i..][0..SYM_SIZE];
+            const kind = n[4] & 0xf;
+            if (kind == STT_SECTION or kind == STT_FILE) continue;
+            const strx = std.mem.readInt(u32, n[0..4], .little);
+            if (strx >= o.strtab.len) return error.Truncated;
+            try out.append(gpa, .{
+                .name = std.mem.sliceTo(o.strtab[strx..], 0),
+                .addr = std.mem.readInt(u64, n[8..16], .little),
+                .external = n[4] >> 4 != 0,
+                .defined = std.mem.readInt(u16, n[6..8], .little) != 0,
+            });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn libraries(o: Object, gpa: std.mem.Allocator) ![]Library {
+        const dyn = try dynamicEntries(o, gpa);
+        defer gpa.free(dyn);
+        var out: std.ArrayList(Library) = .empty;
+        errdefer out.deinit(gpa);
+        for (dyn) |d| {
+            if (d.tag != DT_NEEDED) continue;
+            if (d.value >= o.dynstr.len) return error.Truncated;
+            try out.append(gpa, .{ .name = std.mem.sliceTo(o.dynstr[@intCast(d.value)..], 0) });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+};
+
 const testing = std.testing;
 
 test "the line reader follows every opcode toy's line program writes" {
@@ -421,7 +567,10 @@ test "the line reader takes the special and fixed opcodes other producers write"
 test "a truncated or foreign file is an error, not a crash" {
     try testing.expectError(error.Truncated, parse("ab"));
     try testing.expectError(error.UnknownFormat, parse("#!/bin/sh\n"));
-    try testing.expectError(error.UnsupportedFormat, parse("\x7fELF\x02\x01\x01\x00"));
+    try testing.expectError(error.Truncated, parse("\x7fELF\x02\x01\x01\x00"));
+    var elf32 = [_]u8{0} ** 64;
+    @memcpy(elf32[0..6], "\x7fELF\x01\x01");
+    try testing.expectError(error.UnsupportedFormat, parse(&elf32));
     var hdr = [_]u8{0} ** 32;
     std.mem.writeInt(u32, hdr[0..4], macho.MH_MAGIC_64, .little);
     std.mem.writeInt(u32, hdr[16..20], 1, .little);

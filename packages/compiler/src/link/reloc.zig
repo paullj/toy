@@ -141,6 +141,11 @@ pub const gc_stackmap_base_hash: u64 = 0x57AC_C0DE_BA5E_0000;
 /// test below holds every one of them inside.
 pub const bss_size: u32 = 1024;
 
+/// The control block words each target's entry stores the process's argc and argv in
+/// (#60 T10), wherever it gets them from; core reads only these words.
+pub const argc_off: u32 = 216;
+pub const argv_off: u32 = 224;
+
 comptime {
     std.debug.assert(gc_stackmap_base_hash != symtab_base_hash and
         gc_stackmap_base_hash != desc_table_base_hash and gc_stackmap_base_hash != 0);
@@ -166,6 +171,8 @@ test "every control block field core/rt/gc names fits in __bss" {
     var fields: usize = 0;
     var end: usize = 0;
     var used = [_]bool{false} ** (bss_size / 8);
+    used[argc_off / 8] = true;
+    used[argv_off / 8] = true;
     var lines = std.mem.tokenizeScalar(u8, src, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "fn ") or std.mem.indexOf(u8, line, "(cb: int") == null) continue;

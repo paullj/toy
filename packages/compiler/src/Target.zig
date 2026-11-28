@@ -102,6 +102,16 @@ pub fn objectFormat(t: Target) ObjectFormat {
     };
 }
 
+/// Whether the process starts in the C library, which then calls the program's entry
+/// (glibc's `__libc_start_main`, #60 T9), rather than at the entry itself (dyld's
+/// `LC_MAIN`).
+pub fn startsThroughLibc(t: Target) bool {
+    return switch (t.os) {
+        .macos => false,
+        .linux => true,
+    };
+}
+
 pub fn cAbi(t: Target) CAbi {
     return switch (t.arch) {
         .aarch64 => switch (t.abi) {

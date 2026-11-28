@@ -13,7 +13,7 @@
 //!   ------------   --------------------------------------  -----------------------------
 //!   arch           cputype/cpusubtype                      e_machine
 //!   text           __TEXT,__text                           .text in a PT_LOAD r-x
-//!   entry_off      LC_MAIN entryoff (dyld calls `main`)    the `_start` stub's call target
+//!   entry_off      LC_MAIN entryoff (dyld calls `main`)    e_entry (the ISA's `_start`)
 //!   cstrings       __TEXT,__cstring                        .rodata (r--, or in the r-x load)
 //!   bss_size       __DATA,__bss (zero-fill)                .bss in a PT_LOAD rw- (memsz > filesz)
 //!   imports        __DATA_CONST,__got + chained fixups     .got + R_*_GLOB_DAT + .dynsym

@@ -7,6 +7,7 @@ const Link = @import("../../../link/Link.zig");
 const Image = @import("../../../link/Image.zig");
 
 ///   * `.call26`    — a `bl`: imm26 = (target − site)/4. Intra-module.
+///   * `.jump26`    — a `b` (a tail call), patched as `.call26`.
 ///   * `.adrp_page` — an `adrp`: page delta between the site and a cstring/GOT vmaddr.
 ///   * `.add_lo12`  — an `add (imm12)`: the low-12 bits of the cstring vmaddr.
 ///   * `.ldr_lo12`  — an `ldr (unsigned offset)`: the low-12 bits of the GOT-slot vmaddr.
@@ -22,10 +23,11 @@ pub const Kind = enum(u8) {
     ldr_lo12,
     movw_g0,
     movw_g1,
+    jump26,
 
     fn phase(k: Kind) Link.RelocPhase {
         return switch (k) {
-            .call26, .movw_g0, .movw_g1 => .intra,
+            .call26, .jump26, .movw_g0, .movw_g1 => .intra,
             .adrp_page, .add_lo12, .ldr_lo12 => .cross,
         };
     }
@@ -53,13 +55,14 @@ pub const patcher: Link.Patcher = .{ .phases = &phases, .patchIntra = patchIntra
 fn patchIntra(text: []u8, kind: Link.RelocKind, site_abs: u32, target_off: u32, addend: i64) Link.IntraError!void {
     const k = kindOf(kind);
     switch (k) {
-        .call26 => {
+        .call26, .jump26 => {
             const target_abs: i64 = @as(i64, target_off) + addend;
             const delta: i64 = target_abs - @as(i64, site_abs);
             std.debug.assert(@mod(delta, 4) == 0); // BL targets are word-aligned
             const imm: i64 = @divExact(delta, 4);
             if (imm < -(@as(i64, 1) << 25) or imm > (@as(i64, 1) << 25) - 1) return error.CallTargetTooFar;
-            std.mem.writeInt(u32, text[site_abs..][0..4], Aarch64.bl(@intCast(imm)), .little);
+            const word = if (k == .call26) Aarch64.bl(@intCast(imm)) else Aarch64.b(@intCast(imm));
+            std.mem.writeInt(u32, text[site_abs..][0..4], word, .little);
         },
         .movw_g0, .movw_g1 => {
             // An offset, not an address, so no runtime reloc (PIE-safe).
@@ -92,7 +95,7 @@ fn patchWord(word: u32, kind: Kind, site_vmaddr: u64, target_vmaddr: u64) u32 {
             std.debug.assert(target_vmaddr & 7 == 0);
             break :blk Aarch64.patchLdrUoff(word, @intCast(target_vmaddr & 0xFFF));
         },
-        .call26, .movw_g0, .movw_g1 => unreachable,
+        .call26, .jump26, .movw_g0, .movw_g1 => unreachable,
     };
 }
 
@@ -100,6 +103,7 @@ const testing = std.testing;
 
 test "each kind resolves in its phase" {
     try testing.expectEqual(Link.RelocPhase.intra, patcher.phase(of(.call26)));
+    try testing.expectEqual(Link.RelocPhase.intra, patcher.phase(of(.jump26)));
     try testing.expectEqual(Link.RelocPhase.intra, patcher.phase(of(.movw_g0)));
     try testing.expectEqual(Link.RelocPhase.intra, patcher.phase(of(.movw_g1)));
     try testing.expectEqual(Link.RelocPhase.cross, patcher.phase(of(.adrp_page)));
@@ -126,6 +130,15 @@ test "call26 through the link: forward +8, backward −12 and self 0 match the a
     try testing.expectEqual(@as(u32, 0x97FFFFFD), std.mem.readInt(u32, text[12..16], .little));
     try patchIntra(&text, of(.call26), 4, 4, 0);
     try testing.expectEqual(@as(u32, 0x94000000), std.mem.readInt(u32, text[4..8], .little));
+}
+
+test "jump26 encodes a b, not a bl, over the same delta" {
+    // Ground truth from `as -arch arm64`: b +8 → 0x14000002, b −12 → 0x17FFFFFD.
+    var text = [_]u8{0} ** 16;
+    try patchIntra(&text, of(.jump26), 0, 8, 0);
+    try testing.expectEqual(@as(u32, 0x14000002), std.mem.readInt(u32, text[0..4], .little));
+    try patchIntra(&text, of(.jump26), 12, 0, 0);
+    try testing.expectEqual(@as(u32, 0x17FFFFFD), std.mem.readInt(u32, text[12..16], .little));
 }
 
 test "movw bakes the site-relative offset halfwords" {

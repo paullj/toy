@@ -30,6 +30,7 @@ const Io = std.Io;
 const Link = @import("Link.zig");
 const ValueLayout = @import("../layout/ValueLayout.zig");
 const MachO = @import("MachO.zig");
+const Elf = @import("Elf.zig");
 const Image = @import("Image.zig");
 const LibResolver = @import("LibResolver.zig");
 const Isa = @import("../codegen/Isa.zig");
@@ -72,10 +73,11 @@ pub const Linked = struct {
 
 /// Drop fns and descriptors unreachable from `entry`, intern strings deterministically,
 /// rewrite `.cstr` targets, then `Link.link`. CONSUMES `fns` (frees each FnCode, dropped
-/// or kept). `entry` is the entry function's stable symbol identity. Returns the
-/// linked tail; the caller owns its `text`/`cstrings`/`data_relocs` (free `.import`
-/// data-reloc names individually).
-pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
+/// or kept). `entry` is the entry function's stable symbol identity; on a target whose C
+/// library starts the process the image enters at the ISA's `_start` instead, which
+/// calls it. Returns the linked tail; the caller owns its `text`/`cstrings`/`data_relocs`
+/// (free `.import` data-reloc names individually).
+pub fn linkProgram(io: Io, gpa: std.mem.Allocator, target: Target, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, planned: []const Link.DescEntry, debug: ?Link.DebugInput) !Linked {
     // We OWN `fns`' elements now (the caller relinquished them); on any failure free
     // the ones not yet moved into `all` (or dropped) plus everything in `all`.
     var all: std.ArrayList(Link.FnCode) = .empty;
@@ -106,6 +108,12 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
         }
     }
     const descriptors = kept_descs.items;
+
+    // 0b) The entry stubs go last, so every fn before them keeps its offset. `main` stays
+    //     an ordinary fn that toy code may call, so only the stub the process enters
+    //     through stores argc and argv (#60 T10).
+    var image_entry = try appendStub(gpa, &all, try backend.entry_stub(gpa, entry));
+    if (target.startsThroughLibc()) image_entry = try appendStub(gpa, &all, try backend.start_stub(gpa, image_entry));
 
     // 1) The collector reads the GC stack map and a panic the backtrace symbol table, so a
     //    kept fn naming either's base reserves and emits it. A program with neither stays
@@ -195,7 +203,7 @@ pub fn linkProgram(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, 
     // 4) Intern symbols (source order) and link.
     var si: Link.SymInterner = .{};
     defer si.deinit(gpa);
-    const linked = try Link.link(io, gpa, &backend.relocs, all.items, &si, entry, uses_panic, uses_gc, descriptors, debug);
+    const linked = try Link.link(io, gpa, &backend.relocs, all.items, &si, image_entry, uses_panic, uses_gc, descriptors, debug);
     errdefer gpa.free(linked.text);
     errdefer linked.debug.deinit(gpa);
     errdefer gpa.free(linked.data_relocs);
@@ -385,10 +393,19 @@ fn importsOf(gpa: std.mem.Allocator, data_relocs: []const Link.Reloc, libs: LibR
 pub const Writer = *const fn (io: Io, gpa: std.mem.Allocator, img: *const Image, identifier: []const u8) error{OutOfMemory}![]u8;
 
 /// The writer for `format`, or null when toy cannot write it yet.
+fn appendStub(gpa: std.mem.Allocator, all: *std.ArrayList(Link.FnCode), stub: Link.FnCode) error{OutOfMemory}!sym.SymName {
+    var owned = stub;
+    all.append(gpa, owned) catch |e| {
+        owned.deinit(gpa);
+        return e;
+    };
+    return owned.sym;
+}
+
 pub fn writerOf(format: Target.ObjectFormat) ?Writer {
     return switch (format) {
         .macho => &MachO.writeSigned,
-        .elf => null,
+        .elf => &Elf.write,
     };
 }
 
@@ -446,7 +463,7 @@ pub fn writeImage(
 /// is byte-load-bearing (sign LAST). `entry` is the entry function's stable
 /// symbol identity (e.g. `{.user_fn, "main"}`). Caller owns the returned bytes.
 pub fn emitExecutable(io: Io, gpa: std.mem.Allocator, backend: *const Isa.Backend, fns: []Link.FnCode, entry: sym.SymName, opts: Options) ![]u8 {
-    const lk = try linkProgram(io, gpa, backend, fns, entry, opts.descriptors, opts.debug);
+    const lk = try linkProgram(io, gpa, opts.target, backend, fns, entry, opts.descriptors, opts.debug);
     defer {
         lk.debug.deinit(gpa);
         gpa.free(lk.text);
@@ -470,7 +487,7 @@ fn litFn(literals: []const Link.Literal) Link.FnCode {
 // not an encoding, so each word is a zero placeholder the test patcher overwrites.
 const T = Link.TestIsa;
 
-const test_backend: Isa.Backend = .{ .c_abi = .aapcs64_apple, .lower = noLower, .fits = noFits, .relocs = T.patcher, .inst_count = noCount };
+const test_backend: Isa.Backend = .{ .c_abi = .aapcs64_apple, .lower = noLower, .fits = noFits, .relocs = T.patcher, .inst_count = noCount, .entry_stub = testEntry, .start_stub = testStart };
 
 fn noFits(_: std.mem.Allocator, _: *const @import("../ir/Ir.zig").Function, _: []const @import("../types.zig").Layout, _: []const @import("../types.zig").EnumLayout) error{OutOfMemory}!bool {
     unreachable;
@@ -556,22 +573,81 @@ test "dfe: linkProgram drops a fn unreachable from the entry, with its import an
 
     var t = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t.deinit();
-    var lk = try linkProgram(t.io(), gpa, &test_backend, fns, entry, &.{}, null);
+    var lk = try linkProgram(t.io(), gpa, .aarch64_macos, &test_backend, fns, entry, &.{}, null);
     defer freeLinked(gpa, &lk);
 
-    // Only `main` survives: no `aaa`, no `bbb`, so no symbol table either.
-    try testing.expectEqual(@as(usize, 16), lk.text.len);
-    try testing.expectEqual(@as(u32, 0), lk.entry_off);
+    // Only `main` survives, then the entry stub: no `aaa`, no `bbb`, so no symbol table
+    // either.
+    try testing.expectEqual(@as(usize, 20), lk.text.len);
+    try testing.expectEqual(@as(u32, 16), lk.entry_off);
     try testing.expectEqual(@as(usize, 0), lk.cstrings.len);
     try testing.expectEqual(@as(usize, 2), lk.data_relocs.len);
     for (lk.data_relocs) |rl| try testing.expectEqualStrings("labs", rl.target.import.name);
 }
 
+/// The link tests' entry stub: one word that calls `main`, the one reference the ISA's
+/// real one makes.
+fn testEntry(gpa: std.mem.Allocator, main: Link.SymName) error{OutOfMemory}!Link.FnCode {
+    const code = try gpa.alloc(u8, 4);
+    errdefer gpa.free(code);
+    @memset(code, 0);
+    const relocs = try gpa.alloc(Link.Reloc, 1);
+    errdefer gpa.free(relocs);
+    relocs[0] = .{ .site = 0, .target = .{ .func = .{ .kind = main.kind, .name = try gpa.dupe(u8, main.name) } }, .kind = T.call };
+    return .{ .sym = .{ .kind = .builtin, .name = try gpa.dupe(u8, "_toy_entry") }, .code = code, .relocs = relocs, .literals = &.{} };
+}
+
+/// A start stub for the link tests: an import of the C library's start and a call to
+/// the entry stub, the two references the ISA's real one makes.
+fn testStart(gpa: std.mem.Allocator, entry: Link.SymName) error{OutOfMemory}!Link.FnCode {
+    var fc = try importFn(gpa, "_start", "__libc_start_main", null);
+    errdefer fc.deinit(gpa);
+    fc.sym.kind = .builtin;
+    const name = try gpa.dupe(u8, entry.name);
+    const relocs = gpa.realloc(fc.relocs, fc.relocs.len + 1) catch |e| {
+        gpa.free(name);
+        return e;
+    };
+    relocs[relocs.len - 1] = .{ .site = 8, .target = .{ .func = .{ .kind = entry.kind, .name = name } }, .kind = T.call };
+    fc.relocs = relocs;
+    return fc;
+}
+
+test "the process enters at the ISA's entry stub, behind its C library's _start where one starts it, linked last" {
+    const gpa = testing.allocator;
+    const entry = Link.SymName{ .kind = .user_fn, .name = "main" };
+    for ([_]Target{ .aarch64_macos, .aarch64_linux }) |target| {
+        const fns = try twoImportFns(gpa);
+        defer gpa.free(fns);
+        var t = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
+        defer t.deinit();
+        var lk = try linkProgram(t.io(), gpa, target, &test_backend, fns, entry, &.{}, null);
+        defer freeLinked(gpa, &lk);
+        const imports = try importsOf(gpa, lk.data_relocs, .{});
+        defer gpa.free(imports);
+        if (target.os == .macos) {
+            // `aaa`, `main`, then the entry stub, which the process enters at; nothing
+            // imports the C library's start.
+            try testing.expectEqual(@as(usize, 40), lk.text.len);
+            try testing.expectEqual(@as(u32, 36), lk.entry_off);
+            try testing.expectEqual(@as(usize, 2), imports.len);
+            continue;
+        }
+        // `_start` follows the entry stub, every fn keeps its offset, and it binds the C
+        // start.
+        try testing.expectEqual(@as(usize, 56), lk.text.len);
+        try testing.expectEqual(@as(u32, 40), lk.entry_off);
+        try testing.expectEqual(@as(usize, 3), imports.len);
+        try testing.expectEqualStrings("__libc_start_main", imports[0].name);
+    }
+}
+
 test "one writer lookup decides which object formats toy emits" {
     try testing.expect(writerOf(.macho) != null);
-    try testing.expect(writerOf(.elf) == null);
+    try testing.expect(writerOf(.elf) != null);
     try testing.expect(canEmit(.aarch64_macos));
-    try testing.expect(!canEmit(.aarch64_linux));
+    try testing.expect(canEmit(.aarch64_linux));
+    try testing.expect(!canEmit(.x86_64_linux));
 }
 
 test "backend spike: a 2-import (labs+write) image is byte-identical at -j1 and -jN" {
@@ -664,14 +740,14 @@ test "backend determinism: the gc stack-map table (riding __cstring) is byte-ide
     defer gpa.free(fns_serial);
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, &test_backend, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, .aarch64_macos, &test_backend, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try gcFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, &test_backend, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, .aarch64_macos, &test_backend, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);
@@ -713,14 +789,14 @@ test "backend determinism: linkProgram is byte-identical at -j1 and -jN across e
     defer gpa.free(fns_serial); // linkProgram consumes the elements, not the slice
     var t_serial = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(0) });
     defer t_serial.deinit();
-    var serial = try linkProgram(t_serial.io(), gpa, &test_backend, fns_serial, entry, &.{}, null);
+    var serial = try linkProgram(t_serial.io(), gpa, .aarch64_macos, &test_backend, fns_serial, entry, &.{}, null);
     defer freeLinked(gpa, &serial);
 
     const fns_par = try detFns(gpa);
     defer gpa.free(fns_par);
     var t_par = std.Io.Threaded.init(gpa, .{ .concurrent_limit = .limited(8) });
     defer t_par.deinit();
-    var parallel_lk = try linkProgram(t_par.io(), gpa, &test_backend, fns_par, entry, &.{}, null);
+    var parallel_lk = try linkProgram(t_par.io(), gpa, .aarch64_macos, &test_backend, fns_par, entry, &.{}, null);
     defer freeLinked(gpa, &parallel_lk);
 
     try testing.expectEqualSlices(u8, serial.text, parallel_lk.text);

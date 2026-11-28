@@ -102,6 +102,79 @@ pub fn spillStore(r: Reg, ref: Mir.FrameRef, line: u32) Inst {
     return .{ .op = .{ .store = .{ .rt = r, .mem = Mir.Mem.frame(ref, 0) } }, .line = line };
 }
 
+/// The fn the loader calls in `main`'s place, with argc in x0 and argv in x1 (dyld, and
+/// glibc's `__libc_start_main`): it stores both in the control block words core reads
+/// (#60 T10), then tail-jumps to `main`, so `main` returns straight to the loader and
+/// keeps toy's no-param convention for calls from toy code. Caller owns the result.
+pub fn entryStub(gpa: std.mem.Allocator, main: Link.SymName) error{OutOfMemory}!Link.FnCode {
+    comptime std.debug.assert(Link.argv_off == Link.argc_off + 8);
+    const words = [_]u32{
+        Aarch64.adrp(16, 0),
+        Aarch64.addImm(16, 16, 0),
+        Aarch64.strRegUoff(0, 16, 0),
+        Aarch64.strRegUoff(1, 16, 8),
+        Aarch64.b(0),
+    };
+    const code = try gpa.alloc(u8, words.len * 4);
+    errdefer gpa.free(code);
+    for (words, 0..) |w, i| std.mem.writeInt(u32, code[i * 4 ..][0..4], w, .little);
+    const rels = try gpa.alloc(Link.Reloc, 3);
+    errdefer gpa.free(rels);
+    const target = try gpa.dupe(u8, main.name);
+    errdefer gpa.free(target);
+    const name = try gpa.dupe(u8, "_toy_entry");
+    rels[0] = .{ .site = 0, .target = .{ .data = Link.argc_off }, .kind = reloc.of(.adrp_page) };
+    rels[1] = .{ .site = 4, .target = .{ .data = Link.argc_off }, .kind = reloc.of(.add_lo12) };
+    rels[2] = .{ .site = 16, .target = .{ .func = .{ .kind = main.kind, .name = target } }, .kind = reloc.of(.jump26) };
+    return .{ .sym = .{ .kind = .builtin, .name = name }, .code = code, .relocs = rels, .literals = &.{} };
+}
+
+/// The `_start` a glibc process enters at, as glibc's `csu/start.S` writes it (#60 T9):
+/// glibc must finish its own setup before `main`, so `_start` hands `entry` (the
+/// `entryStub` in `main`'s place) to
+/// `__libc_start_main(entry, argc, argv, init, fini, rtld_fini, stack_end)`, which calls
+/// `exit` with what `main` returns. The kernel leaves argc at `[sp]` with argv above it,
+/// and the dynamic linker's finalizer in x0. A zero frame record ends every stack walk
+/// here. Caller owns the result.
+pub fn startStub(gpa: std.mem.Allocator, entry: Link.SymName) error{OutOfMemory}!Link.FnCode {
+    const words = [_]u32{
+        Aarch64.movz(Aarch64.FP, 0, 0),
+        Aarch64.movz(Aarch64.LR, 0, 0),
+        Aarch64.movReg(5, 0),
+        Aarch64.ldrSp(1, 0),
+        Aarch64.addImm(2, Aarch64.SP, 8),
+        Aarch64.addImm(6, Aarch64.SP, 0),
+        Aarch64.adrp(0, 0),
+        Aarch64.addImm(0, 0, 0),
+        Aarch64.movz(3, 0, 0),
+        Aarch64.movz(4, 0, 0),
+        Aarch64.adrp(16, 0),
+        Aarch64.ldrRegUoff(16, 16, 0),
+        Aarch64.blr(16),
+        Aarch64.brk0,
+    };
+    const code = try gpa.alloc(u8, words.len * 4);
+    errdefer gpa.free(code);
+    for (words, 0..) |w, i| std.mem.writeInt(u32, code[i * 4 ..][0..4], w, .little);
+    const rels = try gpa.alloc(Link.Reloc, 4);
+    var named: usize = 0;
+    errdefer {
+        for (rels[0..named]) |r| gpa.free(r.target.name().?);
+        gpa.free(rels);
+    }
+    const sites = [_]struct { u32, reloc.Kind, bool }{ .{ 24, .adrp_page, true }, .{ 28, .add_lo12, true }, .{ 40, .adrp_page, false }, .{ 44, .ldr_lo12, false } };
+    for (sites, rels) |st, *r| {
+        const target: Link.SymbolId = if (st[2])
+            .{ .func = .{ .kind = entry.kind, .name = try gpa.dupe(u8, entry.name) } }
+        else
+            .{ .import = .{ .kind = .import, .name = try gpa.dupe(u8, "__libc_start_main") } };
+        r.* = .{ .site = st[0], .target = target, .kind = reloc.of(st[1]) };
+        named += 1;
+    }
+    const name = try gpa.dupe(u8, "_start");
+    return .{ .sym = .{ .kind = .builtin, .name = name }, .code = code, .relocs = rels, .literals = &.{} };
+}
+
 const testing = std.testing;
 const Ir = @import("../../../ir/Ir.zig");
 const types = @import("../../../types.zig");
@@ -523,4 +596,47 @@ test {
     _ = Emit;
     _ = Peephole;
     _ = reloc;
+}
+
+test "the entry stub stores argc and argv in the control block and tail-jumps to main" {
+    const gpa = testing.allocator;
+    var fc = try entryStub(gpa, .{ .kind = .user_fn, .name = "main" });
+    defer fc.deinit(gpa);
+    const w = wordsOf(fc);
+    // Reference words from GNU as.
+    try testing.expectEqual(@as(u32, 0xF9000200), w[2]); // str x0, [x16]
+    try testing.expectEqual(@as(u32, 0xF9000601), w[3]); // str x1, [x16, #8]
+    try testing.expectEqual(@as(u32, 0x14000000), w[4]); // b .
+    try testing.expectEqual(@as(usize, 3), fc.relocs.len);
+    try testing.expectEqual(@as(u32, Link.argc_off), fc.relocs[0].target.data);
+    try testing.expectEqual(reloc.of(.add_lo12), fc.relocs[1].kind);
+    try testing.expectEqualStrings("main", fc.relocs[2].target.func.name);
+    try testing.expectEqual(reloc.of(.jump26), fc.relocs[2].kind);
+    try testing.expectEqual(@as(u32, 16), fc.relocs[2].site);
+}
+
+test "the glibc _start sets up __libc_start_main's arguments as crt1.o does and never returns" {
+    const gpa = testing.allocator;
+    var fc = try startStub(gpa, .{ .kind = .user_fn, .name = "main" });
+    defer fc.deinit(gpa);
+    try testing.expectEqualStrings("_start", fc.sym.name);
+    const w = wordsOf(fc);
+    // Reference words from GNU as for glibc's aarch64 start.S.
+    try testing.expectEqual(@as(u32, 0xD280001D), w[0]); // mov x29, #0
+    try testing.expectEqual(@as(u32, 0xD280001E), w[1]); // mov x30, #0
+    try testing.expectEqual(@as(u32, 0xAA0003E5), w[2]); // mov x5, x0
+    try testing.expectEqual(@as(u32, 0xF94003E1), w[3]); // ldr x1, [sp]
+    try testing.expectEqual(@as(u32, 0x910023E2), w[4]); // add x2, sp, #8
+    try testing.expectEqual(@as(u32, 0x910003E6), w[5]); // mov x6, sp
+    try testing.expectEqual(@as(u32, 0xD2800003), w[8]); // mov x3, #0
+    try testing.expectEqual(@as(u32, 0xD2800004), w[9]); // mov x4, #0
+    try testing.expectEqual(@as(u32, 0xD63F0200), w[12]); // blr x16
+    try testing.expectEqual(Aarch64.brk0, w[13]);
+    try testing.expectEqual(@as(usize, 4), fc.relocs.len);
+    try testing.expectEqualStrings("main", fc.relocs[0].target.func.name);
+    try testing.expectEqual(@as(u32, 24), fc.relocs[0].site);
+    try testing.expectEqualStrings("main", fc.relocs[1].target.func.name);
+    try testing.expectEqualStrings("__libc_start_main", fc.relocs[2].target.import.name);
+    try testing.expectEqual(reloc.of(.ldr_lo12), fc.relocs[3].kind);
+    try testing.expectEqual(@as(u32, 44), fc.relocs[3].site);
 }

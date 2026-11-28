@@ -525,9 +525,8 @@ pub fn encode(gpa: std.mem.Allocator, func: *const Func, frame: *const Mir.Frame
     try e.word(Aarch64.stpFpLrPre);
     try e.word(Aarch64.movFpSp);
     // `main` arms the stack overflow handler before it opens its own frame, which may be
-    // the one that does not fit. LC_MAIN enters it straight from dyld, so nothing runs
-    // earlier; it takes no params and has saved nothing yet, so the call clobbers nothing
-    // live.
+    // the one that does not fit. Only the entry stub, which opens no frame, runs earlier;
+    // it takes no params and has saved nothing yet, so the call clobbers nothing live.
     if (guard_stack) {
         const t = try e.funcTarget(.{ .kind = .user_fn, .name = StdNames.RuntimeFn.stack_guard.name() });
         e.reloc(t, .call26) catch |err| {

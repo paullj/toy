@@ -36,6 +36,14 @@
 //!     and `sret_reg` (`gpr_args[0]` under `sret_uses_gpr`).
 //!   * `instCount(code)` — how many instructions encoded `code` holds, for
 //!     `--opt-stats`.
+//!   * `entryStub(gpa, main)` — the fn the loader calls in `main`'s place with argc and
+//!     argv in its first two argument registers: it stores them in the control block
+//!     words core reads (#60 T10), then jumps to `main`, which keeps toy's own no-param
+//!     convention so toy code may call it too.
+//!   * `startStub(gpa, entry)` — the `_start` of a target whose C library starts the
+//!     process (glibc, #60 T9): it passes `entry` and the kernel's arguments to
+//!     `__libc_start_main`. A target whose loader calls the entry itself (dyld) never
+//!     asks for it.
 //!
 //! `Backend` is what the rest of the compiler holds: one per ISA and C convention, picked
 //! by `of` from the target.
@@ -78,7 +86,11 @@ pub const Backend = struct {
     fits: FitsFn,
     relocs: Link.Patcher,
     inst_count: *const fn (code: []const u8) usize,
+    entry_stub: StubFn,
+    start_stub: StubFn,
 };
+
+pub const StubFn = *const fn (gpa: std.mem.Allocator, callee: Link.SymName) error{OutOfMemory}!Link.FnCode;
 
 /// The backend for `target`, or null when toy has no ISA module for its arch, or the
 /// module does not implement its C convention, yet (the driver stops such a build with
@@ -130,7 +142,7 @@ pub fn check(comptime I: type) void {
     const decls = .{
         "Inst",         "Isel",        "Peephole",  "Emit", "reserved",  "allocatable",
         "callee_saved", "moveScratch", "move",      "jump", "spillLoad", "spillStore",
-        "relocs",       "c_abis",      "instCount", "abi",
+        "relocs",       "c_abis",      "instCount", "abi",  "startStub", "entryStub",
     };
     inline for (decls) |d| if (!@hasDecl(I, d)) @compileError(@typeName(I) ++ " is no ISA module: it has no `" ++ d ++ "`");
     inline for (.{ "caller_saved", "branchTarget", "setBranchTarget", "copyRegs", "operands", "callRegs" }) |d|
@@ -164,6 +176,10 @@ pub fn check(comptime I: type) void {
     }
     const relocs: Link.Patcher = I.relocs;
     const c_abis: []const Target.CAbi = &I.c_abis;
+    const entry_stub: StubFn = I.entryStub;
+    const start_stub: StubFn = I.startStub;
+    _ = entry_stub;
+    _ = start_stub;
     _ = relocs;
     _ = c_abis;
 }
