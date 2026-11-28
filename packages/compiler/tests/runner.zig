@@ -408,11 +408,15 @@ fn expectScriptRuns(gpa: std.mem.Allocator, io: Io, r: Runner, comptime dir: []c
         .{ .body = "kill -HUP $$", .term = .{ .signal = @enumFromInt(1) } },
         .{ .body = "kill -ABRT $$", .term = .{ .signal = @enumFromInt(6) } },
     };
-    for (ends) |e| {
+    for (ends, 0..) |e, i| {
         const body = try std.fmt.allocPrint(gpa, "#!/bin/sh\n{s}\n", .{e.body});
         defer gpa.free(body);
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/bin/end", .data = body, .flags = .{ .permissions = perms } });
-        const end = try Io.Dir.cwd().realPathFileAlloc(io, dir ++ "/bin/end", gpa);
+        // One file per case: rewriting one path with a different length can reach the
+        // container stale through the bind mount, and sh then exits 2 on a bad script.
+        const sub = try std.fmt.allocPrint(gpa, dir ++ "/bin/end{d}", .{i});
+        defer gpa.free(sub);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sub, .data = body, .flags = .{ .permissions = perms } });
+        const end = try Io.Dir.cwd().realPathFileAlloc(io, sub, gpa);
         defer gpa.free(end);
         const got = try run(r, gpa, io, .{ .argv = &.{end} });
         defer gpa.free(got.stdout);
