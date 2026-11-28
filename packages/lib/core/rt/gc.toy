@@ -344,9 +344,15 @@ fn bias(root: int, slot: int) -> int {
 # A failed mapping (MAP_FAILED, -1) would put the map, an arena or a large object at
 # address -1, where the next write lands far from any mapping, so it panics here instead.
 fn map_pages(len: int) -> int {
-    at := unsafe { mmap(0, len, 3, when target.os { .macos -> 4098, .linux -> 34 }, -1, 0) }
+    at := map_anon(len)
     if at == -1 { panic("out of memory") }
     return at
+}
+
+# A private, anonymous, read-write mapping of `len` bytes, or -1. MAP_PRIVATE|MAP_ANONYMOUS
+# is 0x1002 on Darwin and 0x22 on Linux; core/rt/stack maps its alternate stack here too.
+pub fn map_anon(len: int) -> int {
+    return unsafe { mmap(0, len, 3, when target.os { .macos -> 0x1002, .linux -> 0x22 }, -1, 0) }
 }
 
 fn span_shift() -> int { return 14 }

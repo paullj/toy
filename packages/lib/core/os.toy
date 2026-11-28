@@ -1,21 +1,22 @@
-# The quarantined libSystem process clients: argv, the environment, errno, exit and the
-# clocks. C strings are copied into gc strs on the way in (D66), so no toy str ever points
-# into C memory that a later setenv or exit could free.
+# The quarantined C library process clients: argv, the environment, errno, exit and the
+# clocks. Each extern is private, so a binding that differs per OS changes only the wrapper
+# here (#421). C strings are copied into gc strs on the way in (D66), so no toy str ever
+# points into C memory that a later setenv or exit could free.
 import core/target
 import core/text
 
-pub extern fn _NSGetArgc() -> rawptr
-pub extern fn _NSGetArgv() -> rawptr
 # getenv returns a nullable char*. Typed int so null is a plain 0 compare; `offset(p, 0)`
 # turns a non-null one back into the rawptr from_cstr reads.
-pub extern fn getenv(name: rawptr) -> int
-pub extern fn strlen(s: rawptr) -> int
-pub extern fn exit(code: int) -> never
-pub extern fn __error() -> rawptr
-pub extern fn __errno_location() -> rawptr
-# Returns a uint64, which stays positive in an int for the next 292 years.
-pub extern fn clock_gettime_nsec_np(clock: int) -> int
-pub extern fn nanosleep(req: rawptr, rem: rawptr) -> int
+extern fn getenv(name: rawptr) -> int
+extern fn strlen(s: rawptr) -> int
+extern fn exit(code: int) -> never
+extern fn __error() -> rawptr
+extern fn __errno_location() -> rawptr
+extern fn clock_gettime(clock: int32, mut ts: Timespec) -> int32
+extern fn nanosleep(req: rawptr, rem: rawptr) -> int
+
+# struct timespec on 64-bit macOS and Linux alike: time_t and long are both 8 bytes.
+extern struct Timespec { sec: int, nsec: int }
 
 # A C `int` is 4 bytes and `load` reads 8, so the next 4 would be whatever follows it.
 fn load_i32(p: rawptr) -> int {
@@ -77,7 +78,7 @@ pub fn cstr_to_str(c: cstr) -> str {
     return from_cstr(cstr_addr(c))
 }
 
-# The calling thread's errno, as the last failed libSystem call left it.
+# The calling thread's errno, as the last failed C library call left it.
 pub fn errno() -> int {
     return load_i32(errno_loc())
 }
@@ -96,13 +97,17 @@ pub fn exit_process(code: int) -> never {
     unsafe { exit(code) }
 }
 
+# The target's entry stores the process's argc and argv in control block words 216 and
+# 224 before `main` runs (#60 T10). argc is a C `int`, which arrived with the top half of
+# its register unspecified.
 pub fn argc() -> int {
-    return load_i32(unsafe { _NSGetArgc() })
+    n: int = unsafe { load(control_block() + 216) }
+    return n & 0xFFFF_FFFF
 }
 
 # argv[i] as a copied str; the caller keeps `0 <= i < argc()`.
 pub fn argv(i: int) -> str {
-    base: int = unsafe { load(_NSGetArgv()) }
+    base: int = unsafe { load(control_block() + 224) }
     p: int = unsafe { load(offset(base, i * 8)) }
     return from_cstr(offset(p, 0))
 }
@@ -114,15 +119,22 @@ pub fn env(name: str) -> Option[str] {
     return Option.some(from_cstr(offset(p, 0)))
 }
 
-# Darwin's CLOCK_MONOTONIC (6). It keeps counting while the machine sleeps, so an elapsed
-# time includes the sleep, as a wall-clock duration should.
+# CLOCK_MONOTONIC, whose number differs per OS. Darwin's keeps counting while the machine
+# sleeps, so an elapsed time there includes the sleep; Linux's stops while it is suspended.
 pub fn monotonic_ns() -> int {
-    return unsafe { clock_gettime_nsec_np(6) }
+    return now_ns(when target.os { .macos -> 6, .linux -> 1 })
 }
 
-# Darwin's CLOCK_REALTIME (0): nanoseconds since 1970.
+# CLOCK_REALTIME, 0 on both: nanoseconds since 1970.
 pub fn realtime_ns() -> int {
-    return unsafe { clock_gettime_nsec_np(0) }
+    return now_ns(0)
+}
+
+# A read of `clock` can fail only for an unknown clock id, which these wrappers never pass.
+fn now_ns(clock: int32) -> int {
+    ts := Timespec { sec: 0, nsec: 0 }
+    unsafe { clock_gettime(clock, ts) }
+    return ts.sec * 1_000_000_000 + ts.nsec
 }
 
 # Sleeps at least `ns` nanoseconds. A signal cuts nanosleep short and leaves what remains in
@@ -145,7 +157,7 @@ pub fn sleep_ns(ns: int) {
 
 # getentropy(2) fills at most 256 bytes and fails only for a bad buffer or a larger
 # request, so a failure here is a bug, not a condition a caller could handle.
-pub extern fn getentropy(buf: rawptr, len: int) -> int
+extern fn getentropy(buf: rawptr, len: int) -> int
 
 # 64 bits from the kernel's CSPRNG.
 pub fn entropy_u64() -> uint64 {

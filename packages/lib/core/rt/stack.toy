@@ -4,74 +4,103 @@
 # panics with "stack overflow" and a backtrace, as Go and Rust do; the process would
 # otherwise die of SIGSEGV with nothing on stderr.
 #
-# Darwin arm64 layouts, by byte offset:
+# The C structs are written and read by byte offset, which differs per OS; each offset
+# below is the C library's layout for 64-bit code.
+#
+# Darwin arm64 (<sys/signal.h>, <sys/_types/_sigaltstack.h>, <mach/arm/_structs.h>):
 #   struct sigaction  0 handler, 8 mask (u32), 12 flags (i32)
-#   stack_t           0 base, 8 size, 16 flags (i32)
-#   siginfo_t         24 the faulting address
-#   ucontext_t        48 the mcontext pointer
-#   mcontext          248 fp, 256 lr, 264 sp, 272 pc
+#   stack_t           0 ss_sp, 8 ss_size, 16 ss_flags (i32)
+#   siginfo_t         24 si_addr, after si_signo, si_errno, si_code, si_pid, si_uid and
+#                     si_status
+#   ucontext_t        48 uc_mcontext, a pointer
+#   mcontext          16 the thread state x0..x28, so 248 fp (x29), 256 lr, 264 sp, 272 pc
+#
+# glibc aarch64-linux:
+#   struct sigaction  0 handler, 8 sa_mask (a 1024-bit sigset_t, 128 bytes), 136 sa_flags
+#                     (i32), 144 sa_restorer; 152 bytes
+#                     (sysdeps/unix/sysv/linux/bits/sigaction.h)
+#   stack_t           0 ss_sp, 8 ss_flags (i32), 16 ss_size (bits/types/stack_t.h)
+#   siginfo_t         16 si_addr, after si_signo, si_errno, si_code and the 64-bit pad int
+#                     (bits/types/siginfo_t.h)
+#   ucontext_t        176 uc_mcontext, inline: uc_flags 0, uc_link 8, uc_stack 16,
+#                     uc_sigmask 40 (128 bytes), then the mcontext_t, 16-aligned for its
+#                     __reserved area (sysdeps/unix/sysv/linux/aarch64/sys/ucontext.h; the
+#                     kernel's struct ucontext pads its 8-byte sigset to the same 176)
+#   mcontext          0 fault_address, 8 regs[31], so 240 fp (x29), 256 sp, 264 pc
+#
+# glibc x86_64-linux, for when that target walks frames here: sigaction, stack_t,
+# siginfo_t, the SA_ flags and the signal numbers as aarch64-linux; ucontext_t 40
+# uc_mcontext inline (uc_flags, uc_link, uc_stack before it), whose gregs (8 bytes each)
+# hold REG_RBP (10) at 80, REG_RSP (15) at 120 and REG_RIP (16) at 128 from the mcontext
+# (sysdeps/unix/sysv/linux/x86/sys/ucontext.h). Its call pushes the return address, so the
+# fault's caller is found differently there.
 
 import core/rt/frames
-
-extern struct SigAction { handler: int, mask: int32, flags: int32 }
-extern struct AltStack { base: int, size: int, flags: int }
+import core/rt/gc
+import core/target
 
 extern fn signal(sig: int32, handler: fn(int32, int, int)) -> int
-extern fn sigaction(sig: int32, mut act: SigAction, mut old: SigAction) -> int32
-extern fn sigaltstack(mut ss: AltStack, mut old: AltStack) -> int32
-extern fn mmap(addr: int, len: int, prot: int, flags: int, fd: int, off: int) -> int
+extern fn sigaction(sig: int32, act: int, old: int) -> int32
+extern fn sigaltstack(ss: int, old: int) -> int32
 
 pub fn guard() {
     # Every call of `main` calls this, so a `main` that recurses must not map a stack and
-    # install the handler again each time.
+    # install the handler again each time. Once armed, the word holds the mapping's base.
     armed := control_block() + 232
     if word(armed) != 0 { return }
     set_word(armed, 1)
 
-    # Darwin's SIGSTKSZ: room for the signal frame the kernel pushes, `on_fault` and
-    # `panic` with its calls to write. It is mapped (read-write, private, anonymous)
-    # rather than in __bss, so a program that never overflows pays only for an untouched
-    # mapping.
+    # SIGSTKSZ on Darwin: room for the signal frame the kernel pushes, `on_fault` and
+    # `panic` with its calls to write. It is mapped (read-write, private, anonymous) rather
+    # than in __bss, so a program that never overflows pays only for an untouched mapping.
+    # No struct's size or field order is the same on every OS, so the mapping starts with
+    # the ones this module hands to the C library, each 16-byte aligned with room for the
+    # largest layout above: at 0 the stack_t, at 32 the sigaction that installs `on_fault`
+    # and at 192 an all-zero one (SIG_DFL) for `on_fault` to put back. The zero fill is
+    # each one's empty mask and unset fields. The alternate stack is the rest, from 352.
     size := 131072
-    base := unsafe { mmap(0, size, 3, 4098, -1, 0) }
+    base := gc.map_anon(352 + size)
     if base == -1 { return }
-    old_ss := AltStack { base: 0, size: 0, flags: 0 }
-    ss := AltStack { base: base, size: size, flags: 0 }
-    unsafe { sigaltstack(ss, old_ss) }
+    set_word(armed, base)
+    set_word(base, base + 352)
+    set_word(base + when target.os { .macos -> 8, .linux -> 16 }, size)
+    unsafe { sigaltstack(base, 0) }
 
     # `signal` takes `on_fault` as a C function pointer, but cannot ask for its own stack
     # or for the faulting address. Installing it twice hands back that pointer as an int,
     # which `sigaction` then installs with both.
     sigsegv: int32 = 11
-    sigbus: int32 = 10
+    sigbus: int32 = when target.os { .macos -> 10, .linux -> 7 }
     unsafe { signal(sigsegv, on_fault) }
-    handler := unsafe { signal(sigsegv, on_fault) }
-    old := SigAction { handler: 0, mask: 0, flags: 0 }
+    act := base + 32
+    set_word(act, unsafe { signal(sigsegv, on_fault) })
     # SA_ONSTACK | SA_SIGINFO.
-    act := SigAction { handler: handler, mask: 0, flags: 65 }
-    unsafe { sigaction(sigsegv, act, old) }
-    unsafe { sigaction(sigbus, act, old) }
+    flags := when target.os { .macos -> 0x1 | 0x40, .linux -> 0x0800_0000 | 0x4 }
+    unsafe { store_u32(act + when target.os { .macos -> 12, .linux -> 136 }, flags) }
+    unsafe { sigaction(sigsegv, act, 0) }
+    unsafe { sigaction(sigbus, act, 0) }
 }
 
 fn on_fault(sig: int32, info: int, uc: int) {
-    mc := word(uc + 48)
+    mc := when target.os { .macos -> word(uc + 48), .linux -> uc + 176 }
     # An overflow faults within a page of the stack pointer: a prologue touches each page
     # it opens as it lowers sp. Any other address that near sp is live stack, which does
     # not fault, so this needs no stack bounds (and no pthread imports to find them).
-    near := word(info + 24) - word(mc + 264)
+    fault := word(info + when target.os { .macos -> 24, .linux -> 16 })
+    near := fault - word(mc + when target.os { .macos -> 264, .linux -> 256 })
     if near < -65536 || near >= 65536 {
         # Not an overflow: put the default action back, and returning re-runs the faulting
         # instruction, which then kills the process as it would have without the handler.
-        old := SigAction { handler: 0, mask: 0, flags: 0 }
-        dfl := SigAction { handler: 0, mask: 0, flags: 0 }
-        unsafe { sigaction(sig, dfl, old) }
+        unsafe { sigaction(sig, word(control_block() + 232) + 192, 0) }
         return
     }
     # `panic` walks the frames from its caller. Redirecting this frame to the faulting
     # one, as if the faulting instruction had been a call, makes the backtrace go on from
     # the fn that overflowed rather than into the signal trampoline. The trace still opens
     # with this fn, which panic's own record names.
-    frames.redirect(frame_address(), word(mc + 248), word(mc + 272))
+    fp := word(mc + when target.os { .macos -> 248, .linux -> 240 })
+    pc := word(mc + when target.os { .macos -> 272, .linux -> 264 })
+    frames.redirect(frame_address(), fp, pc)
     panic("stack overflow")
 }
 

@@ -166,3 +166,81 @@ test "hello, an allocating program and a panic run on the test target, debug and
         }
     };
 }
+
+const bindings =
+    \\import std/fs
+    \\import std/io
+    \\import std/os
+    \\import std/time
+    \\import std/vec
+    \\
+    \\fn main() -> int {
+    \\    args := os.args()
+    \\    io.println(args.len())
+    \\    io.println(args[1].concat(args[2]))
+    \\    match os.env("TOY_BINDINGS") {
+    \\        .some(v) -> io.println(v),
+    \\        .none -> io.println("unset"),
+    \\    }
+    \\    io.println(os.env("TOY_BINDINGS_UNSET").is_none())
+    \\    t0 := time.now()
+    \\    time.sleep(time.ms(30))
+    \\    el := t0.elapsed().ms()
+    \\    io.println(el >= 30 && el < 10000)
+    \\    io.println(time.unix() > 1_700_000_000)
+    \\    match fs.write_file("bindings.txt", "ab") { .ok(_) -> {}, .err(_) -> { return 2 } }
+    \\    match fs.append_file("bindings.txt", "cd") { .ok(_) -> {}, .err(_) -> { return 3 } }
+    \\    match fs.read_file("bindings.txt") { .ok(s) -> io.println(s), .err(_) -> { return 4 } }
+    \\    match fs.remove("bindings.txt") { .ok(_) -> {}, .err(_) -> { return 5 } }
+    \\    match fs.append_file("bindings.txt", "new") { .ok(_) -> {}, .err(_) -> { return 6 } }
+    \\    match fs.read_file("bindings.txt") { .ok(s) -> io.println(s), .err(_) -> { return 7 } }
+    \\    match fs.remove("bindings.txt") { .ok(_) -> {}, .err(_) -> { return 8 } }
+    \\    io.println(fs.exists("bindings.txt"))
+    \\    return 0
+    \\}
+    \\
+;
+
+const overflowing =
+    \\fn deep(n: int) -> int {
+    \\    if n == 0 { return 0 }
+    \\    return deep(n - 1) + 1
+    \\}
+    \\
+    \\fn main() -> int {
+    \\    return deep(100000000)
+    \\}
+    \\
+;
+
+test "core's per-OS bindings: args, env, clocks, files and the stack overflow guard run on the test target" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try harness.skipUnlessRunnable(io);
+    const dir = ".zig-cache/tmp/elf-bindings";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("TOY_BINDINGS", "from env");
+    for ([_][]const []const u8{ &.{"-O0"}, &.{"-O1"}, &.{ "-O1", "--release" } }) |flags| {
+        errdefer std.debug.print("flags {s} {s}\n", .{ flags[0], if (flags.len > 1) flags[1] else "" });
+        const prog = try harness.compile(gpa, io, dir, bindings, flags);
+        defer gpa.free(prog);
+        const r = try harness.run(gpa, io, .{ .argv = &.{ prog, "x", "y" }, .cwd = std.fs.path.dirname(prog), .environ_map = &env });
+        defer gpa.free(r.stdout);
+        defer gpa.free(r.stderr);
+        try testing.expectEqualStrings("3\nxy\nfrom env\ntrue\ntrue\ntrue\nabcd\nnew\nfalse\n", r.stdout);
+        try testing.expectEqualStrings("", r.stderr);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+
+        const ov = try harness.compile(gpa, io, dir, overflowing, flags);
+        defer gpa.free(ov);
+        const o = try harness.run(gpa, io, .{ .argv = &.{ov} });
+        defer gpa.free(o.stdout);
+        defer gpa.free(o.stderr);
+        try testing.expect(std.mem.startsWith(u8, o.stderr, "stack overflow\n"));
+        try testing.expect(std.mem.indexOf(u8, o.stderr, ".deep\n") != null);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, o.term);
+    }
+}

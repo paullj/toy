@@ -1,4 +1,4 @@
-# The quarantined libSystem read and write clients: std reaches the fds through the safe
+# The quarantined C library read and write clients: std reaches the fds through the safe
 # wrappers, never naming an extern. A `str` arg spreads to (buf,len) in the next two arg
 # registers, matching C write(fd, buf, count).
 import core/text

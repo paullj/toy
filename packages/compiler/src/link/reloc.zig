@@ -196,6 +196,17 @@ test "every control block field core/rt/gc names fits in __bss" {
     try testing.expect(fields >= 15);
 }
 
+test "core/os reads argc and argv from the words the entry stores them in" {
+    const src = for (@import("bundled_std").modules) |m| {
+        if (std.mem.eql(u8, m.path, "core/os")) break m.source;
+    } else return error.TestUnexpectedResult;
+    var buf: [64]u8 = undefined;
+    for ([_]u32{ argc_off, argv_off }) |off| {
+        try testing.expect(std.mem.indexOf(u8, src, try std.fmt.bufPrint(&buf, "load(control_block() + {d})", .{off})) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, src, "_NSGetArg") == null);
+}
+
 /// The integer a one-line .toy fn returns, as in `fn f() -> int { return 13 }`, or the
 /// factor in `{ return 3 * class_count() }`.
 fn returnedInt(src: []const u8, head: []const u8) !usize {

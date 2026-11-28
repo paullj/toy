@@ -1,18 +1,19 @@
-# The quarantined libSystem file clients. Every wrapper returns its result (an fd, a byte
+# The quarantined C library file clients. Every wrapper returns its result (an fd, a byte
 # count or 0) or a negated errno, so std/fs maps a failure to an IoError without naming an
 # extern. Paths go through `os.to_cstr`; the caller has already rejected a NUL in them.
 import core/os
 import core/sys
+import core/target
 import core/text
 
 # open(2) is variadic: on arm64 Darwin its mode goes on the stack, which a toy extern call
 # cannot place (#72). So `open` never gets O_CREAT, and creating goes through creat(2),
 # which takes the mode as a plain second argument.
-pub extern fn open(path: rawptr, flags: int) -> int
-pub extern fn creat(path: rawptr, mode: int) -> int
-pub extern fn close(fd: int) -> int
-pub extern fn unlink(path: rawptr) -> int
-pub extern fn access(path: rawptr, mode: int) -> int
+extern fn open(path: rawptr, flags: int) -> int
+extern fn creat(path: rawptr, mode: int) -> int
+extern fn close(fd: int) -> int
+extern fn unlink(path: rawptr) -> int
+extern fn access(path: rawptr, mode: int) -> int
 
 # These calls return a C `int` in w0, and AAPCS64 leaves the top half of x0 unspecified, so
 # a -1 could read as 4294967295 without the sign extension.
@@ -32,9 +33,10 @@ pub fn open_read(path: str) -> int {
     return or_errno(unsafe { open(os.to_cstr(path), 0) })
 }
 
-# Darwin's O_WRONLY (1) | O_APPEND (8).
+# O_WRONLY (1 on both) | O_APPEND (8 on Darwin, 0x400 on Linux for aarch64 and x86_64).
 pub fn open_append(path: str) -> int {
-    return or_errno(unsafe { open(os.to_cstr(path), 9) })
+    flags := when target.os { .macos -> 9, .linux -> 0x401 }
+    return or_errno(unsafe { open(os.to_cstr(path), flags) })
 }
 
 # Creates `path` or truncates it, as 0644 (420), rw-r--r-- before the umask.
